@@ -1,0 +1,18 @@
+{
+  "image_id": "sha256:7e848fac16c8bf5156f584120ffe71d27b536f551668da97daa366ef63107e9a",
+  "python_base_digest": "sha256:51dafde81dbdb6ebde285137a295cf18a47ca95234fe388a343719cb97305b3d",
+  "packages": [
+    "certifi==2026.7.22",
+    "charset-normalizer==3.5.1",
+    "idna==3.20",
+    "PySocks==1.7.1",
+    "requests==2.34.2",
+    "urllib3==2.8.0"
+  ],
+  "source_sha256": {
+    "bridge.py": "162fc5897d53eff73f62edf13f0a7865aeb80fb082302596701cd158c96559d2",
+    "worker.py": "52b59f0d742edfabe431df90d5a78ad0336668f4ef326dbe8a499112503bc440",
+    "common.py": "569a3710ffab0db35feceff90d69e931db96b44f236a234c5d79743c2db67ec3",
+    "mas.py": "9914d58af402a026b8952e7c651f509831fdbdfc71310f86bfe864b019557877"
+  }
+}

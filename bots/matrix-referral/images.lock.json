@@ -1,0 +1,10 @@
+{
+  "image_id": "sha256:ae540b1be4f414a56d12cd40f4384890d76560444a7f72b8a9abc9ea4703f982",
+  "node_base": "FROM node:24-bookworm-slim@sha256:0e0ff40c39bc087845bfb27465a0df4ea419520094bc35842ff83dd8cbe6f9b6",
+  "source_sha256": {
+    "main.js": "a65f42d8e194cb30480c37d11efa7706154e5afdc07c8c0c96cc5fa2e30c36af",
+    "logic.js": "4d44eb543fdccc432d8d90b3fc1eb5fd7b2800a960377810f5a0971508ef8e0e",
+    "signing.js": "9c695aacf196019e3b753b8a0022638f80ed129fb474aa8f93478c205f914066",
+    "package-lock.json": "b2fa97d4f57f852ee4671dfd4f228fcb3b5cff26c3937bbf798a015bf847da4d"
+  }
+}

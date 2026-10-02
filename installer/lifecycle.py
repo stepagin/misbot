@@ -1,0 +1,849 @@
+#!/usr/bin/env python3
+"""Installation lifecycle. Secrets are never written to command output or logs."""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import signal
+import shlex
+import socket
+import subprocess
+import sys
+import tarfile
+import time
+import uuid
+from contextlib import contextmanager, nullcontext
+import referral
+import preflight
+import state_store
+import backup_archive
+import media_transfer
+import media_snapshot
+import vault_cache
+
+def emit(check,**values):
+    line=json.dumps({'check':check,**values})
+    print(line,flush=True)
+    with log.open('a') as handle:handle.write(line+'\n')
+
+
+GENERATION_ERRORS = {
+    'oauth_google_pair_incomplete': 'GOOGLE requires both GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET. Edit {SETTINGS} privately; fill both or clear both to disable Google. Then run: {GENERATE}. Existing data and keys were not changed',
+    'oauth_telegram_pair_incomplete': 'TELEGRAM requires both TELEGRAM_CLIENT_ID and TELEGRAM_CLIENT_SECRET. Edit {SETTINGS} privately; fill both or clear both to disable Telegram. Then run: {GENERATE}. Existing data and keys were not changed',
+    'postgres_identity_mismatch': 'External PostgreSQL identity checkpoint does not match this server; restore the original checkpoint from backup',
+    'postgres_identity_missing': 'Cannot confirm the installed external PostgreSQL destination; restore its checkpoint/config from backup before retrying generate/up',
+    'postgres_destination_changed': 'Changing installed external PostgreSQL host or port requires a separate data migration. Restore the original POSTGRES_HOST/POSTGRES_PORT from your verified backup, then retry install.sh up; keep both datasets and the ownership checkpoint',
+}
+
+
+def run(command,stdin=None,allowed=(0,),configuration_errors=None):
+    # Compose exec can otherwise consume the remaining commands of `ssh ... bash -s`.
+    result=subprocess.run(command,input='' if stdin is None else stdin,capture_output=True,text=True,
+        **state_store.child_process_options())
+    if result.returncode not in allowed:
+        if (Path(command[0]).name == 'docker'
+                and 'Cannot connect to the Docker daemon' in result.stderr):
+            root = Path(globals().get('ROOT', '/opt/matrix-stack'))
+            raise RuntimeError(preflight.docker_unavailable_message(root))
+        if configuration_errors:
+            for line in result.stdout.splitlines():
+                try: record=json.loads(line)
+                except ValueError: continue
+                if (isinstance(record,dict) and record.get('check')=='configuration_input'
+                        and isinstance(record.get('code'),str) and record['code'] in configuration_errors):
+                    # Translate only known codes, never replay child messages/stderr.
+                    root=Path(globals().get('ROOT','/opt/matrix-stack'))
+                    message=configuration_errors[record['code']].replace('{SETTINGS}',str(root/'settings.env')).replace(
+                        '{GENERATE}','sudo bash '+shlex.quote(str(root/'install.sh'))+' generate')
+                    raise RuntimeError(message)
+        # CLI stderr can contain interpolated credentials. Never dump it automatically.
+        raise RuntimeError('Command failed: '+Path(command[0]).name+'; inspect the relevant service logs privately')
+    return result.stdout
+
+
+def state():
+    return json.loads((ROOT/'installation.json').read_text())
+
+
+def dc(*parts,**kwargs):
+    return run(COMPOSE+list(parts),**kwargs)
+
+
+def external_database():
+    return state().get('database_mode') == 'external' or (
+        not state().get('storage_committed') and
+        'POSTGRES_MODE=external' in (ROOT/'settings.env').read_text().splitlines())
+
+
+def postgres_command(tool,*arguments):
+    if external_database():
+        return COMPOSE+['run','--rm','--no-deps','-T','postgres-client',tool,*arguments]
+    return COMPOSE+['exec','-T','postgres',tool,'-U','postgres',*arguments]
+
+
+def postgres(tool,*arguments,stdin=None):
+    return run(postgres_command(tool,*arguments),stdin=stdin)
+
+
+def ownership_check():
+    identifiers=run(['docker','ps','-aq','--filter','label=com.docker.compose.project=matrix-stack']).split()
+    if identifiers:
+        # Docker selects only ownership metadata; do not fetch Config.Env.
+        selected=run(['docker','inspect','--format',
+            '{{json (index .Config.Labels "com.docker.compose.project.working_dir")}}',*identifiers])
+        for line in selected.splitlines():
+            if json.loads(line)!=str(ROOT):
+                raise RuntimeError('Another directory owns the matrix-stack Compose project; refusing to modify it')
+
+
+def down():
+    """Release the owned Compose slot while preserving bind data and journals."""
+    ownership_check()
+    networks=run(['docker','network','ls','--no-trunc','--filter','name=^matrix-stack_default$',
+                  '--format','{{.ID}}']).split()
+    if len(networks)>1:
+        raise RuntimeError('Cannot identify the owned network; keep it and inspect Docker metadata privately')
+    for network in networks:
+        projection='[{{json (index .Labels "com.docker.compose.project")}},{{json (index .Labels "com.docker.compose.network")}},{{json (index .Labels "org.misbot.matrix.installation.directory")}}]'
+        labels=json.loads(run(['docker','network','inspect','--format',projection,network]))
+        if not isinstance(labels,list) or len(labels)!=3 or labels[:2]!=['matrix-stack','default'] or labels[2] not in (str(ROOT),None,''):
+            raise RuntimeError('Another installation owns matrix-stack_default; no containers removed. Keep data and inspect install.sh status')
+        endpoints=run(['docker','network','inspect','--format',
+                       '{{range $id,$endpoint := .Containers}}{{$id}} {{end}}',network]).split()
+        if endpoints:
+            projection='[{{json (index .Config.Labels "com.docker.compose.project")}},{{json (index .Config.Labels "com.docker.compose.project.working_dir")}}]'
+            observed=run(['docker','inspect','--format',projection,*endpoints]).splitlines()
+            if len(observed)!=len(endpoints) or any(json.loads(row)!=['matrix-stack',str(ROOT)] for row in observed):
+                raise RuntimeError('The network has foreign containers; no containers removed. Ask their operator to disconnect them, then retry install.sh down')
+        elif labels[2]!=str(ROOT):
+            raise RuntimeError('Empty legacy network has no ownership evidence; no resources removed')
+    dc('down')  # No volumes, orphan removal, images, files or checkpoint deletion.
+    emit('installation_down',passed=True,data_retained=True,checkpoints_retained=True,
+         next_action='Use install.sh status; to resume use install.sh up in this same directory. If status names a pending operation, follow its recovery command first')
+
+
+def image(role):
+    return json.loads((ROOT/'images.lock.json').read_text())['digests'][role]
+
+
+def wait(check,attempts=60,service='service'):
+    emit('waiting_for_service',service=service,timeout_seconds=attempts*2)
+    for _ in range(attempts):
+        try:
+            if check():return
+        except state_store.OperationInterrupted:raise
+        except Exception:pass
+        time.sleep(2)
+    diagnostic=('sudo docker compose --project-directory '+str(ROOT)+
+                ' -f '+str(ROOT/'compose.yaml')+' logs --tail=100 '+service)
+    raise RuntimeError(service+' did not become ready within '+str(attempts*2)+
+        ' seconds. Inspect logs privately: '+diagnostic+
+        '. Correct the cause, then retry: sudo bash '+str(ROOT/'install.sh')+' up. '+
+        'Keep existing data and secrets; do not run init in a new directory.')
+
+
+def dns_check():
+    metadata=state()
+    referral.validate_saved(ROOT,metadata)
+    preflight.dns_check(metadata['domain'],metadata['public_ip'])
+    emit('dns',hosts=7,passed=True)
+
+
+def upgrade_legacy_network():
+    """Recreate only an attested legacy Compose network; retain all bind data."""
+    networks=run(['docker','network','ls','--no-trunc','--filter','name=^matrix-stack_default$',
+                  '--format','{{.ID}}']).split()
+    if not networks:return
+    if len(networks)!=1:
+        raise RuntimeError('Cannot identify the installer network safely; keep it and inspect Docker network metadata privately')
+    network=networks[0]
+    projection='[{{json (index .Labels "com.docker.compose.project")}},{{json (index .Labels "com.docker.compose.network")}},{{json (index .Labels "org.misbot.matrix.installation.directory")}}]'
+    labels=json.loads(run(['docker','network','inspect','--format',projection,network]))
+    if not isinstance(labels,list) or len(labels)!=3 or labels[:2]!=['matrix-stack','default']:
+        raise RuntimeError('Another resource owns matrix-stack_default; keep its containers/network and resolve the conflict before retrying install.sh up')
+    if labels[2]==str(ROOT):return
+    # Docker's Go template indexes an absent string-valued label as "".
+    # Accept both representations; endpoint ownership remains mandatory.
+    if labels[2] not in (None,''):
+        raise RuntimeError('Another installation owns this Docker network; keep it and use install.sh status before resolving the conflict')
+    endpoints=run(['docker','network','inspect','--format',
+                   '{{range $id,$endpoint := .Containers}}{{$id}} {{end}}',network]).split()
+    if not endpoints:
+        raise RuntimeError('Legacy Docker network has no container ownership evidence. Keep it and inspect its metadata privately before retrying up; do not remove another installation network')
+    if any(not re.fullmatch(r'[a-f0-9]{64}',value) for value in endpoints):
+        raise RuntimeError('Invalid legacy network endpoint metadata; no containers stopped')
+    projection='[{{json (index .Config.Labels "com.docker.compose.project")}},{{json (index .Config.Labels "com.docker.compose.project.working_dir")}}]'
+    observed=run(['docker','inspect','--format',projection,*endpoints]).splitlines()
+    if len(observed)!=len(endpoints) or any(json.loads(row)!=['matrix-stack',str(ROOT)] for row in observed):
+        raise RuntimeError('Legacy network has an unmanaged or foreign container. Keep services/data/network; ask its operator to disconnect that container, then retry install.sh up')
+    ownership_check()
+    emit('legacy_network_upgrade',phase='stopping_owned_stack',data_retained=True,
+         next_action='The old network metadata requires a temporary stop. Keep data/keys; if interrupted use update-recover for a pending update, otherwise retry install.sh up')
+    dc('down','--remove-orphans')  # Attested owned project only; no --volumes.
+    emit('legacy_network_upgrade',phase='old_network_removed',data_retained=True)
+
+
+def generate():
+    ownership_check()
+    metadata=state()
+    referral.validate_saved(ROOT,metadata)
+    if metadata.get('synapse_signing_key_created') and not (ROOT/'data/synapse'/ (metadata['domain']+'.signing.key')).is_file():
+        raise RuntimeError('Synapse signing key is missing; restore the original key from backup')
+    if metadata.get('databases_initialized') and not external_database() and not list((ROOT/'data/postgres').glob('**/PG_VERSION')):
+        raise RuntimeError('PostgreSQL data is missing; restore the installation from backup')
+    # Pull exact immutable manifests only when missing locally.
+    lock=json.loads((ROOT/'versions.json').read_text())
+    for role,digest in lock['digests'].items():
+        present=subprocess.run(['docker','image','inspect',digest],stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL).returncode==0
+        if not present:run(['docker','pull',digest])
+        emit('image_ready',role=role,version=lock['tags'][role])
+    run(['python3',str(ROOT/'generate.py'),'--directory',str(ROOT)],configuration_errors=GENERATION_ERRORS)
+    if yaml_media_s3():
+        dockerfile=ROOT/'synapse-s3/Dockerfile'
+        if not dockerfile.read_text().splitlines()[0].endswith(lock['digests']['synapse']):
+            raise RuntimeError('S3 Synapse base differs from the pinned image lock')
+        tag='matrix-stack/synapse-s3:1.7.0'
+        source_hash=hashlib.sha256(dockerfile.read_bytes()).hexdigest()
+        image_id=subprocess.run(['docker','image','inspect',tag,'--format','{{.Id}}'],capture_output=True,text=True).stdout.strip()
+        image_lock=ROOT/'synapse-s3-image.lock.json'
+        saved=json.loads(image_lock.read_text()) if image_lock.exists() else {}
+        if not image_id or saved.get('source_sha256')!=source_hash or saved.get('image_id')!=image_id:
+            run(['docker','build','-t',tag,str(dockerfile.parent)])
+            image_id=run(['docker','image','inspect',tag,'--format','{{.Id}}']).strip()
+        image_lock.write_text(json.dumps({'image_id':image_id,'source_sha256':source_hash})+'\n')
+        import yaml
+        compose=ROOT/'compose.yaml'
+        value=yaml.safe_load(compose.read_text())
+        value['services']['synapse']['image']=image_id
+        compose.write_text(yaml.safe_dump(value,sort_keys=False))
+    referral.prepare_images(ROOT,run,emit)
+    dc('config','--quiet')
+    isolated=['docker','run','--rm','--network','none','--memory','144m','--cpus','0.5']
+    def mount(source,target):return ['--mount',f'type=bind,source={ROOT/source},target={target},readonly']
+    run(isolated+mount('config/mas.yaml','/config/mas.yaml')+mount('config/mas-signing.pem','/config/mas-signing.pem')+
+        [image('mas'),'config','check','--config','/config/mas.yaml'])
+    run(isolated+mount('config/Caddyfile','/etc/caddy/Caddyfile')+mount('public','/srv/discovery')+
+        [image('caddy'),'caddy','validate','--config','/etc/caddy/Caddyfile','--adapter','caddyfile'])
+    run(isolated+mount('config/haproxy.cfg','/usr/local/etc/haproxy/haproxy.cfg')+
+        [image('tls-router'),'haproxy','-c','-f','/usr/local/etc/haproxy/haproxy.cfg'])
+    emit('generated_configuration',passed=True,server_name=state()['domain'])
+
+
+def yaml_media_s3():
+    import yaml
+    return bool(yaml.safe_load((ROOT/'config/homeserver.yaml').read_text()).get('media_storage_providers'))
+
+
+def prepare_host():
+    memory=int(next(line.split()[1] for line in Path('/proc/meminfo').read_text().splitlines() if line.startswith('MemTotal:')))
+    if memory<900000:raise RuntimeError('At least about 1 GiB RAM is required')
+    if shutil.disk_usage(ROOT).free<3*1024**3:raise RuntimeError('At least 3 GiB free after pulling images is required')
+    swap=int(next(line.split()[1] for line in Path('/proc/meminfo').read_text().splitlines() if line.startswith('SwapTotal:')))
+    if memory<2000000 and swap<1000000:
+        path=ROOT/'swapfile'
+        if not path.exists():
+            run(['dd','if=/dev/zero','of='+str(path),'bs=1M','count=1024','status=none'])
+            path.chmod(0o600)
+            run(['mkswap',str(path)])
+        active=run(['swapon','--show','--noheadings','--output','NAME']).splitlines()
+        if str(path) not in active:run(['swapon',str(path)])
+        fstab=Path('/etc/fstab')
+        if str(path)+' ' not in fstab.read_text():
+            with fstab.open('a') as handle:handle.write(str(path)+' none swap sw 0 0\n')
+        emit('swap_enabled',bytes=1024**3)
+    Path('/etc/sysctl.d/90-matrix-stack-rtc.conf').write_text('net.core.rmem_max=2500000\nnet.core.wmem_max=2500000\n')
+    run(['sysctl','--load','/etc/sysctl.d/90-matrix-stack-rtc.conf'])
+
+
+def create_admin():
+    credentials=json.loads((ROOT/'secrets/admin-access.json').read_text())
+    # Fixed localpart, independent of user input. Do not interpolate a password into SQL/shell.
+    sql="SELECT json_build_object('admin',can_request_admin,'deleted',deactivated_at IS NOT NULL,'locked',locked_at IS NOT NULL) FROM users WHERE username='matrix-admin';"
+    rows=postgres('psql','-d','mas','-X','-A','-t','-v','ON_ERROR_STOP=1','-c',sql).strip()
+    needs_setup=not rows
+    if rows:
+        account=json.loads(rows)
+        if account['deleted'] or account['locked']:
+            raise RuntimeError('Bootstrap administrator exists but is inactive; refusing to overwrite it')
+        needs_setup=not account['admin']
+    if needs_setup:
+        payload={'credentials':credentials,
+                 'client':json.loads((ROOT/'secrets/referral-client.json').read_text())}
+        try:
+            dc('exec','-T','synapse','python','-c',(ROOT/'mas_admin.py').read_text(),
+               stdin=json.dumps(payload))
+        except RuntimeError:
+            raise RuntimeError('MAS administrator setup was not confirmed. Keep existing data and secrets. '
+                'Check MAS connectivity and whether matrix-admin is an existing non-admin account. '
+                'Then retry: sudo bash '+str(ROOT/'install.sh')+' up') from None
+    emit('administrator_ready',credential_file=str(ROOT/'secrets/admin-access.json'),password_omitted=True)
+
+
+def certificate_paths():
+    host='turn.'+state()['domain']
+    path=ROOT/'data/caddy/caddy/certificates/acme-v02.api.letsencrypt.org-directory'/host
+    return path/(host+'.crt'),path/(host+'.key')
+
+
+def cert_renew():
+    if not any(row.get('Service')=='livekit' and row.get('State')=='running' for row in service_rows()):
+        emit('turn_certificate_reload_deferred',passed=True,service='livekit',
+             next_action='LiveKit is stopped or absent; no service started. When ready, run: sudo bash '+str(ROOT/'install.sh')+' up, then check')
+        return
+    import fcntl
+    with (ROOT/'data/turn-certificate.lock').open('a') as lock:
+        try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except BlockingIOError:return
+        time.sleep(2)
+        cert,key=certificate_paths()
+        run(['openssl','x509','-in',str(cert),'-checkend','86400','-noout'])
+        public_cert=run(['openssl','x509','-in',str(cert),'-pubkey','-noout'])
+        public_key=run(['openssl','pkey','-in',str(key),'-pubout'])
+        if public_cert!=public_key:raise RuntimeError('TURN certificate and key mismatch; retry after both files renew')
+        digest=hashlib.sha256(cert.read_bytes()).hexdigest()
+        marker=ROOT/'data/turn-certificate.sha256'
+        if marker.exists() and marker.read_text().strip()==digest:return
+        dc('restart','-t','10','livekit')
+        marker.write_text(digest+'\n')
+        emit('turn_certificate_reloaded',passed=True)
+
+
+def certificate_watch():
+    cert,key=certificate_paths()
+    system=Path('/etc/systemd/system')
+    (system/'matrix-stack-turn-cert.service').write_text(f'''[Unit]
+Description=Reload Matrix TURN certificate after Caddy renewal
+After=docker.service
+[Service]
+Type=oneshot
+Environment=DOCKER_HOST=unix:///var/run/docker.sock
+ExecStart=/usr/bin/python3 {ROOT}/lifecycle.py --directory {ROOT} cert-renew
+''')
+    (system/'matrix-stack-turn-cert.path').write_text(f'''[Unit]
+Description=Watch renewed Matrix TURN certificate
+[Path]
+PathChanged={cert}
+PathChanged={key}
+Unit=matrix-stack-turn-cert.service
+[Install]
+WantedBy=multi-user.target
+''')
+    (system/'matrix-stack-turn-cert.timer').write_text('''[Unit]
+Description=Retry Matrix TURN certificate reload for paired-file updates
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+Unit=matrix-stack-turn-cert.service
+[Install]
+WantedBy=timers.target
+''')
+    marker=ROOT/'data/turn-certificate.sha256'
+    marker.write_text(hashlib.sha256(cert.read_bytes()).hexdigest()+'\n')
+    run(['systemctl','daemon-reload'])
+    run(['systemctl','enable','--now','matrix-stack-turn-cert.path','matrix-stack-turn-cert.timer'])
+    emit('turn_certificate_watch',passed=True)
+
+
+def up_admission_check():
+    state_store.assert_database_allowed(ROOT)
+    if state().get('credential_transition_pending'):
+        raise RuntimeError('Administrator password change was interrupted. Keep private checkpoints; run: sudo bash '+str(ROOT/'install.sh')+' admin-password-recover')
+    if state().get('migration_frozen'):
+        raise RuntimeError('Source is frozen for migration; do not start a second writer. To abandon the move, stop the target and use install.sh move-abort target-stopped')
+    if state().get('restore_pending'):
+        raise RuntimeError('Restored target is staged with writers disabled. Stop the source, switch DNS, then run install.sh restore-activate source-stopped')
+    if state().get('media_transition_pending'):
+        raise RuntimeError('Media transfer was interrupted; run install.sh media-recover, then repeat media-s3 with the same private settings file')
+
+
+def up():
+    up_admission_check()
+    values=preflight.settings(ROOT)
+    if values.get('MEDIA_MODE')=='s3':
+        try:
+            media_transfer.client(values).head_bucket(Bucket=values['S3_BUCKET'])
+        except state_store.OperationInterrupted:raise
+        except Exception:
+            retry='sudo bash '+str(ROOT/'install.sh')+(' database-recover' if (ROOT/'database-transition.json').exists() else ' up')
+            next_action=('Correct S3 credentials/connectivity; keep all data and configuration, then retry: '+retry+'.'
+                if state().get('storage_committed') else
+                'To continue locally: sudo bash '+str(ROOT/'install.sh')+' media-local; then repeat up. '
+                'Later attach S3 and copy media: sudo bash '+str(ROOT/'install.sh')+' media-s3 PRIVATE_S3_ENV.')
+            raise RuntimeError('S3 check failed before startup. '+next_action) from None
+        emit('s3_connection',passed=True)
+    generate()
+    dns_check()
+    upgrade_legacy_network()
+    if not state().get('databases_initialized'):
+        prepare_host()
+    # Refuse occupied ports for first start; reconfiguration uses the already owned stack.
+    if not dc('ps','-q','--all').strip():
+        for port in [80,443,7881]:
+            with socket.socket() as sock:
+                try:sock.bind(('0.0.0.0',port))
+                except OSError:raise RuntimeError('Required TCP port occupied: '+str(port))
+        for port in [3478,7882]:
+            with socket.socket(type=socket.SOCK_DGRAM) as sock:
+                try:sock.bind(('0.0.0.0',port))
+                except OSError:raise RuntimeError('Required UDP port occupied: '+str(port))
+    if external_database():
+        if not state().get('databases_initialized'):
+            import postgres_setup
+            try:
+                result=postgres_setup.initialize(ROOT,postgres)
+            except state_store.OperationInterrupted:raise
+            except Exception as error:
+                if isinstance(error,RuntimeError) and 'Command failed:' not in str(error):raise
+                raise RuntimeError('External PostgreSQL setup was not confirmed. Keep existing roles/data and config/external-postgres-owner.json; check private credentials, TLS and connectivity, then retry install.sh up in the same directory') from None
+            emit('external_postgres_initialized',passed=True,**result)
+    else:
+        dc('up','-d','postgres')
+    metadata=state()
+    metadata['network_committed']=True
+    state_store.write_json(ROOT/'installation.json',metadata)
+    wait(lambda:postgres('psql','-d','mas','-X','-A','-t','-v','ON_ERROR_STOP=1','-c','SELECT 1').strip()=='1',
+         service='postgres-client' if external_database() else 'postgres')
+    metadata=state()
+    metadata['databases_initialized']=True
+    metadata['database_mode']='external' if external_database() else 'local'
+    metadata['media_mode']='s3' if yaml_media_s3() else 'local'
+    if metadata['media_mode']=='s3':
+        import yaml
+        metadata['s3_prefix']=yaml.safe_load((ROOT/'config/homeserver.yaml').read_text())['media_storage_providers'][0]['config']['prefix']
+        metadata['s3_identity']=media_transfer.identity(preflight.settings(ROOT))
+    metadata['storage_committed']=True
+    state_store.write_json(ROOT/'installation.json',metadata)
+    dc('up','-d','synapse','mas')
+    probe="import urllib.request; urllib.request.urlopen('http://mas:8080/health',timeout=3).read(); urllib.request.urlopen('http://synapse:8008/_matrix/client/versions',timeout=3).read()"
+    wait(lambda:dc('exec','-T','synapse','python','-c',probe) is not None,service='synapse mas')
+    metadata=state()
+    if not (ROOT/'data/synapse'/(metadata['domain']+'.signing.key')).is_file():
+        raise RuntimeError('Synapse has not generated its signing key')
+    metadata['synapse_signing_key_created']=True
+    state_store.write_json(ROOT/'installation.json',metadata)
+    create_admin()
+    dc('up','-d','referral-control')
+    wait(lambda:dc('exec','-T','referral-control','python','-c',
+        "from common import bridge_call; bridge_call({'action':'servers'},path='/config/bot-run/control.sock',timeout=2)") is not None,
+        service='referral-control')
+    metadata=state()
+    if not metadata.get('referral_provisioned'):
+        referral.provision(ROOT,dc,metadata)
+        state_store.write_json(ROOT/'installation.json',metadata)
+    dc('up','-d','referral-bot')
+    wait(lambda:dc('exec','-T','referral-bot','node','-e',
+        "fetch('http://127.0.0.1:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))") is not None,
+        service='referral-bot')
+    metadata=state()
+    referral.note_ready(ROOT,metadata)
+    state_store.write_json(ROOT/'installation.json',metadata)
+    emit('referral_bot_ready',matrix_id='@referral-bot:'+metadata['domain'],encryption=True,
+         cross_signed=True,admin_scopes=False)
+    dc('up','-d','jwt','web','admin','caddy','tls-router')
+    cert,key=certificate_paths()
+    wait(lambda:cert.is_file() and key.is_file(),attempts=150,service='caddy')
+    run(['openssl','x509','-in',str(cert),'-checkend','86400','-noout'])
+    dc('up','-d','livekit')
+    certificate_watch()
+    wait(lambda:all(row['State']=='running' and row.get('Health','') in ('','healthy')
+                   for row in service_rows()) and len(service_rows())==(10 if external_database() else 11),
+         service='postgres-client synapse mas referral-control referral-bot jwt web admin caddy tls-router livekit'
+         if external_database() else 'postgres synapse mas referral-control referral-bot jwt web admin caddy tls-router livekit')
+    check()
+    release=json.loads((ROOT/'release.json').read_text())
+    metadata=state()
+    metadata['applied_release_version']=release['version']
+    metadata['applied_release_revision']=hashlib.sha256((ROOT/'SHA256SUMS').read_bytes()).hexdigest()
+    state_store.write_json(ROOT/'installation.json',metadata)
+    vault_cache.sync_optional(ROOT,emit)
+    emit('installation_running',admin='https://admin.'+state()['domain'],server_name=state()['domain'])
+
+
+def service_rows():
+    return [json.loads(line) for line in dc('ps','--all','--format','json').splitlines() if line.strip()]
+
+
+def status():
+    metadata=state()
+    pending={name:bool(metadata.get(name)) for name in
+        ('migration_frozen','restore_pending','credential_transition_pending','media_transition_pending')}
+    for name,relative in (
+            ('backup_recovery_pending','backup-writers.json'),
+            ('database_recovery_pending','database-transition.json'),
+            ('database_password_recovery_pending','database-password-transition.json'),
+            ('s3_credential_recovery_pending','s3-credentials-transition.json'),
+            ('update_recovery_pending','update-journal.json'),
+            ('user_password_recovery_pending','secrets/user-password-pending.json')):
+        marker=ROOT/relative
+        pending[name]=marker.exists() or marker.is_symlink()
+    command='sudo bash '+str(ROOT/'install.sh')+' '
+    actions=[]
+    for flag,operation in (
+            ('backup_recovery_pending','backup-recover'),
+            ('database_recovery_pending','database-recover'),
+            ('database_password_recovery_pending','database-password-recover'),
+            ('s3_credential_recovery_pending','s3-credentials-recover'),
+            ('credential_transition_pending','admin-password-recover'),
+            ('user_password_recovery_pending','user-password-recover'),
+            ('media_transition_pending','media-recover')):
+        if pending[flag]:actions.append(command+operation)
+    if pending['update_recovery_pending']:
+        actions.append('From a trusted extracted installer directory run: sudo bash install.sh update-recover '+str(ROOT))
+    if pending['migration_frozen']:
+        actions.extend([command+'move-export',
+            'To cancel only after target writers are stopped and DNS returned: '+command+'move-abort target-stopped'])
+    if pending['restore_pending']:
+        actions.append('After the original source is stopped and target DNS is ready: '+command+'restore-activate source-stopped')
+    emit('installation_status',applied_release=metadata.get('applied_release_version'),
+         **pending,next_actions=actions,
+         message='Status does not resume operations or start writers. Wait for any active installer operation before using recovery commands; do not delete checkpoints. Stopped containers are included below')
+    print(dc('ps','--all'))
+
+
+def wait_writers(writers):
+    def ready():
+        rows={row['Service']:row for row in service_rows()}
+        return all(name in rows and rows[name]['State']=='running' and
+            rows[name].get('Health','') in ('','healthy') for name in writers)
+    if writers:wait(ready,service=' '.join(writers))
+
+
+_writer_pause_root = None
+
+
+@contextmanager
+def paused_writers(leave_stopped=False):
+    """Persist restart intent before stopping; share one pause with nested backups."""
+    global _writer_pause_root
+    if _writer_pause_root is not None:
+        if _writer_pause_root != ROOT:
+            raise RuntimeError('Nested backup belongs to another installation')
+        yield
+        return
+    state_store.assert_backup_allowed(ROOT)
+    running={row['Service'] for row in service_rows() if row['State'] in ('running','restarting')}
+    writers=[name for name in ('referral-bot','referral-control','synapse','mas','jwt') if name in running]
+    record={'format':1,'server_name':state()['domain'],'writers':writers,
+        'keep_stopped':bool(leave_stopped or state().get('migration_frozen')),
+        'pid':os.getpid(),'started':state_store.process_identity(os.getpid())[1]}
+    state_store.write_json(ROOT/'backup-writers.json',record)
+    _writer_pause_root=ROOT
+    try:
+        if writers:dc('stop','-t','30',*writers)
+        yield
+    finally:
+        try:
+            if writers and not record['keep_stopped'] and not state().get('migration_frozen'):
+                dc('up','-d',*writers)
+                wait_writers(writers)
+            (ROOT/'backup-writers.json').unlink()
+        except BaseException:
+            emit('backup_recovery_pending',command='sudo bash '+str(ROOT/'install.sh')+' backup-recover')
+            raise
+        finally:
+            _writer_pause_root=None
+
+
+def backup_recover():
+    state_store.assert_database_allowed(ROOT)
+    record=state_store.backup_pause_record(ROOT)
+    if record is None:
+        emit('backup_recovery',pending=False,changed=False)
+        return
+    if record.get('server_name')!=state()['domain']:
+        raise RuntimeError('Backup recovery journal belongs to another Matrix identity')
+    try:
+        alive=state_store.process_identity(record['pid'])[1]==record['started']
+    except OSError:
+        alive=False
+    if alive:
+        raise RuntimeError('The backup process still exists; wait for it to finish before backup-recover')
+    writers=record['writers']
+    keep_stopped=record['keep_stopped'] or bool(state().get('migration_frozen') or state().get('restore_pending'))
+    if writers:
+        if keep_stopped:
+            dc('stop','-t','30',*writers)
+        else:
+            dc('up','-d',*writers)
+            wait_writers(writers)
+    (ROOT/'backup-writers.json').unlink()
+    emit('backup_recovery',pending=False,changed=True,writers=writers,kept_stopped=keep_stopped,
+        next_action='Use move-abort only if cancelling migration' if keep_stopped else 'Run install.sh check, then retry the backup')
+
+
+def check():
+    dns_check()
+    result=subprocess.run(['python3',str(ROOT/'verify.py'),'--directory',str(ROOT)],capture_output=True,text=True)
+    for line in result.stdout.splitlines():
+        record=json.loads(line)
+        emit(record['check'],**{key:value for key,value in record.items()
+             if key in ('status','expected','passed','error_type','tls','failures')})
+    if result.returncode:raise RuntimeError('Public checks failed; see the check records above')
+    rows=service_rows()
+    for row in rows:emit('service',name=row['Service'],state=row['State'],health=row.get('Health',''))
+    expected=10 if external_database() else 11
+    if len(rows)!=expected or any(row['State']!='running' or row.get('Health','') not in ('','healthy') for row in rows):
+        raise RuntimeError('Not all expected containers are ready')
+    referral.validate_saved(ROOT,state())
+    emit('public_checks',passed=True)
+
+
+def database_inventory(database, application=None):
+    application=application or database
+    tables={'synapse':('users','rooms','events','local_media_repository','remote_media_cache'),
+            'mas':('users','user_registration_tokens')}
+    fields=[]
+    for table in tables[application]:
+        fields.extend(["'"+table+"'",'(SELECT count(*) FROM '+table+')'])
+    return json.loads(postgres('psql','-d',database,'-X','-At','-v','ON_ERROR_STOP=1',
+                              '-c','SELECT json_build_object('+','.join(fields)+')'))
+
+
+def backup_dump_arguments(database):
+    if database not in ('synapse', 'mas'):
+        raise RuntimeError('Unexpected application database for backup')
+    arguments = ['-Fc']
+    if database == 'synapse':
+        arguments.append('--exclude-table-data=public.e2e_one_time_keys_json')
+    return arguments + [database]
+
+
+def clear_restored_one_time_keys(database, sql=None):
+    """Only callers holding a staged/import/temporary-restore guard may use this."""
+    if database != 'synapse' and not re.fullmatch(r'restorecheck_synapse_[a-f0-9]{8}', database):
+        raise RuntimeError('Unexpected Synapse restore database')
+    query = ("BEGIN; SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='15s'; "
+        "TRUNCATE TABLE public.e2e_one_time_keys_json; "
+        "SELECT count(*) FROM public.e2e_one_time_keys_json; COMMIT;")
+    try:
+        result = (sql(database, query) if sql else postgres('psql', '-d', database,
+            '-X', '-qAt', '-v', 'ON_ERROR_STOP=1', '-f', '-', stdin=query))
+        if result.strip() != '0':
+            raise RuntimeError('Restored one-time keys were not cleared')
+    except (OSError, RuntimeError):
+        raise RuntimeError('Restored one-time-key check failed; writers remain disabled. '
+            'Check PostgreSQL connectivity and locks, then repeat the original restore/restore-local '
+            'or database-recover command; for a ready staged target repeat restore-activate. '
+            'Keep the source and archive; do not start Synapse manually') from None
+    emit('restored_one_time_keys', database=database, passed=True, remaining=0)
+
+
+def backup(leave_stopped=False):
+    if state().get('credential_transition_pending'):
+        raise RuntimeError('Recover the interrupted password change with install.sh admin-password-recover before making a full backup')
+    if state().get('media_transition_pending'):
+        raise RuntimeError('Recover the interrupted media transition with install.sh media-recover before making a full backup')
+    state_store.assert_database_password_allowed(ROOT)
+    directory=ROOT/'backups'
+    directory.mkdir(mode=0o700,exist_ok=True)
+    stamp=time.strftime('%Y%m%dT%H%M%SZ',time.gmtime())+'-'+uuid.uuid4().hex[:6]
+    target=directory/stamp
+    target.mkdir(mode=0o700)
+    referral.validate_saved(ROOT,state())
+    with paused_writers(leave_stopped):
+        for database in ['synapse','mas']:
+            with (target/(database+'.dump')).open('wb') as output:
+                result=subprocess.run(postgres_command('pg_dump',*backup_dump_arguments(database)),stdin=subprocess.DEVNULL,
+                                      stdout=output,stderr=subprocess.PIPE, **state_store.child_process_options())
+                if result.returncode:raise RuntimeError('Database dump failed')
+        (target/'roles.sql').write_text('-- Dedicated roles are recreated from config/init-db.sql.\n' if external_database()
+            else postgres('pg_dumpall','--globals-only'))
+        with tarfile.open(target/'files.tar.gz','w:gz') as tar:
+            # Include the whole installed source release, not a stale hand-written subset.
+            source_manifest=ROOT/'SHA256SUMS'
+            sources={'SHA256SUMS'}
+            for line in source_manifest.read_text().splitlines():
+                name=line.split('  ',1)[1]
+                relative=Path(name)
+                if relative.is_absolute() or '..' in relative.parts or (ROOT/name).is_symlink():
+                    raise RuntimeError('Unsafe source path in backup manifest')
+                if not (ROOT/name).is_file():
+                    raise RuntimeError('Installed source file missing; restore the trusted installer release')
+                sources.add(name)
+            for name in sorted(sources):backup_archive.add_tree(tar,ROOT/name,name,recursive=False)
+            for name in ['config','public','secrets','settings.env','installation.json','compose.yaml','images.lock.json',
+                         'referral-images.lock.json',
+                         'data/referral-bot','data/referral-control',
+                         'data/synapse','data/caddy','data/caddy-config','mas-proxy.env',
+                         'synapse-s3-image.lock.json']:
+                if (ROOT/name).exists() or (ROOT/name).is_symlink():backup_archive.add_tree(tar,ROOT/name,name)
+        (target/'mode.txt').write_text('consistent\n')
+        metadata=state()
+        inventory={database:database_inventory(database) for database in ('synapse','mas')}
+        state_store.write_json(target/'backup-format.json',{'format':2,'family':'misbot-matrix-portable',
+            'server_name':metadata['domain'],'database_mode':metadata.get('database_mode','local'),
+            'media_mode':metadata.get('media_mode','local'),'database_inventory':inventory,
+            'synapse_one_time_keys':'excluded'})
+        digests={p.name:hashlib.file_digest(p.open('rb'),'sha256').hexdigest() for p in target.iterdir() if p.is_file()}
+        (target/'SHA256.json').write_text(json.dumps(digests,indent=2)+'\n')
+        archive=directory/('matrix-'+stamp+'.tar.gz')
+        temporary=archive.with_name(archive.name+'.partial')
+        with tarfile.open(temporary,'w:gz') as tar:tar.add(target,arcname=stamp)
+        os.replace(temporary,archive)
+        latest=directory/'latest.tar.gz'
+        link=directory/('latest-'+uuid.uuid4().hex)
+        link.symlink_to(archive.name)
+        os.replace(link,latest)
+        emit('consistent_backup',archive=str(archive),sha256=hashlib.file_digest(archive.open('rb'),'sha256').hexdigest())
+        shutil.rmtree(target)
+        return archive
+
+
+def move_export():
+    metadata=state()
+    if metadata.get('credential_transition_pending'):
+        raise RuntimeError('Recover the interrupted password change before preparing a migration')
+    if metadata.get('media_transition_pending'):
+        raise RuntimeError('Recover the interrupted media transition before preparing a migration')
+    if metadata.get('restore_pending'):
+        raise RuntimeError('This machine is a staged restore target, not the active source')
+    metadata['migration_frozen']=True
+    state_store.write_json(ROOT/'installation.json',metadata)
+    started=time.monotonic()
+    # The freeze survives every export error, including a busy backup lock.
+    dc('stop','-t','30','referral-bot','referral-control','synapse','mas','jwt')
+    if metadata.get('media_mode', 'local') == 's3':
+        if any(row['Service'] in ('referral-bot','referral-control','synapse','mas','jwt')
+                and row['State'] in ('running','restarting') for row in service_rows()):
+            raise RuntimeError('Migration writers are still running; no final S3 archive created. Check install.sh status and retry move-export; do not activate the target')
+        try:
+            emit('migration_external_media_started',next_action='Wait for every live S3 object to be verified; missing originals are downloaded before the final archive. Source writers are stopped; duration depends on media size and network')
+            result=media_snapshot.hydrate(ROOT/'data/synapse/media_store',preflight.settings(ROOT),
+                ROOT/'data/synapse/external-media-inventory.json')
+        except (InterruptedError,state_store.OperationInterrupted):
+            raise
+        except Exception:
+            raise RuntimeError('Final S3 media snapshot failed; source remains marked frozen and no final archive was created. Check private S3 credentials/permissions, network/TLS and free space; retry install.sh move-export [DIRECTORY]. To cancel, first stop the target and return DNS, then run install.sh move-abort target-stopped [DIRECTORY]') from None
+        emit('migration_external_media_snapshot',passed=True,**result)
+    archive=backup(leave_stopped=True)
+    emit('migration_source_frozen',archive=str(archive),writers_disabled=True,
+         export_seconds=round(time.monotonic()-started,2),
+         next_action='Restore this final archive on the target; keep source writers stopped')
+
+
+def move_abort():
+    metadata=state()
+    if not metadata.get('migration_frozen'):
+        raise RuntimeError('This source has no active migration freeze')
+    preflight.check(ROOT)
+    metadata.pop('migration_frozen',None)
+    state_store.write_json(ROOT/'installation.json',metadata)
+    try:
+        up()
+    except BaseException:
+        metadata=state()
+        metadata['migration_frozen']=True
+        state_store.write_json(ROOT/'installation.json',metadata)
+        dc('stop')
+        raise
+
+
+def restore_check():
+    # Verify the latest full archive, then restore only into random temporary DBs.
+    archive=(ROOT/'backups/latest.tar.gz').resolve(strict=True)
+    temp=ROOT/'backups'/('verify-'+uuid.uuid4().hex)
+    temp.mkdir(mode=0o700)
+    try:
+        backup_archive.extract(archive,temp)
+        snapshot=backup_archive.verify_snapshot(temp)
+        referral.verify_archive(snapshot/'files.tar.gz')
+        emit('referral_backup_crypto_restore',passed=True)
+        for database in ['synapse','mas']:
+            target='restorecheck_'+database+'_'+uuid.uuid4().hex[:8]
+            postgres('createdb','-T','template0',target)
+            try:
+                with (snapshot/(database+'.dump')).open('rb') as data:
+                    result=subprocess.run(postgres_command('pg_restore','--exit-on-error','-d',target),stdin=data,
+                        stdout=subprocess.PIPE,stderr=subprocess.PIPE, **state_store.child_process_options())
+                if result.returncode:raise RuntimeError('Restore into temporary database failed')
+                metadata_path=snapshot/'backup-format.json'
+                expected=json.loads(metadata_path.read_text()).get('database_inventory',{}).get(database) if metadata_path.exists() else None
+                if expected is not None and database_inventory(target,database)!=expected:
+                    raise RuntimeError('Restored application row counts differ from the backup inventory')
+                if database == 'synapse':
+                    clear_restored_one_time_keys(target)
+                emit('temporary_database_restore',database=database,passed=True,inventory_compared=expected is not None)
+            finally:postgres('dropdb','--if-exists',target)
+    finally:shutil.rmtree(temp)
+
+
+def re_safe_basename(value):
+    return isinstance(value,str) and Path(value).name==value and value not in ('','..','.')
+
+
+def restore_activate():
+    marker=ROOT/'restore-journal.json'
+    if not marker.is_file() or json.loads(marker.read_text()).get('stage')!='ready':
+        raise RuntimeError('Restore has not completed; repeat the original restore command')
+    metadata=state()
+    if not metadata.get('restore_pending'):
+        raise RuntimeError('This restore target was already activated; use install.sh status/check. '
+            'To restore another archive use an empty directory; existing data was not changed')
+    if any(row['Service'] in ('synapse','mas','jwt','referral-bot','referral-control')
+            and row['State'] in ('running','restarting','paused') for row in service_rows()):
+        raise RuntimeError('Staged target writers are still active (running, restarting or paused); stop them with install.sh down, '
+            'then repeat restore-activate after stopping the source; no keys were cleared')
+    preflight.check(ROOT)
+    # Also covers ready journals produced by older installers. Repeat after a
+    # failed activation is safe because target writers are stopped below.
+    clear_restored_one_time_keys('synapse')
+    metadata.pop('restore_pending',None)
+    state_store.write_json(ROOT/'installation.json',metadata)
+    try:
+        up()
+    except BaseException:
+        metadata=state()
+        metadata['restore_pending']=True
+        state_store.write_json(ROOT/'installation.json',metadata)
+        dc('stop')
+        raise
+
+
+def configure(directory, action):
+    global ROOT, COMPOSE, STAGES, log
+    ROOT=Path(directory).resolve()
+    COMPOSE=['docker','compose','--project-directory',str(ROOT),'-f',str(ROOT/'compose.yaml')]
+    STAGES=ROOT/'stages'
+    os.umask(0o077)
+    STAGES.mkdir(exist_ok=True)
+    log=STAGES/('certificate-renewal.jsonl' if action=='cert-renew' else time.strftime('%Y%m%dT%H%M%SZ',time.gmtime())+'-'+action+'.jsonl')
+
+
+def main():
+    parser=argparse.ArgumentParser()
+    parser.add_argument('--directory',required=True)
+    parser.add_argument('action',choices=['up','generate','check','backup','backup-recover','restore-check','restore-activate','move-export','move-abort','status','stop','down','cert-renew'])
+    parser.add_argument('--check-up-only',action='store_true',help=argparse.SUPPRESS)
+    args=parser.parse_args()
+    if args.check_up_only and args.action!='up':parser.error('--check-up-only requires up')
+    configure(args.directory,args.action)
+    def interrupted(signum,frame):raise state_store.OperationInterrupted('Installer operation interrupted')
+    for signum in (signal.SIGTERM,signal.SIGINT):signal.signal(signum,interrupted)
+    try:
+        if os.geteuid()!=0:raise RuntimeError('Root is required')
+        guard = nullcontext() if args.action in ('check','status') else state_store.operation_guard(ROOT)
+        with guard:
+            if args.action not in ('check','status','stop','down','backup-recover'):state_store.assert_update_allowed(ROOT)
+            if args.check_up_only:
+                up_admission_check()
+                emit('up_admission',passed=True)
+                return
+            if args.action not in ('generate','up'):ownership_check()
+            {'up':up,'generate':generate,'check':check,'backup':backup,'backup-recover':backup_recover,'restore-check':restore_check,
+             'restore-activate':restore_activate,'move-export':move_export,'move-abort':move_abort,
+             'cert-renew':cert_renew,'status':status,'stop':lambda:dc('stop'),'down':down}[args.action]()
+    except Exception as error:
+        recovery = ({'next_action':'Check install.sh status; retry install.sh move-export [DIRECTORY]. Before any source restart, stop the target and return DNS, then use install.sh move-abort target-stopped [DIRECTORY]; do not transfer an incomplete archive'}
+            if args.action=='move-export' else {})
+        emit('failed',action=args.action,error_type=type(error).__name__,
+             message=('Operation interrupted; existing data retained. Check install.sh status, then follow the recovery command or retry the same operation'
+                if isinstance(error,(InterruptedError,state_store.OperationInterrupted)) else str(error) if type(error) in (RuntimeError,state_store.S3CredentialRecoveryRequired) else 'See the relevant service logs privately'),**recovery)
+        sys.exit(1)
+
+
+if __name__=='__main__':
+    main()

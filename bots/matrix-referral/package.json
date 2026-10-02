@@ -1,0 +1,9 @@
+{
+  "name": "misbot-referral-bot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Encrypted Matrix invitation management for misbot.ru",
+  "engines": { "node": ">=24" },
+  "scripts": { "start": "node main.js", "test": "node --test tests/*.test.js" },
+  "dependencies": { "matrix-bot-sdk": "0.8.0", "@matrix-org/matrix-sdk-crypto-nodejs": "0.4.0" }
+}

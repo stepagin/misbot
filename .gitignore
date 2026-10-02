@@ -1,0 +1,39 @@
+# Private deployment data and local workspace settings
+/.server-access/
+/server-sandbox/
+/.idea/
+/CLAUDE.md
+/AGENTS.md
+
+# Rebuild from public sources with: python3 installer/build.py
+/dist/
+/matrix-installer.tar.gz
+
+# Local Python and Node artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.coverage*
+coverage/
+node_modules/
+npm-debug.log*
+*.log
+
+# Local credentials and runtime state
+.env
+.env.*
+!.env.example
+settings.env
+secrets/
+backups/
+*.pem
+*.key
+*.p12
+*.pfx
+*.dump
+*.sqlite*
+*.db
+
+# Local agent material must live outside this Git root.
+/SYNAPSE_INSTALLER_*.md
