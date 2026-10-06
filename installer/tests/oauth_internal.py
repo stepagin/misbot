@@ -84,5 +84,7 @@ from pathlib import Path
 test_client=Path('/data/installer-test-client.json')
 test_client.write_text(json.dumps({'homeserver_url':'http://synapse:8008',
     'access_token':json.loads(body)['access_token'],'server_name':'bootstrap-test.invalid',
+    'refresh_token':json.loads(body)['refresh_token'],'client_id':cid,
+    'token_endpoint':'http://mas:8080/oauth2/token',
     'bot_user_id':'@referral-bot:bootstrap-test.invalid','bot_device_id':'MATRIX-REFERRAL-01'}))
 test_client.chmod(0o600)

@@ -17,7 +17,7 @@ function setup() {
     const control = async req => {calls.push(req); return req.action === "matrix_invite" ? item : req.action === "matrix_tokens" ? {tokens: [item], has_more: false} : {};};
     const store = {getValue: key => saved.get(key), setValue: (key, val) => saved.set(key, val)};
     const bot = new ReferralBot(client, control, store, config);
-    const event = {event_id: "$unique", sender: "@member:misbot.ru", content: {msgtype: "m.text", body: "/invite"}};
+    const event = {event_id: "$unique", sender: "@member:misbot.ru", content: {msgtype: "m.text", body: "пригласить"}};
     return {bot, client, sent, calls, item, event, saved, store, config};
 }
 
@@ -31,7 +31,19 @@ test("local encrypted direct chat creates one invitation per event", async () =>
     assert.equal(calls[1].request_id, "matrix:$unique");
     assert.match(sent[0].formatted_body, /<code>MIS-test_&lt;&amp;&gt;<\/code>/);
     assert.match(sent[0].body, /01.01.2027 02:30 МСК/);
-    assert.doesNotMatch(sent[0].body, /Отозвать|\/revoke|own-token/);
+    assert.doesNotMatch(sent[0].body, /Отозвать|\отозвать|own-token/);
+});
+
+test("old slash input only shows Russian help; links contain no invitation", async () => {
+    const {bot,event,calls,sent,item}=setup();event.content.body="/invite";
+    await bot.message("!room",event);
+    assert.equal(calls.some(x=>x.action==="matrix_invite"),false);
+    assert.match(sent[0].body,/пригласить/);assert.match(sent[0].body,/помощь/);
+    const message=tokenMessage(item,"example.org");
+    assert.match(message.body,/Реферальный бот/);assert.match(message.body,/Следующая команда боту: токены/);
+    const links=message.body.match(/https:\/\/\S+/g);
+    assert.equal(links.length,2);for(const link of links)assert.equal(link.includes(item.attributes.token),false);
+    assert.match(message.body,/Один код — один человек/);
 });
 
 test("foreign accounts, group rooms and plaintext rooms cannot issue codes", async () => {
@@ -47,7 +59,7 @@ test("foreign accounts, group rooms and plaintext rooms cannot issue codes", asy
 
 test("revoke stays bound to sender and no federation action is exposed", async () => {
     const {bot, calls, sent, event} = setup();
-    event.content.body = "/revoke own-token";
+    event.content.body = "отозвать own-token";
     await bot.message("!room", event);
     assert.equal(calls[1].action, "matrix_revoke");
     assert.equal(calls[1].resource, "own-token");
@@ -74,7 +86,7 @@ test("invitation acceptance requires local active inviter", async () => {
 
 test("paging and expiration formatting are stable", async () => {
     const {bot, event, calls, item} = setup();
-    event.content.body = "/tokens 5";
+    event.content.body = "токены 5";
     await bot.message("!room", event);
     assert.equal(calls[1].offset, 5);
     assert.equal(expiry("2026-10-04T00:00:00Z"), "04.10.2026 03:00 МСК");
@@ -83,10 +95,10 @@ test("paging and expiration formatting are stable", async () => {
 
 test("revoke dialog binds number to shown ID, survives restart, and clears after use", async () => {
     const {bot, client, event, calls, sent, saved, store, config} = setup();
-    event.content.body = "/revoke";
+    event.content.body = "отозвать";
     await bot.message("!room", event);
     assert.match(sent[0].body, /1\. MIS-test/);
-    assert.match(sent[0].body, /\/cancel/);
+    assert.match(sent[0].body, /\отмена/);
     const restart = new ReferralBot(client, bot.control, store, config);
     // A newly added token changes list positions, but not the displayed ID.
     restart.control = async req => {calls.push(req); return {tokens: [{id: "new-token"}], has_more: false};};
@@ -102,7 +114,7 @@ test("revoke dialog binds number to shown ID, survives restart, and clears after
 test("invalid choice, cancel, timeout and a different room cannot revoke", async () => {
     for (const scenario of ["cancel", "invalid", "timeout", "room"]) {
         const {bot, event, calls, sent, saved} = setup();
-        await bot.message("!room", {...event, content: {msgtype: "m.text", body: "/revoke"}});
+        await bot.message("!room", {...event, content: {msgtype: "m.text", body: "отозвать"}});
         if (scenario === "cancel") await bot.message("!room", {...event, event_id: "$cancel", content: {msgtype: "m.text", body: "отмена"}});
         if (scenario === "timeout") saved.get(bot.key("revoke", "!room", event.sender)).expires = 0;
         await bot.message(scenario === "room" ? "!other" : "!room", {...event, event_id: "$choose", content: {msgtype: "m.text", body: scenario === "invalid" ? "9" : "1"}});
@@ -118,8 +130,8 @@ test("next revoke page extends stable numbering and selection", async () => {
         if (req.action !== "matrix_tokens") return {};
         return {tokens: [{...item, id: req.offset ? "older" : "newer"}], has_more: !req.offset};
     };
-    await bot.message("!room", {...event, content: {msgtype: "m.text", body: "/revoke"}});
-    await bot.message("!room", {...event, event_id: "$next", content: {msgtype: "m.text", body: "/next"}});
+    await bot.message("!room", {...event, content: {msgtype: "m.text", body: "отозвать"}});
+    await bot.message("!room", {...event, event_id: "$next", content: {msgtype: "m.text", body: "ещё"}});
     assert.match(sent.at(-1).body, /2\. MIS-test/);
     await bot.message("!room", {...event, event_id: "$choice", content: {msgtype: "m.text", body: "2"}});
     assert.equal(calls.at(-1).resource, "older");
@@ -127,12 +139,12 @@ test("next revoke page extends stable numbering and selection", async () => {
 
 test("name stays private in creator metadata and lists, not the forwarded invitation", async () => {
     const {bot, event, sent, store, client, config} = setup();
-    event.content.body = "/invite Для Антона";
+    event.content.body = "пригласить Для Антона";
     await bot.message("!room", event);
-    assert.doesNotMatch(sent[0].body, /Для Антона|\/revoke/);
+    assert.doesNotMatch(sent[0].body, /Для Антона|\отозвать/);
     assert.equal(sent[1].body, "Название для тебя: Для Антона");
     const restart = new ReferralBot(client, bot.control, store, config);
-    await restart.message("!room", {...event, event_id: "$list", content: {msgtype: "m.text", body: "/tokens"}});
+    await restart.message("!room", {...event, event_id: "$list", content: {msgtype: "m.text", body: "токены"}});
     assert.match(sent.at(-1).body, /Для Антона/);
     assert.equal(restart.label("@other:misbot.ru", "own-token"), "");
 });

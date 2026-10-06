@@ -1,4 +1,5 @@
 "use strict";
+process.umask(0o077);
 const fs = require("node:fs");
 const net = require("node:net");
 const http = require("node:http");

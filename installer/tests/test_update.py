@@ -77,10 +77,11 @@ class UpdateTests(unittest.TestCase):
             before, after = self.component_folders(Path(temp)); plan = update.component_plan(before, after)
             (after / 'versions.json').write_bytes((before / 'versions.json').read_bytes())
             with patch.object(lifecycle, 'configure'), patch.object(lifecycle, 'dc') as dc, \
-                    patch.object(lifecycle, 'service_rows', return_value=[]), \
+                    patch.object(lifecycle, 'service_rows', side_effect=[[{'Service':'federation-bot','State':'exited'}],[]]), \
                     patch.object(update, 'component_schema') as schema:
                 update.component_rollback_guard(after, before, plan)
             self.assertEqual(dc.call_args.args[:3], ('stop', '-t', '30'))
+            self.assertIn('federation-bot',dc.call_args.args)
             schema.assert_called_once_with(after)
 
     def test_component_schema_refusal_never_restores_or_starts_older_files(self):

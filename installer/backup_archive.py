@@ -56,8 +56,8 @@ def extract(archive, destination, owners=False):
                 raise RuntimeError('Backup destination escapes its private directory')
             if target.exists() or target.is_symlink():
                 raise RuntimeError('Backup extraction requires an empty destination')
-            if owners and (member.uid not in (0, 999, 991, 10001, 10002, 65532)
-                    or member.gid not in (0, 999, 991, 10001, 10002, 65532)):
+            if owners and (member.uid not in (0, 999, 991, 10001, 10002, 10003, 65532)
+                    or member.gid not in (0, 999, 991, 10001, 10002, 10003, 65532)):
                 raise RuntimeError('Unexpected numeric owner in backup; inspect privately')
         # All member paths and types are checked before writing any member.
         for member in members:

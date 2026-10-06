@@ -34,6 +34,7 @@ FIELDS={
  'POSTGRES_MODE':Field('server','PostgreSQL: local или external','local','database',example='local',impact='Действующее хранилище меняется только storage operation.'),
  'DOCKER_SUBNET':Field('policy','Приватная свободная IPv4 сеть /24','172.30.50.0/24','subnet',example='172.30.50.0/24',impact='После первого запуска не изменять.'),
  'FEDERATION_SERVERS':Field('policy','Разрешённые Matrix server_name через запятую','misbot.ru','domains',example='matrix.org,example.net'),
+ 'FEDERATION_AUTO_ACCEPT':Field('policy','Принимать комнаты только от согласованного bot MXID одобренного peer','false','bool',example='false',impact='Не изменяет allowlist; по умолчанию требуется местный администратор.'),
  'OPEN_REGISTRATION':Field('policy','Разрешить новые парольные регистрации','true','bool',example='true'),
  'REGISTRATION_TOKEN_REQUIRED':Field('policy','Требовать приглашение при парольной регистрации','true','bool',example='true'),
  'INVITATION_LIFETIME_SECONDS':Field('policy','Срок приглашений и первого токена, секунды (7 дней)','604800','lifetime',example='604800',impact='Новые приглашения; сохранённый токен не продлевается.'),

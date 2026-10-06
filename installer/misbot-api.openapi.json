@@ -1,0 +1,340 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Misbot instance protocol",
+    "version": "1",
+    "description": "Misbot protocol; not Matrix. Local administrator methods exist only on root CLI and dedicated UID Unix RPC. No remote admin access."
+  },
+  "servers": [
+    {
+      "url": "https://example.org"
+    }
+  ],
+  "paths": {
+    "/.well-known/misbot": {
+      "get": {
+        "summary": "Public origin-bound discovery",
+        "responses": {
+          "200": {
+            "description": "Discovery",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Discovery"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "rate_limit"
+          },
+          "503": {
+            "description": "staged, frozen or unavailable"
+          }
+        }
+      }
+    },
+    "/_misbot/v1/exchange": {
+      "post": {
+        "summary": "Authenticated peer request/status/decision/cancellation",
+        "description": "Sign every request. Nonce replay protection and UTC timestamp within 300 seconds. Max body 32768 bytes. A remote decision never substitutes local approval. Response signature and reply_to must be verified.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Request"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Signed result, not evidence of Matrix room federation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Response"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Safe code: invalid_signature, signature_identity, unsupported_version, expired_request, replay, request_owner, invalid_request, request_not_found, remote_operation_denied, request_capacity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "code"
+                  ],
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "rate_limit"
+          },
+          "503": {
+            "description": "installation_busy_or_pending: retain checkpoint and retry"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Discovery": {
+        "type": "object",
+        "required": [
+          "protocol",
+          "instance_id",
+          "server_name",
+          "bot_mxid",
+          "api_path",
+          "algorithm",
+          "public_key",
+          "key_id"
+        ],
+        "properties": {
+          "protocol": {
+            "type": "integer",
+            "const": 1
+          },
+          "instance_id": {
+            "type": "string"
+          },
+          "server_name": {
+            "type": "string"
+          },
+          "bot_mxid": {
+            "type": "string"
+          },
+          "api_path": {
+            "type": "string"
+          },
+          "algorithm": {
+            "type": "string"
+          },
+          "public_key": {
+            "type": "string"
+          },
+          "key_id": {
+            "type": "string"
+          }
+        }
+      },
+      "Request": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "payload",
+          "signature"
+        ],
+        "properties": {
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "protocol",
+              "sender",
+              "instance_id",
+              "recipient",
+              "recipient_instance",
+              "timestamp",
+              "nonce",
+              "method",
+              "path",
+              "body"
+            ],
+            "properties": {
+              "protocol": {
+                "type": "integer",
+                "const": 1
+              },
+              "sender": {
+                "type": "string"
+              },
+              "instance_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              "recipient": {
+                "type": "string"
+              },
+              "recipient_instance": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              "timestamp": {
+                "type": "integer"
+              },
+              "nonce": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              "method": {
+                "type": "string",
+                "const": "POST"
+              },
+              "path": {
+                "type": "string",
+                "const": "/_misbot/v1/exchange"
+              },
+              "body": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "action",
+                  "request_id",
+                  "expires_at",
+                  "approved",
+                  "applied"
+                ],
+                "properties": {
+                  "action": {
+                    "type": "string",
+                    "enum": [
+                      "invite",
+                      "status",
+                      "decision",
+                      "rejected",
+                      "cancelled"
+                    ]
+                  },
+                  "request_id": {
+                    "type": "string",
+                    "pattern": "^MB-[0-9a-f]{32}$"
+                  },
+                  "expires_at": {
+                    "type": "integer"
+                  },
+                  "approved": {
+                    "type": "boolean"
+                  },
+                  "applied": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          },
+          "signature": {
+            "type": "string",
+            "description": "Base64 RSA-3072/SHA256 PKCS#1 v1.5 signature of canonical payload"
+          }
+        }
+      },
+      "Response": {
+        "type": "object",
+        "required": [
+          "payload",
+          "signature"
+        ],
+        "properties": {
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "protocol",
+              "sender",
+              "instance_id",
+              "recipient",
+              "recipient_instance",
+              "timestamp",
+              "nonce",
+              "method",
+              "path",
+              "body"
+            ],
+            "properties": {
+              "protocol": {
+                "type": "integer",
+                "const": 1
+              },
+              "sender": {
+                "type": "string"
+              },
+              "instance_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              "recipient": {
+                "type": "string"
+              },
+              "recipient_instance": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              "timestamp": {
+                "type": "integer"
+              },
+              "nonce": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              "method": {
+                "type": "string",
+                "const": "POST"
+              },
+              "path": {
+                "type": "string",
+                "const": "/_misbot/v1/exchange"
+              },
+              "body": {
+                "type": "object",
+                "required": [
+                  "request_id",
+                  "reply_to",
+                  "state",
+                  "approved",
+                  "applied"
+                ],
+                "properties": {
+                  "request_id": {
+                    "type": "string",
+                    "pattern": "^MB-[0-9a-f]{32}$"
+                  },
+                  "reply_to": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{32}$"
+                  },
+                  "state": {
+                    "type": "string",
+                    "enum": [
+                      "pending",
+                      "accepted",
+                      "applying",
+                      "partially_applied",
+                      "connected",
+                      "rejected",
+                      "expired",
+                      "cancelled"
+                    ]
+                  },
+                  "approved": {
+                    "type": "boolean"
+                  },
+                  "applied": {
+                    "type": "boolean"
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "signature": {
+            "type": "string",
+            "description": "Base64 RSA-3072/SHA256 PKCS#1 v1.5 signature of canonical payload"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  }
+}

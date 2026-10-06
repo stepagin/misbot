@@ -13,6 +13,8 @@ parser.add_argument('--output', type=Path, default=root.parent / 'dist/matrix-in
 parser.add_argument('--check', action='store_true', help='verify that SHA256SUMS matches the current source files')
 args = parser.parse_args()
 names = [
+    'federation.py','federation_runtime.py','federation_protocol.py','federation_service.py',
+    'federation_admin_api.py','federation_matrix_api.py','federation.md','misbot-api.openapi.json',
     'configuration-examples/server.env.example','configuration-examples/policy.env.example',
     'configuration-examples/media-s3.env.example','configuration-examples/backup.env.example',
     'configuration-examples/auth.env.example','configuration-examples/database.env.example',
@@ -36,6 +38,9 @@ for destination,files in source_names.items():
         target = destination + '/' + name
         names.append(target)
         sources[target] = source / name
+for name in ('Dockerfile','main.js','logic.js','package.json','package-lock.json','signing.js'):
+    target='federation-bot/'+name;names.append(target)
+    sources[target]=root.parent/'bots'/('matrix-federation' if name in ('Dockerfile','main.js','logic.js') else 'matrix-referral')/name
 payloads = {name: sources[name].read_bytes() for name in names}
 manifest = ''.join(hashlib.sha256(payloads[name]).hexdigest() + '  ' + name + '\n'
                    for name in names).encode()

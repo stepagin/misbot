@@ -4,6 +4,5 @@ WORKDIR /app
 COPY --chown=10002:10001 package.json package-lock.json ./
 RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
 COPY --chown=10002:10001 main.js logic.js signing.js ./
-COPY --chown=10002:10001 tests ./tests
 USER 10002:10001
 CMD ["node", "main.js"]

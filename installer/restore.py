@@ -162,6 +162,7 @@ def _restore_locked(archive, root, digest, public_ip, local_postgres=False):
         update.validate_manifest(files)
         saved_release = update.release(files)
         referral.verify_archive(snapshot / 'files.tar.gz')
+        __import__('federation_runtime').verify_archive(snapshot / 'files.tar.gz')
         # Restored targets use the current compatible installer, including the
         # mandatory writer guard, even if the archive predates that guard.
         runtime = Path(__file__).resolve().parent

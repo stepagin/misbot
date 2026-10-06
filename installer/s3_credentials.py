@@ -176,6 +176,7 @@ def finish(root, saved):
     lifecycle.run(lifecycle.COMPOSE + ['-f', str(override), 'up', '-d'])
     writers = ['synapse', 'mas', 'jwt', 'referral-bot', 'referral-control',
                'livekit', 'tls-router', 'caddy', 'admin', 'web']
+    if lifecycle.state().get('federation_seeded'):writers.append('federation-bot')
     if not lifecycle.external_database():
         writers.append('postgres')
     lifecycle.wait_writers(writers)

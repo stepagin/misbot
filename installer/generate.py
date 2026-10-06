@@ -508,6 +508,15 @@ web = {'default_server_config': {'m.homeserver': {'base_url': f'https://matrix.{
 }
 @DOMAIN@ {
     import discovery
+    handle /.well-known/misbot {
+        reverse_proxy unix//run/misbot/http.sock
+    }
+    handle /_misbot/v1/* {
+        request_body {
+            max_size 32KB
+        }
+        reverse_proxy unix//run/misbot/http.sock
+    }
     handle {
         redir https://web.@DOMAIN@{uri} 302
     }
@@ -610,7 +619,7 @@ services = {
     volumes=['./public/web-config.json:/app/config.json:ro']),
  'admin': service('admin', '48m', environment={'SERVER_NAME': f'{domain}'}),
  'caddy': service('caddy', '80m', ports=['80:80'], volumes=['./config/Caddyfile:/etc/caddy/Caddyfile:ro',
-    './public:/srv/discovery:ro', './data/caddy:/data', './data/caddy-config:/config']),
+    './public:/srv/discovery:ro', './data/caddy:/data', './data/caddy-config:/config','./run/federation:/run/misbot:ro']),
  'tls-router': service('tls-router', '48m', ports=['443:443'],
     volumes=['./config/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro'],
     depends_on=['caddy']),
@@ -646,6 +655,9 @@ compose = {'name': 'matrix-stack', 'services': services,
         'labels': {'org.misbot.matrix.installation.directory': str(root)}}},
     'secrets': {name: {'file': f'./secrets/{name}'} for name in ['db_admin', 'livekit_secret']}}
 services.update(referral.services())
+import federation_runtime
+federation_runtime.configure(root,state,args.preview)
+services['federation-bot']=federation_runtime.service()
 if has_proxy:
     services['mas']['env_file'] = [{'path': './mas-proxy.env', 'format': 'raw'}]
 (root / 'compose.yaml').write_text(yaml.safe_dump(compose, sort_keys=False))

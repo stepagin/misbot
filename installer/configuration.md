@@ -39,6 +39,12 @@ DNS не считается готовым по подтверждению по�
 | `secrets/` | Автоматически созданные внутренние пароли и токены | Backend; вручную не редактировать |
 | `config/`, `compose.yaml`, `mas-proxy.env` | Generated runtime | Не являются пользовательскими шаблонами |
 
+`FEDERATION_AUTO_ACCEPT` в policy.env: boolean `true`/`false`, default `false`, пример `false`.
+Включает только приём комнат от точного bot MXID одобренного connected peer;
+не меняет allowlist и права участников. Применяется сразу backend при проверке
+приглашения. Изменение: `sudo misbot federation rooms auto-accept --enabled true`.
+Остальные [операции федерации](federation.md) используют тот же загрузчик.
+
 Каталог `settings` — root:root 0700, файлы — root:root 0600, обычные файлы,
 без symlink/hardlink. Env читается буквально как UTF-8 `KEY=value`: без `export`,
 shell-кода, подстановок и комментариев после значения. Внешние парные кавычки

@@ -63,6 +63,7 @@ class LifecycleTests(unittest.TestCase):
             root=Path(folder)
             paths=[root/'database-password-transition.json',root/'installation.json',root/'fictional-private-data']
             for path in paths:path.write_text('FICTIONAL_RETAINED_CONTENT')
+            (root/'installation.json').write_text(json.dumps({'domain':'fictional.example','federation_seeded':False}))
             before={path:path.read_bytes() for path in paths}
             for outputs in (
                     ['', 'network',json.dumps(['matrix-stack','default',folder]),'endpoint',json.dumps(['matrix-stack',folder])],
@@ -109,7 +110,7 @@ class LifecycleTests(unittest.TestCase):
             for pending, rows, message in (
                 (False, [], 'already activated'),
                 *((True, [{'Service':service, 'State':state}], 'writers are still active')
-                  for service in ('synapse','mas','jwt','referral-bot','referral-control')
+                  for service in ('synapse','mas','jwt','referral-bot','referral-control','federation-bot')
                   for state in ('running','restarting','paused'))):
                 with self.subTest(pending=pending), patch.object(lifecycle, 'ROOT', root, create=True), \
                         patch.object(lifecycle, 'state', return_value={'restore_pending':pending}), \

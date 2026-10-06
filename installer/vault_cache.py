@@ -120,6 +120,7 @@ def secret_files(root):
     names = (['settings/'+p.name for p in (root/'settings').iterdir()] if (root/'settings').is_dir() else ['settings.env']) + [ 'config/mas-signing.pem', 'config/mas-defaults.yaml',
              'config/referral-bot.json', 'config/external-postgres-owner.json',
              'data/referral-bot/cross-signing.json',
+             'config/federation-bot.json','data/federation-bot/cross-signing.json','data/federation/identity.pem',
              'data/synapse/' + metadata['domain'] + '.signing.key']
     names += [str(path.relative_to(root)) for path in (root / 'secrets').rglob('*') if path.is_file() or path.is_symlink()]
     return sorted(name for name in names if (root / name).exists() or (root / name).is_symlink())

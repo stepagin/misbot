@@ -31,9 +31,9 @@ sudo misbot start
 sudo misbot stop
 ```
 
-Группы: `config`, `users`, `storage`, `backup`, `update`, `credentials`.
-`federation help` и `homepage help` объясняют текущие настройки; отдельных
-операций изменения федерации и главной страницы нет. Доступные операции и
+Группы: `config`, `users`, `storage`, `backup`, `update`, `credentials`, `federation`.
+`federation help` описывает локальную политику, заявки и комнаты бота;
+`homepage help` объясняет текущую переадресацию. Доступные операции и
 обязательные аргументы показаны в help каждой группы и в `COMMAND --help`.
 Для команды восстановления следуйте выводу `status`, учитывая pending и занятые
 блокировки. Не удаляйте checkpoints, не выполняйте повторный init на рабочей установке.
@@ -173,14 +173,35 @@ JSON предназначен для будущего UI; UI не должен �
 
 | CLI | Backend | Обязательные аргументы |
 |---|---|---|
-| `misbot ui` | `terminal_ui.py` | нет |
+| `misbot federation servers` | `federation-servers` | нет |
+| `misbot federation check` | `federation-check` | `--server` |
+| `misbot federation add` | `federation-add` | `--server` |
+| `misbot federation remove` | `federation-remove` | `--server` |
+| `misbot federation invite` | `federation-invite` | `--server` |
+| `misbot federation peers` | `federation-peers` | нет |
+| `misbot federation requests` | `federation-requests` | нет |
+| `misbot federation operations` | `federation-operations` | нет |
+| `misbot federation requests status` | `federation-request-status` | `--request` |
+| `misbot federation requests approve` | `federation-approve` | `--request` |
+| `misbot federation requests reject` | `federation-reject` | `--request` |
+| `misbot federation requests cancel` | `federation-cancel` | `--request` |
+| `misbot federation requests retry` | `federation-retry` | `--request` |
+| `misbot federation recover` | `federation-recover` | нет |
+| `misbot federation rollback` | `federation-rollback` | нет |
+| `misbot federation rooms invitations` | `federation-room-invitations` | нет |
+| `misbot federation rooms accept` | `federation-room-accept` | `--room` |
+| `misbot federation rooms reject` | `federation-room-reject` | `--room` |
+| `misbot federation rooms leave` | `federation-room-leave` | `--room` |
+| `misbot federation rooms invite` | `federation-room-invite` | `--server`, `--room` |
+| `misbot federation rooms auto-accept` | `federation-auto-accept` | `--enabled` |
+| `misbot ui` | `ui` | нет |
 | `misbot config init` | `init` | `--domain` |
 | `misbot config generate` | `generate` | нет |
-| `misbot config validate` | `configuration.py validate` | нет |
-| `misbot config migrate` | `configuration.py migrate` | нет |
-| `misbot config recover` | `configuration.py recover` | нет |
-| `misbot config rollback` | `configuration.py rollback` | нет |
-| `misbot config apply` | `configuration.py apply` | нет |
+| `misbot config validate` | `configuration-validate` | нет |
+| `misbot config migrate` | `configuration-migrate` | нет |
+| `misbot config recover` | `configuration-recover` | нет |
+| `misbot config rollback` | `configuration-rollback` | нет |
+| `misbot config apply` | `configuration-apply` | нет |
 | `misbot config preflight` | `preflight` | нет |
 | `misbot config command install` | `wrapper-install` | нет |
 | `misbot config command remove` | `wrapper-remove` | нет |
@@ -191,12 +212,12 @@ JSON предназначен для будущего UI; UI не должен �
 | `misbot remove` | `remove` | нет |
 | `misbot users password set` | `user-password` | `--input` |
 | `misbot users password recover` | `user-password-recover` | нет |
-| `misbot users invitation ensure` | `registration.py ensure` | нет |
-| `misbot users invitation status` | `registration.py status` | нет |
-| `misbot users invitation show` | `registration.py show` | нет |
-| `misbot users invitation revoke` | `registration.py revoke` | нет |
-| `misbot users invitation new` | `registration.py new` | нет |
-| `misbot credentials admin show` | `registration.py admin-show` | нет |
+| `misbot users invitation ensure` | `invitation-ensure` | нет |
+| `misbot users invitation status` | `invitation-status` | нет |
+| `misbot users invitation show` | `invitation-show` | нет |
+| `misbot users invitation revoke` | `invitation-revoke` | нет |
+| `misbot users invitation new` | `invitation-new` | нет |
+| `misbot credentials admin show` | `invitation-admin-show` | нет |
 | `misbot storage local` | `media-local` | нет |
 | `misbot storage s3 connect` | `media-s3` | `--config` |
 | `misbot storage recover` | `media-recover` | нет |

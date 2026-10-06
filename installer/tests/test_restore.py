@@ -68,6 +68,7 @@ class RestoreResumeTests(unittest.TestCase):
                     patch.object(restore.update,'release',return_value={'version':'1.2.33'}), \
                     patch.object(restore.update,'copy_sources'),patch.object(restore.referral,'verify_archive'), \
                     patch.object(restore.lifecycle,'ownership_check'),patch.object(restore.lifecycle,'generate') as generate, \
+                    patch('federation_runtime.verify_archive'), \
                     patch.object(restore.shutil,'copytree',side_effect=interrupted_copy):
                 with self.assertRaises(InterruptedError):restore._restore_locked(archive,root,digest,'203.0.113.20',True)
                 generate.assert_not_called()

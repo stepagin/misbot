@@ -2,12 +2,13 @@
 
 ## Назначение и структура
 
-Этот каталог содержит публичный продукт Misbot: переносимый установщик Matrix и код двух ботов. Перед изменением поведения сверяйтесь с документацией соответствующей части проекта:
+Этот каталог содержит публичный продукт Misbot: переносимый установщик Matrix и исходники ботов. Перед изменением поведения сверяйтесь с документацией соответствующей части проекта:
 
 - `deployment/` — универсальные инструкции эксплуатации, сохранения identity и миграции; начните с `deployment/README.md`, `deployment/requirements.md` и `deployment/operations.md`. Инструмент зеркалирования истории и его тесты также находятся здесь.
 - `installer/` — комплект для чистого сервера с произвольным доменом; установка и ограничения описаны в `installer/README.md`. `dist/matrix-installer.tar.gz` — локально собранный архив комплекта.
 - `bots/telegram/` — Telegram-бот и общая управляющая служба.
-- `bots/matrix-referral/` — единственные исходники Matrix-бота. `installer/referral-control/` хранит уникальные файлы управляющей службы; `installer/build.py` добавляет код обоих ботов из `bots/` в архив без дублирования в Git.
+- `bots/matrix-referral/` — единственные исходники реферального Matrix-бота и общего crypto signing helper. `installer/referral-control/` хранит уникальные файлы управляющей службы; `installer/build.py` добавляет runtime из `bots/` в архив без дублирования в Git.
+- `bots/matrix-federation/` — отдельный административный Matrix-бот; `installer/federation.py` — общий backend CLI/UI/бота, `federation_service.py` — узкие Unix RPC/HTTP интерфейсы. Протокол, ограничения доверия и recovery описаны в `installer/federation.md`; публичная схема — `misbot-api.openapi.json`. SDK pins и crypto signing helper берутся из единственного существующего источника, повторные устройства/ключи не создавайте.
 
 Планы, журналы, отчёты агента, свидетельства запусков и персональные серверные материалы ведите во внешнем локальном каталоге вне Git-проекта. Публичный продукт должен собираться без этого каталога. Проверяйте фактическую конфигурацию перед изменениями.
 
@@ -29,6 +30,7 @@ python3 -m unittest discover -s installer/tests -p 'test_*.py'
 python3 -m unittest discover -s bots/telegram/tests -p 'test_*.py'
 python3 -m unittest discover -s deployment/tests -p 'test_*.py'
 (cd bots/matrix-referral && npm test)
+node --test bots/matrix-federation/tests/*.test.js
 python3 installer/build.py --check
 ```
 

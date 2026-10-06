@@ -15,17 +15,21 @@ function expiry(value) {
 function remaining(item, now = Date.now()) {
     const a = item.attributes;
     if (a.revoked_at) return "отозван";
-    if (a.times_used > 0) return "использован";
+    if (a.times_used >= (a.usage_limit || 1)) return "использован";
     if (!a.expires_at) return "без срока";
     const minutes = Math.ceil((new Date(a.expires_at).getTime() - now) / 60000);
     if (minutes <= 0) return "истёк";
     const days = Math.floor(minutes / 1440), hours = Math.floor(minutes % 1440 / 60), mins = minutes % 60;
     return `осталось ${days ? `${days} д ${hours} ч` : hours ? `${hours} ч ${mins} мин` : `${mins} мин`}`;
 }
-function tokenMessage(item, server) {
+function tokenMessage(item, server, bot = "@referral-bot:" + server) {
     const a = item.attributes;
     const uses = a.usage_limit === 1 ? "Один код — один человек." : `Регистраций по этому коду: ${a.usage_limit}.`;
-    const body = `Приглашение на ${server}\n\n${a.token}\n\nДо: ${expiry(a.expires_at)}\n${uses}\n\nОткрой Element X, укажи сервер ${server} и введи код при регистрации.`;
+    const body = `Приглашение на ${server}\n\n${a.token}\n\nДо: ${expiry(a.expires_at)}\n${uses}\n\nОткрой Element X, укажи сервер ${server} и введи код при регистрации.
+
+Регистрация: https://web.${server}
+Реферальный бот помогает управлять своими кодами: https://matrix.to/#/${encodeURIComponent(bot)}
+Следующая команда боту: токены.`;
     const html = escapeHtml(body).replace(escapeHtml(a.token), `<code>${escapeHtml(a.token)}</code>`).replace(/\n/g, "<br>");
     return notice(body, html);
 }
@@ -55,13 +59,15 @@ class ReferralBot {
         const seconds = this.config.invitation_lifetime_seconds || 604800;
         const usage = this.config.invitation_usage_limit || 1;
         const duration = seconds % 86400 === 0 ? `${seconds / 86400} д` : seconds % 3600 === 0 ? `${seconds / 3600} ч` : `${seconds} с`;
-        return this.client.sendNotice(roomId, `Реферальный бот\n\n/invite — создать приглашение\n/invite Для Антона — создать с названием\n/tokens — мои приглашения\n/revoke — выбрать и отозвать\n\nРегистраций на код: ${usage}. Срок: ${duration}.`);
+        return this.client.sendNotice(roomId, `Реферальный бот\n\nпригласить — создать приглашение\nпригласить Для Антона — создать с названием\nтокены [offset] — мои приглашения (например: токены 20)\nотозвать [ID] — выбрать и отозвать своё приглашение
+помощь — эта справка
+отмена — отменить выбор; ещё — следующая страница выбора\n\nРегистраций на код: ${usage}. Срок: ${duration}.`);
     }
     async list(room, sender, offset, revoke = false, previous = null) {
         const page = await this.call("tokens", sender, {offset, limit: 20});
         if (!page.tokens.length) {
             if (revoke && !previous) this.store.setValue(this.key("revoke", room, sender), null);
-            return this.client.sendNotice(room, previous ? "Больше приглашений нет. Выбери номер из списка или /cancel." : "Нет приглашений для показа.");
+            return this.client.sendNotice(room, previous ? "Больше приглашений нет. Выбери номер из списка или отмена." : "Нет приглашений для показа.");
         }
         const first = revoke ? (previous?.ids.length || 0) : offset;
         const lines = page.tokens.map((item, i) => {
@@ -71,8 +77,8 @@ class ReferralBot {
         });
         const title = revoke ? "Какое приглашение отозвать?" : "Мои приглашения";
         const footer = revoke
-            ? `Напиши номер. Отмена: /cancel или «отмена». Выбор действует 15 минут.${page.has_more ? "\nЕщё приглашения: /next" : ""}`
-            : page.has_more ? `Ещё приглашения: /tokens ${offset + 20}` : "";
+            ? `Напиши номер. Отмена: отмена или «отмена». Выбор действует 15 минут.${page.has_more ? "\nЕщё приглашения: ещё" : ""}`
+            : page.has_more ? `Ещё приглашения: токены ${offset + 20}` : "";
         if (revoke) this.store.setValue(this.key("revoke", room, sender), {
             ids: [...(previous?.ids || []), ...page.tokens.map(x => x.id)],
             offset: offset + page.tokens.length, hasMore: page.has_more, expires: Date.now() + 900000,
@@ -84,25 +90,26 @@ class ReferralBot {
     async handle(room, event, text) {
         const sender = event.sender;
         const key = this.key("revoke", room, sender);
+        if (text.startsWith("/")) return this.menu(room);
         const match = text.match(/^(\S+)(?:\s+([\s\S]*))?$/);
         const command = match[1].toLowerCase(), arg = match[2]?.trim();
         let dialog = this.store.getValue(key);
-        if (["/cancel", "cancel", "отмена", "0"].includes(command)) {
+        if (["отмена", "0"].includes(command)) {
             this.store.setValue(key, null);
             return this.client.sendNotice(room, "Отзыв отменён. Коды сохранены.");
         }
-        if (/^\d+$/.test(text) || command === "/next") {
+        if (/^\d+$/.test(text) || command === "ещё") {
             if (!dialog || dialog.expires <= Date.now()) {
                 this.store.setValue(key, null);
-                return this.client.sendNotice(room, "Нет активного выбора. Напиши /revoke, чтобы получить свежий список.");
+                return this.client.sendNotice(room, "Нет активного выбора. Напиши отозвать, чтобы получить свежий список.");
             }
-            if (command === "/next") {
-                if (!dialog.hasMore) return this.client.sendNotice(room, "Это весь список. Выбери номер или /cancel.");
+            if (command === "ещё") {
+                if (!dialog.hasMore) return this.client.sendNotice(room, "Это весь список. Выбери номер или отмена.");
                 return this.list(room, sender, dialog.offset, true, dialog);
             }
             const index = Number(text) - 1;
             if (!Number.isSafeInteger(index) || index < 0 || index >= dialog.ids.length)
-                return this.client.sendNotice(room, "Такого номера нет. Выбери номер из списка или /cancel.");
+                return this.client.sendNotice(room, "Такого номера нет. Выбери номер из списка или отмена.");
             // The saved ID is tied to this exact room/user and shown list, not
             // a refreshed position which could point to another invitation.
             await this.call("revoke", sender, {resource: dialog.ids[index]});
@@ -110,18 +117,18 @@ class ReferralBot {
             return this.client.sendNotice(room, `Приглашение №${index + 1} отозвано.`);
         }
         this.store.setValue(key, null); // A new command cancels an old selection.
-        if (["/invite", "invite", "код", "приглашение", "создать"].includes(command)) {
+        if (["пригласить"].includes(command)) {
             if (arg && (arg.length > 80 || /[\r\n\x00-\x1f\x7f]/.test(arg)))
-                return this.client.sendNotice(room, "Название: одна строка, до 80 символов. Например: /invite Для Антона.");
+                return this.client.sendNotice(room, "Название: одна строка, до 80 символов. Например: пригласить Для Антона.");
             const item = await this.call("invite", sender, {request_id: "matrix:" + event.event_id});
             if (arg) this.store.setValue(JSON.stringify(["label", sender, item.id]), arg);
-            await this.client.sendMessage(room, tokenMessage(item, this.config.server_name));
+            await this.client.sendMessage(room, tokenMessage(item, this.config.server_name, this.config.user_id));
             if (arg) await this.client.sendNotice(room, `Название для тебя: ${arg}`);
-        } else if (["/tokens", "tokens", "коды"].includes(command)) {
+        } else if (["токены"].includes(command)) {
             const offset = arg === undefined ? 0 : Number(arg);
-            if (!Number.isSafeInteger(offset) || offset < 0) return this.client.sendNotice(room, "Просмотр: /tokens или /tokens 20.");
+            if (!Number.isSafeInteger(offset) || offset < 0) return this.client.sendNotice(room, "Просмотр: токены или токены 20.");
             await this.list(room, sender, offset);
-        } else if (["/revoke", "revoke", "отозвать"].includes(command)) {
+        } else if (["отозвать"].includes(command)) {
             if (arg) {
                 await this.call("revoke", sender, {resource: arg});
                 await this.client.sendNotice(room, "Приглашение отозвано.");
@@ -129,6 +136,7 @@ class ReferralBot {
         } else await this.menu(room);
     }
     async message(roomId, event) {
+        if (event.content?.["m.relates_to"]?.rel_type === "m.replace") return;
         if (!event?.event_id || event.sender === this.config.user_id || event.content?.msgtype !== "m.text") return;
         if (!await this.privateRoom(roomId, event.sender) || !await this.encryptedRoom(roomId)) return;
         if (this.store.getValue("processed:" + event.event_id)) return;

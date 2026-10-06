@@ -120,6 +120,7 @@ def down():
                 raise RuntimeError('The network has foreign containers; no containers removed. Ask their operator to disconnect them, then retry install.sh down')
         elif labels[2]!=str(ROOT):
             raise RuntimeError('Empty legacy network has no ownership evidence; no resources removed')
+    if state().get('federation_seeded'):__import__('federation_runtime').controller(ROOT,run,False,remove=True)
     dc('down')  # No volumes, orphan removal, images, files or checkpoint deletion.
     emit('installation_down',passed=True,data_retained=True,checkpoints_retained=True,
          next_action='Use install.sh status; to resume use install.sh up in this same directory. If status names a pending operation, follow its recovery command first')
@@ -190,6 +191,7 @@ def generate():
     ownership_check()
     metadata=state()
     referral.validate_saved(ROOT,metadata)
+    __import__('federation_runtime').validate(ROOT,metadata)
     if metadata.get('synapse_signing_key_created') and not (ROOT/'data/synapse'/ (metadata['domain']+'.signing.key')).is_file():
         raise RuntimeError('Synapse signing key is missing; restore the original key from backup')
     if metadata.get('databases_initialized') and not external_database() and not list((ROOT/'data/postgres').glob('**/PG_VERSION')):
@@ -221,6 +223,7 @@ def generate():
         value['services']['synapse']['image']=image_id
         compose.write_text(yaml.safe_dump(value,sort_keys=False))
     referral.prepare_images(ROOT,run,emit)
+    __import__('federation_runtime').prepare_image(ROOT,run)
     dc('config','--quiet')
     isolated=['docker','run','--rm','--network','none','--memory','144m','--cpus','0.5']
     def mount(source,target):return ['--mount',f'type=bind,source={ROOT/source},target={target},readonly']
@@ -444,6 +447,15 @@ def up():
     state_store.write_json(ROOT/'installation.json',metadata)
     emit('referral_bot_ready',matrix_id='@referral-bot:'+metadata['domain'],encryption=True,
          cross_signed=True,admin_scopes=False)
+    import federation_runtime
+    federation_runtime.provision(ROOT,dc,metadata)
+    state_store.write_json(ROOT/'installation.json',metadata)
+    federation_runtime.controller(ROOT,run)
+    dc('up','-d','federation-bot')
+    wait(lambda:dc('exec','-T','federation-bot','node','-e',
+        "fetch('http://127.0.0.1:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))") is not None,service='federation-bot')
+    metadata=state();metadata['federation_crypto_initialized']=True
+    federation_runtime.validate(ROOT,metadata);state_store.write_json(ROOT/'installation.json',metadata)
     dc('up','-d','jwt','web','admin','caddy','tls-router')
     cert,key=certificate_paths()
     wait(lambda:cert.is_file() and key.is_file(),attempts=150,service='caddy')
@@ -451,7 +463,7 @@ def up():
     dc('up','-d','livekit')
     certificate_watch()
     wait(lambda:all(row['State']=='running' and row.get('Health','') in ('','healthy')
-                   for row in service_rows()) and len(service_rows())==(10 if external_database() else 11),
+                   for row in service_rows()) and len(service_rows())==(11 if external_database() else 12),
          service='postgres-client synapse mas referral-control referral-bot jwt web admin caddy tls-router livekit'
          if external_database() else 'postgres synapse mas referral-control referral-bot jwt web admin caddy tls-router livekit')
     check()
@@ -468,6 +480,11 @@ def service_rows():
     return [json.loads(line) for line in dc('ps','--all','--format','json').splitlines() if line.strip()]
 
 
+def stop():
+    if state().get('federation_seeded'):__import__('federation_runtime').controller(ROOT,run,False)
+    dc('stop')
+
+
 def status():
     metadata=state()
     pending={name:bool(metadata.get(name)) for name in
@@ -479,6 +496,7 @@ def status():
             ('s3_credential_recovery_pending','s3-credentials-transition.json'),
             ('update_recovery_pending','update-journal.json'),
             ('configuration_recovery_pending','configuration-transition.json'),
+            ('federation_recovery_pending','federation-transition.json'),
             ('user_password_recovery_pending','secrets/user-password-pending.json')):
         marker=ROOT/relative
         pending[name]=marker.exists() or marker.is_symlink()
@@ -486,6 +504,8 @@ def status():
     actions=[]
     if pending['configuration_recovery_pending']:
         actions.append('sudo misbot --directory '+shlex.quote(str(ROOT))+' config recover')
+    if pending['federation_recovery_pending']:
+        actions.append('sudo misbot --directory '+shlex.quote(str(ROOT))+' federation recover')
     for flag,operation in (
             ('backup_recovery_pending','backup-recover'),
             ('database_recovery_pending','database-recover'),
@@ -539,7 +559,7 @@ def paused_writers(leave_stopped=False):
         return
     state_store.assert_backup_allowed(ROOT)
     running={row['Service'] for row in service_rows() if row['State'] in ('running','restarting')}
-    writers=[name for name in ('referral-bot','referral-control','synapse','mas','jwt') if name in running]
+    writers=[name for name in ('federation-bot','referral-bot','referral-control','synapse','mas','jwt') if name in running]
     record={'format':1,'server_name':state()['domain'],'writers':writers,
         'keep_stopped':bool(leave_stopped or state().get('migration_frozen')),
         'pid':os.getpid(),'started':state_store.process_identity(os.getpid())[1]}
@@ -598,10 +618,11 @@ def check():
     if result.returncode:raise RuntimeError('Public checks failed; see the check records above')
     rows=service_rows()
     for row in rows:emit('service',name=row['Service'],state=row['State'],health=row.get('Health',''))
-    expected=10 if external_database() else 11
+    expected=(10 if external_database() else 11)+(1 if state().get('federation_seeded') else 0)
     if len(rows)!=expected or any(row['State']!='running' or row.get('Health','') not in ('','healthy') for row in rows):
         raise RuntimeError('Not all expected containers are ready')
     referral.validate_saved(ROOT,state())
+    __import__('federation_runtime').validate(ROOT,state())
     emit('public_checks',passed=True)
 
 
@@ -680,6 +701,7 @@ def backup(leave_stopped=False):
             for name in sorted(sources):backup_archive.add_tree(tar,ROOT/name,name,recursive=False)
             for name in ['config','public','secrets','settings','settings.env','installation.json','compose.yaml','images.lock.json',
                          'referral-images.lock.json',
+                         'federation-images.lock.json','data/federation','data/federation-bot','federation-transition.json','stages/federation',
                          'data/referral-bot','data/referral-control',
                          'data/synapse','data/caddy','data/caddy-config','mas-proxy.env',
                          'synapse-s3-image.lock.json']:
@@ -718,9 +740,10 @@ def move_export():
     state_store.write_json(ROOT/'installation.json',metadata)
     started=time.monotonic()
     # The freeze survives every export error, including a busy backup lock.
-    dc('stop','-t','30','referral-bot','referral-control','synapse','mas','jwt')
+    dc('stop','-t','30',*(['federation-bot'] if state().get('federation_seeded') else []),'referral-bot','referral-control','synapse','mas','jwt')
+    if state().get('federation_seeded'):__import__('federation_runtime').controller(ROOT,run,False)
     if metadata.get('media_mode', 'local') == 's3':
-        if any(row['Service'] in ('referral-bot','referral-control','synapse','mas','jwt')
+        if any(row['Service'] in ('federation-bot','referral-bot','referral-control','synapse','mas','jwt')
                 and row['State'] in ('running','restarting') for row in service_rows()):
             raise RuntimeError('Migration writers are still running; no final S3 archive created. Check install.sh status and retry move-export; do not activate the target')
         try:
@@ -764,6 +787,7 @@ def restore_check():
         backup_archive.extract(archive,temp)
         snapshot=backup_archive.verify_snapshot(temp)
         referral.verify_archive(snapshot/'files.tar.gz')
+        __import__('federation_runtime').verify_archive(snapshot/'files.tar.gz')
         emit('referral_backup_crypto_restore',passed=True)
         for database in ['synapse','mas']:
             target='restorecheck_'+database+'_'+uuid.uuid4().hex[:8]
@@ -796,7 +820,7 @@ def restore_activate():
     if not metadata.get('restore_pending'):
         raise RuntimeError('This restore target was already activated; use install.sh status/check. '
             'To restore another archive use an empty directory; existing data was not changed')
-    if any(row['Service'] in ('synapse','mas','jwt','referral-bot','referral-control')
+    if any(row['Service'] in ('synapse','mas','jwt','referral-bot','referral-control','federation-bot')
             and row['State'] in ('running','restarting','paused') for row in service_rows()):
         raise RuntimeError('Staged target writers are still active (running, restarting or paused); stop them with install.sh down, '
             'then repeat restore-activate after stopping the source; no keys were cleared')
@@ -852,7 +876,7 @@ def main():
             if args.action not in ('generate','up'):ownership_check()
             {'up':up,'generate':generate,'check':check,'backup':backup,'backup-recover':backup_recover,'restore-check':restore_check,
              'restore-activate':restore_activate,'move-export':move_export,'move-abort':move_abort,
-             'cert-renew':cert_renew,'status':status,'stop':lambda:dc('stop'),'down':down}[args.action]()
+             'cert-renew':cert_renew,'status':status,'stop':stop,'down':down}[args.action]()
             if args.register_command or args.remove_command:
                 subprocess.run(['/usr/bin/python3',str(ROOT/'command_wrapper.py'),
                     'install' if args.register_command else 'remove','--directory',str(ROOT),

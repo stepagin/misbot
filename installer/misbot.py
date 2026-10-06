@@ -39,7 +39,8 @@ def operation_help(command):
             'catalog':'/root/.local/state/misbot/s3-probes/PROBE.json','calendar':'*-*-* 03:00:00 UTC',
             'archive':'/root/misbot-backup.tar.gz','sha256':'ARCHIVE_SHA256','public-ip':'203.0.113.20',
             'confirm':'source-stopped' if command.backend=='restore-activate' else 'target-stopped',
-            'object':'backup/example/object.enc','output':'/root/verified-backup.tar.gz'}
+            'object':'backup/example/object.enc','output':'/root/verified-backup.tar.gz',
+            'server':'example.org','room':'!fictional:example.org','request':'MB-0123456789abcdef0123456789abcdef','enabled':'false'}
     if command.backend.startswith('vault-'):sample['config']='/root/misbot-vault.env'
     if command.backend=='database-external':sample['config']='/root/misbot-postgres.env'
     if command.backend.startswith('backup-'):sample['config']='/root/misbot-backup-s3.env'
@@ -55,7 +56,7 @@ def operation_help(command):
 def help_text(topic=''):
     if topic in vocabulary.BY_PATH:
         operation_help(vocabulary.BY_PATH[topic]);return
-    if topic in ('federation','homepage'):
+    if topic in ('homepage',):
         print(vocabulary.TOPICS[topic]);return
     if not topic:
         print('Misbot — команды управления Matrix\n\nСостояние и службы: status, check, start, stop, remove\nВерсия: version\n')
@@ -162,6 +163,10 @@ def plan(command,options,values,source=None):
         return ['/usr/bin/python3',str(root/'command_wrapper.py'),command.backend[8:],'--directory',str(root)]
     if command.backend.startswith('configuration-'):
         return ['/usr/bin/python3',str(backend/'configuration.py'),'--directory',str(root),command.backend[14:]]
+    if command.backend.startswith('federation-'):
+        action=command.backend[11:];argument=[values[name] for name in command.arguments]
+        if action=='room-invite':argument=[json.dumps({'server':values['server'],'room':values['room']})]
+        return ['/usr/bin/python3',str(backend/'federation.py'),'--directory',str(root),action,*argument]
     if command.backend.startswith('invitation-'):
         return ['/usr/bin/python3',str(backend/'registration.py'),'--directory',str(root),command.backend[11:]]
     return ['/bin/bash',str(backend/'install.sh'),*vocabulary.backend_argv(command,values,root)]

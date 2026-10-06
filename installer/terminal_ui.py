@@ -242,7 +242,7 @@ class UI:
         text('Misbot — '+str(self.root)+'; Enter не изменяет секреты. Отмена возвращает меню.')
         self.run('status')
         while True:
-            text('\n1 статус; 2 проверка; 3 запуск; 4 остановка; 5 настройки; 6 медиа/S3; 7 копии; 8 пользователи/credentials; 9 обновление; 0 выход')
+            text('\n1 статус; 2 проверка; 3 запуск; 4 остановка; 5 настройки; 6 медиа/S3; 7 копии; 8 пользователи/credentials; 9 обновление; 10 федерация/бот/заявки; 0 выход')
             try:
                 choice=self.ask('Выбор','0')
                 if choice=='0':return 0
@@ -251,7 +251,7 @@ class UI:
                     if command=='stop' and self.ask('Остановка служб; данные сохраняются. Выполнить? да/нет','нет')!='да':continue
                     code=self.run(command);text('Код завершения '+str(code)+'. Состояние/продолжение: misbot status.');continue
                 if choice=='5':self.settings_menu();continue
-                group={'6':'storage','7':'backup','8':'users','9':'update'}.get(choice)
+                group={'6':'storage','7':'backup','8':'users','9':'update','10':'federation'}.get(choice)
                 if not group:continue
                 commands=[c for c in cli_commands.COMMANDS if c.path.startswith(group+' ')]
                 if choice=='8':commands+=[c for c in cli_commands.COMMANDS if c.path.startswith('credentials ')]

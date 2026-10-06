@@ -255,7 +255,7 @@ class GeneratorTests(unittest.TestCase):
         synapse=yaml.safe_load((self.root/'config/homeserver.yaml').read_text())
         livekit=yaml.safe_load((self.root/'config/livekit.yaml').read_text())
         caddy=(self.root/'config/Caddyfile').read_text()
-        self.assertEqual(len(compose['services']),11)
+        self.assertEqual(len(compose['services']),12)
         self.assertEqual(synapse['server_name'],'chat.example.org')
         self.assertEqual(synapse['federation_domain_whitelist'],['misbot.ru'])
         self.assertEqual(synapse['encryption_enabled_by_default_for_room_type'],'all')
@@ -266,7 +266,11 @@ class GeneratorTests(unittest.TestCase):
         self.assertNotIn('/srv/discovery/mas.yaml',caddy)
         self.assertNotIn('ports',compose['services']['postgres'])
         self.assertIn('./public:/srv/discovery:ro',compose['services']['caddy']['volumes'])
-        self.assertTrue(all('@sha256:' in service['image'] for name,service in compose['services'].items() if not name.startswith('referral-')))
+        self.assertTrue(all('@sha256:' in service['image'] for name,service in compose['services'].items() if not name.startswith(('referral-','federation-'))))
+        self.assertEqual(compose['services']['federation-bot']['user'],'10003:10003')
+        self.assertIn('handle /.well-known/misbot',caddy)
+        self.assertIn('handle /_misbot/v1/*',caddy)
+        self.assertIn('unix//run/misbot/http.sock',caddy)
         self.assertEqual(compose['networks']['default']['ipam']['config'],[{'subnet':'172.30.50.0/24'}])
 
     def test_referral_client_is_private_and_all_registration_requires_invites(self):

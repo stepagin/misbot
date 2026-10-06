@@ -212,9 +212,10 @@ def external(root, settings_path):
     if any(metadata.get(k) for k in ('restore_pending', 'migration_frozen', 'credential_transition_pending', 'media_transition_pending')):
         raise RuntimeError('Finish recovery or machine migration before changing database storage')
     running = {r['Service'] for r in lifecycle.service_rows() if r['State'] in ('running', 'restarting')}
-    if any(name not in running for name in WRITERS):
+    writers=WRITERS+(('federation-bot',) if metadata.get('federation_seeded') else ())
+    if any(name not in running for name in writers):
         raise RuntimeError('Start and verify all Matrix writers with install.sh up/check before database-external; migration of an intentionally partially stopped installation is not supported yet')
-    lifecycle.wait_writers(list(WRITERS))
+    lifecycle.wait_writers(list(writers))
     folder = target(root, settings(settings_path))
     client = Client(root, folder)
     version_check(client)
@@ -235,7 +236,7 @@ def external(root, settings_path):
         saved = stage / 'config' / path.relative_to(root / 'config')
         os.chown(saved, path.stat().st_uid, path.stat().st_gid)
     record = {'format': 1, 'server_name': metadata['domain'], 'stage': str(stage.relative_to(root)),
-              'target': str(folder.relative_to(root)), 'writers': [n for n in WRITERS if n in running],
+              'target': str(folder.relative_to(root)), 'writers': [n for n in writers if n in running],
               'phase': 'prepared', 'activated': False, 'imported': []}
     claim(root, record)
     resume(root, record)

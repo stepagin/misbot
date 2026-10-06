@@ -166,9 +166,11 @@ def inherited_operation_descriptor(root):
         return None
 
 
-def assert_update_allowed(root, allow_restore_generation=False):
+def assert_update_allowed(root, allow_restore_generation=False, allow_federation=False, allow_configuration=False):
+    if not allow_federation and (Path(root)/"federation-transition.json").exists():
+        raise RuntimeError("Federation change needs recovery: sudo misbot --directory "+shlex.quote(str(root))+" federation recover; keep the checkpoint")
     import configuration
-    configuration.pending(root)
+    if not allow_configuration:configuration.pending(root)
     assert_restore_complete(root,allow_restore_generation)
     assert_s3_credentials_allowed(root)
     assert_database_allowed(root)
@@ -231,7 +233,7 @@ def database_transition_record(root):
             or not isinstance(record.get('started'), str)
             or not isinstance(record.get('stage'), str) or not isinstance(record.get('target'), str)
             or not isinstance(writers, list) or len(set(writers)) != len(writers)
-            or any(n not in ('referral-bot', 'referral-control', 'synapse', 'mas', 'jwt') for n in writers)
+            or any(n not in ('federation-bot', 'referral-bot', 'referral-control', 'synapse', 'mas', 'jwt') for n in writers)
             or not isinstance(imported, list) or len(set(imported)) != len(imported)
             or any(n not in ('synapse', 'mas') for n in imported)
             or record.get('server_name') != json.loads((root / 'installation.json').read_text()).get('domain')):
@@ -312,7 +314,7 @@ def backup_pause_record(root):
     if (record.get('format') != 1 or not isinstance(writers, list)
             or any(not isinstance(name, str) for name in writers)
             or len(writers) != len(set(writers))
-            or any(name not in ('referral-bot', 'referral-control', 'synapse', 'mas', 'jwt') for name in writers)
+            or any(name not in ('federation-bot', 'referral-bot', 'referral-control', 'synapse', 'mas', 'jwt') for name in writers)
             or type(record.get('pid')) is not int or record['pid'] <= 0
             or not isinstance(record.get('started'), str)
             or type(record.get('keep_stopped')) is not bool):

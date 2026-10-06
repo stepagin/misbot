@@ -31,7 +31,8 @@ class CommandTests(unittest.TestCase):
 
     def test_help_version_without_root_docker_or_secrets(self):
         for argv in ([],['help'],['storage','help'],['storage','s3','check','--help'],['version'],
-                ['ui','--help'],['config','validate','--help'],['users','invitation','show','--help']):
+                ['ui','--help'],['config','validate','--help'],['users','invitation','show','--help'],
+                ['federation','help'],['federation','requests','approve','--help'],['federation','operations','--help']):
             output=io.StringIO()
             with patch.object(os,'geteuid',return_value=1000),patch.object(wrapper,'default_directory',side_effect=AssertionError('secret read')),contextlib.redirect_stdout(output):
                 self.assertEqual(misbot.main(argv),0)
@@ -59,6 +60,16 @@ class CommandTests(unittest.TestCase):
             for args in (['version'],['storage','s3','check','--config','/does/not/exist','--help']):
                 result=subprocess.run([sys.executable,str(BUNDLE/'misbot.py'),*args],cwd=folder,capture_output=True,text=True,env={'PATH':'/nonexistent'})
                 self.assertEqual(result.returncode,0,result.stderr)
+
+    def test_federation_uses_shared_backend_and_preserves_opaque_room_argument(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=self.installation(Path(folder)/'Matrix Test')
+            room="!RoomCase:fictional.invalid;$(fictional)"
+            cmd,opts,values=misbot.parse(['federation','rooms','invite','--server','peer.example',
+                '--room',room,'--directory',str(root)])
+            args=misbot.plan(cmd,opts,values,source=BUNDLE)
+            self.assertEqual(args[:-1],['/usr/bin/python3',str(root/'federation.py'),'--directory',str(root),'room-invite'])
+            self.assertEqual(json.loads(args[-1]),{'room':room,'server':'peer.example'})
 
     def test_privileges_non_tty_and_missing_sudo(self):
         for sudo in ('/usr/bin/sudo',None):

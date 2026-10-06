@@ -14,6 +14,27 @@ class Command:
 
 
 COMMANDS = [
+    Command('federation servers','federation-servers',purpose='Показать действующий локальный allowlist.'),
+    Command('federation check','federation-check',('server',),'Проверить Misbot discovery/TLS; факт федеративных комнат отдельно.'),
+    Command('federation add','federation-add',('server',),'Добавить Matrix server_name только в локальный allowlist.',stops='Копия, Synapse/Web перезапускаются.'),
+    Command('federation remove','federation-remove',('server',),'Удалить одну локальную запись, сохраняя identity и restrictive policy.',stops='Копия, Synapse/Web перезапускаются.'),
+    Command('federation invite','federation-invite',('server',),'Отправить подписанную заявку на взаимный allowlist; default 7 дней.'),
+    Command('federation peers','federation-peers',purpose='Показать согласованные instance/bot identities.'),
+    Command('federation requests','federation-requests',purpose='Показать сохранённые заявки и частичное применение.'),
+    Command('federation operations','federation-operations',purpose='Показать сохранённые асинхронные операции административного бота.'),
+    Command('federation requests status','federation-request-status',('request',),'Показать локальный checkpoint заявки; retry проверяет peer.'),
+    Command('federation requests approve','federation-approve',('request',),'Одобрить входящую заявку и продолжить обмен.',stops='Проверенная копия и перезапуск Synapse/Web при применении.'),
+    Command('federation requests reject','federation-reject',('request',),'Отклонить входящую заявку; существующий allowlist сохраняется.'),
+    Command('federation requests cancel','federation-cancel',('request',),'Отменить согласование; уже применённые записи удаляются отдельно.'),
+    Command('federation requests retry','federation-retry',('request',),'Запросить удалённое состояние и завершить частичное применение.'),
+    Command('federation recover','federation-recover',purpose='Завершить локальное применение из защищённого checkpoint.',stops='Synapse/Web перезапускаются.'),
+    Command('federation rollback','federation-rollback',purpose='Восстановить прежнюю конфигурацию локальной операции.',stops='Synapse/Web перезапускаются.'),
+    Command('federation rooms invitations','federation-room-invitations',purpose='Приглашения, адресованные только административному боту.'),
+    Command('federation rooms accept','federation-room-accept',('room',),'Принять текущее приглашение бота.'),
+    Command('federation rooms reject','federation-room-reject',('room',),'Отклонить текущее приглашение бота.'),
+    Command('federation rooms leave','federation-room-leave',('room',),'Покинуть комнату от имени бота.'),
+    Command('federation rooms invite','federation-room-invite',('server','room'),'Пригласить согласованный bot MXID одобренного peer в комнату.'),
+    Command('federation rooms auto-accept','federation-auto-accept',('enabled',),'true/false; default false; только согласованная identity и connected peer.'),
     Command('ui','ui',purpose='Открыть русский SSH-мастер или меню; нужен TTY.',installed=False),
     Command('config init','init',('domain',),'Создать установку, settings/server.env и приватные внутренние credentials.',installed=False),
     Command('config generate','generate',purpose='Сгенерировать конфигурацию без перезапуска.'),
@@ -83,7 +104,7 @@ TOPICS={
     'config':'Установка и конфигурация', 'users':'Пользователи и регистрация',
     'storage':'Медиа, S3 и БД', 'backup':'Копии, восстановление и перенос',
     'update':'Обновление', 'credentials':'Credentials и Vault',
-    'federation':'Федерация: FEDERATION_SERVERS в settings/policy.env; config validate и config apply.',
+    'federation':'Федерация: локальная политика, подписанные заявки Misbot и комнаты административного бота.',
     'homepage':'Главная страница перенаправляет на Element Web. Команды выбора другого URL нет.',
 }
 

@@ -12,20 +12,24 @@ DEVICE = 'MATRIX-REFERRAL-01'
 SCOPE = 'urn:matrix:client:api:* urn:matrix:client:device:' + DEVICE
 
 
-def provision(root, api):
+def provision(root, api, federation=False):
     root = Path(root)
     domain = next(iter(json.loads((root / 'bot-config.json').read_text())['servers']))
     cfg = json.loads((root / 'bot-config.json').read_text())['servers'][domain]
-    journal = root / 'session.json'
-    marker = root / 'managed-user.json'
+    username='federation-bot' if federation else 'referral-bot'
+    display='Бот управления федерацией' if federation else 'Реферальный бот'
+    device='MATRIX-FEDERATION-01' if federation else DEVICE
+    scope='urn:matrix:client:api:* urn:matrix:client:device:'+device
+    journal = root / ('federation-session.json' if federation else 'session.json')
+    marker = root / ('managed-federation-user.json' if federation else 'managed-user.json')
     if journal.exists():
         result = json.loads(journal.read_text())
         user = api.active_user(result['metadata']['mas_user_id'])
         session = api.api('personal-sessions/' + result['metadata']['personal_session_id'])['data']
-        if set(session['attributes']['scope'].split()) != set(SCOPE.split()):
+        if set(session['attributes']['scope'].split()) != set(scope.split()):
             raise RuntimeError('Unexpected referral session scope; refusing replacement')
     else:
-        existing = next((u for u in api.items('users') if u['attributes']['username'] == 'referral-bot'), None)
+        existing = next((u for u in api.items('users') if u['attributes']['username'] == username), None)
         if marker.exists():
             owned = json.loads(marker.read_text())
             if not existing or existing['id'] != owned['mas_user_id']:
@@ -34,23 +38,23 @@ def provision(root, api):
         else:
             if existing:
                 raise RuntimeError('Referral username already occupied; existing account preserved')
-            user = api.api('users', method='POST', data={'username': 'referral-bot', 'displayname': 'Реферальный бот'})['data']
+            user = api.api('users', method='POST', data={'username': username, 'displayname': display})['data']
             private_json(marker, {'mas_user_id': user['id'], 'domain': domain})
         attr = user['attributes']
-        if attr['username'] != 'referral-bot' or attr.get('admin', attr.get('can_request_admin', False)):
+        if attr['username'] != username or attr.get('admin', attr.get('can_request_admin', False)):
             raise RuntimeError('Referral account is not an ordinary bot account')
         session = api.api('personal-sessions', method='POST', data={'actor_user_id': user['id'],
-            'human_name': 'Реферальный бот', 'scope': SCOPE})['data']
-        result = {'config': {'user_id': '@referral-bot:' + domain, 'server_name': domain,
-            'device_id': DEVICE, 'homeserver_url': cfg['synapse_url'],
+            'human_name': display, 'scope': scope})['data']
+        result = {'config': {'user_id': '@'+username+':' + domain, 'server_name': domain,
+            'device_id': device, 'homeserver_url': cfg['synapse_url'],
             'access_token': session['attributes']['access_token']},
             'metadata': {'mas_user_id': user['id'], 'personal_session_id': session['id'],
-                'user_id': '@referral-bot:' + domain, 'device_id': DEVICE, 'scope': SCOPE}}
+                'user_id': '@'+username+':' + domain, 'device_id': device, 'scope': scope}}
         private_json(journal, result)
     attr = user['attributes']
-    if attr['username'] != 'referral-bot' or attr.get('admin', attr.get('can_request_admin', False)):
+    if attr['username'] != username or attr.get('admin', attr.get('can_request_admin', False)):
         raise RuntimeError('Referral account is not an ordinary bot account')
-    if result['config']['user_id'] != '@referral-bot:' + domain or result['config']['device_id'] != DEVICE:
+    if result['config']['user_id'] != '@'+username+':' + domain or result['config']['device_id'] != device:
         raise RuntimeError('Referral account or device mismatch')
     policy = json.loads((root / 'bot-policy.json').read_text())['servers'][domain]
     result['config'].update(invitation_lifetime_seconds=policy['invitation_lifetime_seconds'],
@@ -61,11 +65,13 @@ def provision(root, api):
 def main():
     configs = json.loads((ROOT / 'bot-config.json').read_text())['servers']
     api = MAS(next(iter(configs.values())))
-    result = provision(ROOT, api)
+    federation=sys.argv[1:]==['--federation']
+    if sys.argv[1:] and not federation:raise ValueError('Unknown provisioning mode')
+    result = provision(ROOT, api,federation)
     config = result['config']
     r = requests.get(config['homeserver_url'] + '/_matrix/client/v3/account/whoami',
         headers={'Authorization': 'Bearer ' + config['access_token']}, timeout=15)
-    if r.status_code != 200 or r.json().get('user_id') != config['user_id'] or r.json().get('device_id') != DEVICE:
+    if r.status_code != 200 or r.json().get('user_id') != config['user_id'] or r.json().get('device_id') != config['device_id']:
         raise RuntimeError('Saved bot session is not accepted; restore or repair without resetting its device')
     print(json.dumps(result, ensure_ascii=False))
 

@@ -64,6 +64,7 @@ FAMILY = 'misbot-matrix-portable'
 ESSENTIAL = {'install.sh', 'generate.py', 'lifecycle.py', 'verify.py',
              'referral.py', 'versions.json', 'release.json', 'update.py'}
 SNAPSHOT_FILES = ('compose.yaml', 'images.lock.json', 'referral-images.lock.json',
+                  'federation-images.lock.json',
                   'synapse-s3-image.lock.json',
                   'installation.json', 'mas-proxy.env', 'settings.env',
                   'data/referral-control/bot-config.json',
@@ -140,9 +141,11 @@ def component_rollback_guard(root, folder, plan):
         fail('Component recovery inventory does not match the approved pair; retain the journal and data')
     import lifecycle
     lifecycle.configure(root, 'component-rollback')
-    lifecycle.dc('stop', '-t', '30', 'referral-bot', 'referral-control', 'synapse', 'mas', 'jwt')
-    if any(row['Service'] in ('referral-bot', 'referral-control', 'synapse', 'mas', 'jwt')
-            and row['State'] in ('running', 'restarting') for row in lifecycle.service_rows()):
+    writers=('referral-bot','referral-control','synapse','mas','jwt')
+    if any(row['Service']=='federation-bot' for row in lifecycle.service_rows()):writers=('federation-bot',*writers)
+    lifecycle.dc('stop', '-t', '30', *writers)
+    if any(row['Service'] in (*writers,'federation-bot')
+            and row['State'] in ('running', 'restarting','paused') for row in lifecycle.service_rows()):
         fail('Component rollback writers did not stop; keep the journal and retry trusted update-recover')
     component_schema(root)
 

@@ -16,6 +16,18 @@ import backup_archive
 
 
 class ArchiveTests(unittest.TestCase):
+    @unittest.skipUnless(os.geteuid()==0,'numeric ownership requires root')
+    def test_federation_bot_owner_is_restored_with_private_permissions(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);source=root/'session';source.write_text('FICTIONAL_BOT_STATE');source.chmod(0o600);os.chown(source,10003,10003)
+            archive=root/'snapshot.tar.gz'
+            with tarfile.open(archive,'w:gz') as tar:tar.add(source,arcname='data/federation-bot/state.json')
+            destination=root/'restored';destination.mkdir(mode=0o700)
+            backup_archive.extract(archive,destination,owners=True)
+            saved=destination/'data/federation-bot/state.json'
+            self.assertEqual((saved.stat().st_uid,saved.stat().st_gid,saved.stat().st_mode&0o777),(10003,10003,0o600))
+            self.assertEqual(saved.read_text(),'FICTIONAL_BOT_STATE')
+
     def test_only_the_known_transient_control_socket_is_omitted(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder); run = root / 'bot-run'; run.mkdir()

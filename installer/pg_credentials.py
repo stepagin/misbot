@@ -110,8 +110,9 @@ COMMIT;
 
 
 def stop_writers():
-    lifecycle.dc('stop', '-t', '30', *WRITERS)
-    if any(row['Service'] in WRITERS and row['State'] in ('running', 'restarting')
+    writers=WRITERS+(('federation-bot',) if lifecycle.state().get('federation_seeded') else ())
+    lifecycle.dc('stop', '-t', '30', *writers)
+    if any(row['Service'] in writers and row['State'] in ('running', 'restarting')
            for row in lifecycle.service_rows()):
         raise RuntimeError('Database writers did not stop; keep the password recovery checkpoint')
 
@@ -124,7 +125,7 @@ def finish(root, saved):
     for name, value in values.items():
         state_store.write_text(root / 'secrets' / ('db_' + name), value + '\n')
     lifecycle.generate()
-    lifecycle.dc('up', '-d', *WRITERS)
+    lifecycle.dc('up', '-d', *WRITERS,*(('federation-bot',) if lifecycle.state().get('federation_seeded') else ()))
     credentials.wait_services()
     lifecycle.check()
     (root / JOURNAL).unlink()
