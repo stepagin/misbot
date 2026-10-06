@@ -127,6 +127,10 @@ class RestoreResumeTests(unittest.TestCase):
                 '--domain','restore.example.org','--preview']
             initial=subprocess.run(command+['--initialize-env','--database-mode','external'],capture_output=True,text=True)
             self.assertEqual(initial.returncode,0,initial.stderr)
+            import configuration, configuration_schema, shutil, state_store
+            values={key:item.default for key,item in configuration_schema.FIELDS.items()};values.update(configuration.load(root))
+            shutil.rmtree(root/'settings')
+            state_store.write_text(root/'settings.env',configuration.serialize(values))
             settings=root/'settings.env'
             text=settings.read_text().replace('POSTGRES_HOST=','POSTGRES_HOST=external.example.invalid').replace(
                 'POSTGRES_ADMIN_PASSWORD=','POSTGRES_ADMIN_PASSWORD=FICTIONAL_ADMIN_PASSWORD')

@@ -16,7 +16,13 @@ from urllib.parse import unquote, urlsplit
 
 
 def settings(root):
-    return settings_file(Path(root) / 'settings.env')
+    import configuration
+    return configuration.load(root)
+
+
+def settings_path(root,area='server'):
+    root=Path(root)
+    return root/'settings'/(area+'.env') if (root/'settings').exists() else root/'settings.env'
 
 
 def private_settings_file(path):
@@ -146,13 +152,15 @@ def system_check(root):
                       if line.startswith('MemTotal:')))
     if memory < 900000:
         raise RuntimeError('Less than about 1 GiB RAM; choose a larger VPS before continuing')
-    free = shutil.disk_usage(root).free
+    disk_target=Path(root)
+    while not disk_target.exists():disk_target=disk_target.parent
+    free = shutil.disk_usage(disk_target).free
     if free < 3 * 1024 ** 3:
         raise RuntimeError('Less than 3 GiB free; free disk space without deleting Matrix data/keys, '
                            'then retry install.sh preflight')
-    state = json.loads((root / 'installation.json').read_text())
+    state = json.loads((root / 'installation.json').read_text()) if (root/'installation.json').exists() else {}
     if not state.get('databases_initialized') and free < 10 * 1024 ** 3:
-        lock = json.loads((root / 'versions.json').read_text())
+        lock = json.loads(((root / 'versions.json') if (root/'versions.json').exists() else Path(__file__).parent/'versions.json').read_text())
         cached = shutil.which('docker') and all(subprocess.run(
             ['docker', 'image', 'inspect', digest], stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
@@ -233,7 +241,7 @@ def network_check(root, subnet):
     candidate = ipaddress.ip_network(subnet, strict=True)
     if candidate.version != 4 or candidate.prefixlen != 24 or not candidate.is_private:
         raise RuntimeError('DOCKER_SUBNET must be a free private IPv4 /24; correct settings.env before starting')
-    state = json.loads((root / 'installation.json').read_text())
+    state = json.loads((root / 'installation.json').read_text()) if (root/'installation.json').exists() else {}
     result = subprocess.run(['ip', '-j', 'route'], stdin=subprocess.DEVNULL,
                             capture_output=True, text=True, check=True)
     for route in json.loads(result.stdout):
@@ -296,20 +304,22 @@ def check(root):
     for provider in ('GOOGLE', 'TELEGRAM'):
         if bool(values.get(provider+'_CLIENT_ID')) != bool(values.get(provider+'_CLIENT_SECRET')):
             raise RuntimeError(provider+' requires both '+provider+'_CLIENT_ID and '+provider+
-                '_CLIENT_SECRET. Edit '+str(root/'settings.env')+' privately; supply both or clear both to disable this optional provider. Then run: sudo bash '+
+                '_CLIENT_SECRET. Edit '+str(settings_path(root,'auth'))+' privately; supply both or clear both to disable this optional provider. Then run: sudo bash '+
                 shlex.quote(str(root/'install.sh'))+' preflight. Existing data and keys were not changed')
     metadata = json.loads((root / 'installation.json').read_text())
+    values=__import__('configuration').load(root,True,metadata.get('preview',False))
+    if values['DOMAIN']!=metadata['domain']:raise RuntimeError('DOMAIN differs from immutable Matrix identity; restore the original field')
     domain = metadata['domain']
     public_ip = values.get('PUBLIC_IP')
     if not public_ip:
         addresses = resolve(domain, socket.AF_INET)
         if len(addresses) != 1:
-            raise RuntimeError('Set PUBLIC_IP privately in settings.env or create a single DOMAIN A record')
+            raise RuntimeError('Set PUBLIC_IP privately in '+str(settings_path(root))+' or create a single DOMAIN A record; retry misbot config preflight')
         public_ip = next(iter(addresses))
     try:
         address = ipaddress.ip_address(public_ip)
     except ValueError:
-        raise RuntimeError('PUBLIC_IP must be a public IPv4 address; edit settings.env privately, '
+        raise RuntimeError('PUBLIC_IP must be a public IPv4 address; edit '+str(settings_path(root))+' privately, '
                            'then retry install.sh preflight in the same directory') from None
     if not address.is_global or address.version != 4:
         raise RuntimeError('PUBLIC_IP must be a public IPv4 address')

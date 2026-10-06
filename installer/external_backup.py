@@ -48,7 +48,7 @@ def failure_message(error):
 
 
 def settings(path):
-    values = s3_config.read_profile(path)
+    values = s3_config.read_profile(path,purpose='backup')
     if set(values) - media_transfer.FIELDS:
         raise RuntimeError('The backup S3 env must contain only the six S3 parameter names')
     return values

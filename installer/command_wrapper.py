@@ -40,7 +40,7 @@ def trusted_installation(root):
     try:
         release=json.loads((root/'release.json').read_text())
         state=json.loads((root/'installation.json').read_text())
-        if release.get('family')!=FAMILY or not state.get('domain') or state.get('config_format_version',1)!=1:
+        if release.get('family')!=FAMILY or not state.get('domain') or state.get('config_format_version',1) not in (1,2):
             raise ValueError()
     except (ValueError,TypeError):
         raise RuntimeError('This directory is not a compatible Misbot installation') from None

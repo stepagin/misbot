@@ -52,8 +52,8 @@ try:
     sys.path.insert(0,str(BUNDLE))
     import referral
     run(['python3',str(BUNDLE/'generate.py'),'--directory',str(ROOT),'--domain','bootstrap-test.invalid','--initialize-env'])
-    env=ROOT/'settings.env'
-    env.write_text(env.read_text().replace('PUBLIC_IP=\n','PUBLIC_IP=1.1.1.1\n').replace('172.30.50.0/24','172.30.250.0/24'))
+    import configuration
+    configuration.patch(ROOT,{'PUBLIC_IP':'1.1.1.1','DOCKER_SUBNET':'172.30.250.0/24'})
     for name in ['SHA256SUMS']+[line.split('  ',1)[1] for line in (BUNDLE/'SHA256SUMS').read_text().splitlines()]:
         (ROOT/name).parent.mkdir(parents=True,exist_ok=True)
         shutil.copy2(BUNDLE/name,ROOT/name)

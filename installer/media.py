@@ -13,20 +13,11 @@ import media_transfer
 import preflight
 import s3_config
 import state_store
+import configuration
 
 
 def replace_settings(root,values):
-    path=root/'settings.env'
-    found=set()
-    lines=path.read_text().splitlines()
-    for index,line in enumerate(lines):
-        if '=' not in line or line.lstrip().startswith('#'):continue
-        key=line.split('=',1)[0].strip()
-        if key in values:
-            lines[index]=key+'='+values[key]
-            found.add(key)
-    lines.extend(key+'='+value for key,value in values.items() if key not in found)
-    state_store.write_text(path,'\n'.join(lines)+'\n')
+    configuration.patch(root,values)
 
 
 def local(root):
@@ -65,11 +56,10 @@ def s3(root,settings_path):
     lifecycle.restore_check()
     folder=root/'stages'/'media-transfers'
     folder.mkdir(mode=0o700,exist_ok=True)
-    previous=(root/'settings.env').read_bytes()
     original=lifecycle.state()
     saved=folder/(time.strftime('%Y%m%dT%H%M%SZ',time.gmtime())+'-'+uuid.uuid4().hex[:6])
     saved.mkdir(mode=0o700)
-    (saved/'settings.env').write_bytes(previous)
+    configuration.snapshot(root,saved)
     state_store.write_json(saved/'installation.json',original)
     metadata=dict(original,media_transition_pending=True,media_transition_dir=str(saved.relative_to(root)))
     state_store.write_json(root/'installation.json',metadata)
@@ -84,9 +74,9 @@ def s3(root,settings_path):
         state_store.write_json(root/'installation.json',metadata)
         lifecycle.up()
         lifecycle.emit('media_s3_connected',passed=True,**result,
-            checkpoint=str(checkpoint),previous_settings=str(saved/'settings.env'))
+            checkpoint=str(checkpoint),previous_settings=str(saved/'settings' if (saved/'settings').exists() else saved/'settings.env'))
     except BaseException:
-        state_store.write_text(root/'settings.env',previous.decode())
+        configuration.restore_snapshot(root,saved)
         state_store.write_json(root/'installation.json',original)
         try:
             lifecycle.up()
@@ -109,7 +99,7 @@ def recover(root):
     original=json.loads((folder/'installation.json').read_text())
     if original.get('domain')!=metadata.get('domain') or original.get('media_mode','local')!='local':
         raise RuntimeError('Media checkpoint does not match this installation; do not overwrite server identity')
-    state_store.write_text(root/'settings.env',(folder/'settings.env').read_text())
+    configuration.restore_snapshot(root,folder)
     state_store.write_json(root/'installation.json',original)
     lifecycle.up()
     lifecycle.emit('media_local_recovery',passed=True,local_files_retained=True,

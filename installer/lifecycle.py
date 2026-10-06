@@ -56,7 +56,7 @@ def run(command,stdin=None,allowed=(0,),configuration_errors=None):
                         and isinstance(record.get('code'),str) and record['code'] in configuration_errors):
                     # Translate only known codes, never replay child messages/stderr.
                     root=Path(globals().get('ROOT','/opt/matrix-stack'))
-                    message=configuration_errors[record['code']].replace('{SETTINGS}',str(root/'settings.env')).replace(
+                    message=configuration_errors[record['code']].replace('{SETTINGS}',str(preflight.settings_path(root,'auth'))).replace(
                         '{GENERATE}','sudo bash '+shlex.quote(str(root/'install.sh'))+' generate')
                     raise RuntimeError(message)
         # CLI stderr can contain interpolated credentials. Never dump it automatically.
@@ -75,7 +75,7 @@ def dc(*parts,**kwargs):
 def external_database():
     return state().get('database_mode') == 'external' or (
         not state().get('storage_committed') and
-        'POSTGRES_MODE=external' in (ROOT/'settings.env').read_text().splitlines())
+        preflight.settings(ROOT).get('POSTGRES_MODE','local') == 'external')
 
 
 def postgres_command(tool,*arguments):
@@ -478,11 +478,14 @@ def status():
             ('database_password_recovery_pending','database-password-transition.json'),
             ('s3_credential_recovery_pending','s3-credentials-transition.json'),
             ('update_recovery_pending','update-journal.json'),
+            ('configuration_recovery_pending','configuration-transition.json'),
             ('user_password_recovery_pending','secrets/user-password-pending.json')):
         marker=ROOT/relative
         pending[name]=marker.exists() or marker.is_symlink()
     command='sudo bash '+str(ROOT/'install.sh')+' '
     actions=[]
+    if pending['configuration_recovery_pending']:
+        actions.append('sudo misbot --directory '+shlex.quote(str(ROOT))+' config recover')
     for flag,operation in (
             ('backup_recovery_pending','backup-recover'),
             ('database_recovery_pending','database-recover'),
@@ -675,7 +678,7 @@ def backup(leave_stopped=False):
                     raise RuntimeError('Installed source file missing; restore the trusted installer release')
                 sources.add(name)
             for name in sorted(sources):backup_archive.add_tree(tar,ROOT/name,name,recursive=False)
-            for name in ['config','public','secrets','settings.env','installation.json','compose.yaml','images.lock.json',
+            for name in ['config','public','secrets','settings','settings.env','installation.json','compose.yaml','images.lock.json',
                          'referral-images.lock.json',
                          'data/referral-bot','data/referral-control',
                          'data/synapse','data/caddy','data/caddy-config','mas-proxy.env',
@@ -860,7 +863,7 @@ def main():
             if args.action=='move-export' else {})
         emit('failed',action=args.action,error_type=type(error).__name__,
              message=('Operation interrupted; existing data retained. Check install.sh status, then follow the recovery command or retry the same operation'
-                if isinstance(error,(InterruptedError,state_store.OperationInterrupted)) else str(error) if type(error) in (RuntimeError,state_store.S3CredentialRecoveryRequired) else 'See the relevant service logs privately'),**recovery)
+                if isinstance(error,(InterruptedError,state_store.OperationInterrupted)) else str(error) if type(error) in (RuntimeError,state_store.S3CredentialRecoveryRequired) or isinstance(error,__import__('configuration_schema').InvalidConfiguration) else 'See the relevant service logs privately'),**recovery)
         sys.exit(1)
 
 

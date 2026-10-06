@@ -106,21 +106,11 @@ def validate_database_destination(metadata, local_postgres):
 
 def prepare_local_database(root, metadata):
     """Detach the restore-owned target from its archived external connector."""
-    settings=root/'settings.env'
     replacements={'POSTGRES_MODE':'local','POSTGRES_HOST':'','POSTGRES_PORT':'5432',
         'POSTGRES_SSL_MODE':'require','POSTGRES_SSL_ROOT_CERT':'',
         'POSTGRES_ADMIN_USER':'postgres','POSTGRES_ADMIN_PASSWORD':''}
-    seen=set();lines=[]
-    for line in settings.read_text().splitlines():
-        key=line.split('=',1)[0].strip() if '=' in line and not line.lstrip().startswith('#') else None
-        if key in replacements:
-            if key in seen:
-                raise RuntimeError('Duplicate PostgreSQL settings in the archive; target remains staged, inspect the trusted source backup privately')
-            seen.add(key);line=key+'='+replacements[key]
-        lines.append(line)
-    lines.extend(key+'='+value for key,value in replacements.items() if key not in seen)
     vault_cache.mark_dirty(root)
-    state_store.write_text(settings,'\n'.join(lines)+'\n')
+    __import__('configuration').patch(root,replacements)
     for name in ('external-postgres-owner.json','postgres-admin.pgpass','postgres-ca.pem'):
         (root/'config'/name).unlink(missing_ok=True)
     metadata['database_mode']='local'
@@ -217,9 +207,7 @@ def _restore_locked(archive, root, digest, public_ip, local_postgres=False):
                     target = root / source.relative_to(files)
                     os.chown(target, source.stat().st_uid, source.stat().st_gid)
                 state_store.write_json(root / 'installation.json', metadata)
-                settings = root / 'settings.env'
-                text = re.sub(r'^PUBLIC_IP=.*$', 'PUBLIC_IP=' + public_ip, settings.read_text(), flags=re.M)
-                state_store.write_text(settings, text)
+                __import__('configuration').patch(root,{'PUBLIC_IP':public_ip})
                 progress['stage'] = 'files_ready'
                 state_store.write_json(marker, progress)
             # A resumed target can contain an older restore worker. Replace

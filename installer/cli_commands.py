@@ -14,8 +14,14 @@ class Command:
 
 
 COMMANDS = [
-    Command('config init','init',('domain',),'Создать установку и приватный settings.env.',installed=False),
+    Command('ui','ui',purpose='Открыть русский SSH-мастер или меню; нужен TTY.',installed=False),
+    Command('config init','init',('domain',),'Создать установку, settings/server.env и приватные внутренние credentials.',installed=False),
     Command('config generate','generate',purpose='Сгенерировать конфигурацию без перезапуска.'),
+    Command('config validate','configuration-validate',purpose='Проверить общую схему приватных настроек без внешних запросов.'),
+    Command('config migrate','configuration-migrate',purpose='Перенести settings.env в разделённую конфигурацию с приватной копией.'),
+    Command('config recover','configuration-recover',purpose='Завершить прерванную публикацию конфигурации.'),
+    Command('config rollback','configuration-rollback',purpose='Вернуть приватную копию прерванной публикации конфигурации.'),
+    Command('config apply','configuration-apply',purpose='Проверить настройки, создать и проверить копию, сгенерировать и запустить службы.',stops='Копия и возможный перезапуск.'),
     Command('config preflight','preflight',purpose='Проверить систему, DNS и порты.'),
     Command('config command install','wrapper-install',purpose='Установить или обновить системную команду.'),
     Command('config command remove','wrapper-remove',purpose='Удалить только принадлежащую установке системную команду.'),
@@ -26,6 +32,12 @@ COMMANDS = [
     Command('remove','remove',purpose='Удалить свои контейнеры, сеть и системную команду; сохранить каталог данных.',stops='Да.'),
     Command('users password set','user-password',('input',),'Изменить пароль существующего обычного пользователя.',stops='Краткая остановка для копии.'),
     Command('users password recover','user-password-recover',purpose='Продолжить прерванную смену пароля пользователя.'),
+    Command('users invitation ensure','invitation-ensure',purpose='Создать или продолжить выдачу сохранённого первого токена: одна регистрация, default 7 дней.'),
+    Command('users invitation status','invitation-status',purpose='Проверить действительность первого токена без его вывода.'),
+    Command('users invitation show','invitation-show',purpose='Показать действительный первый токен только оператору в TTY.'),
+    Command('users invitation revoke','invitation-revoke',purpose='Отозвать первый токен; аккаунты и данные сохраняются.'),
+    Command('users invitation new','invitation-new',purpose='Явно отозвать прежний токен и создать замену на одного обычного пользователя.'),
+    Command('credentials admin show','invitation-admin-show',purpose='Показать сохранённый пароль администратора только оператору в TTY.'),
     Command('storage local','media-local',purpose='Выбрать локальные медиа до первого успешного подключения S3.'),
     Command('storage s3 connect','media-s3',('config',),'Перенести локальные медиа в S3, сохранив локальные файлы.',stops='Копия и остановка Synapse для переноса.'),
     Command('storage recover','media-recover',purpose='Восстановить локальные настройки прерванного media transfer.',stops='Запуск прежнего стека.'),
@@ -71,7 +83,7 @@ TOPICS={
     'config':'Установка и конфигурация', 'users':'Пользователи и регистрация',
     'storage':'Медиа, S3 и БД', 'backup':'Копии, восстановление и перенос',
     'update':'Обновление', 'credentials':'Credentials и Vault',
-    'federation':'Федерация: FEDERATION_SERVERS в settings.env; config generate и start. Отдельной команды изменения нет.',
+    'federation':'Федерация: FEDERATION_SERVERS в settings/policy.env; config validate и config apply.',
     'homepage':'Главная страница перенаправляет на Element Web. Команды выбора другого URL нет.',
 }
 

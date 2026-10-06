@@ -232,7 +232,7 @@ def entry_command():
     return 'sudo /usr/bin/python3 '+shlex.quote(str(Path(__file__).resolve().parent/'misbot.py'))
 
 
-def diagnose(config,purpose,directory=None,read_only=False,catalog_directory=None,service=None,transport=network,cleanup_catalog=None,privacy=private_backup_probe):
+def diagnose(config,purpose,directory=None,read_only=False,catalog_directory=None,service=None,transport=network,cleanup_catalog=None,privacy=private_backup_probe,progress=None):
     stages=[];caps={'read':False,'write':False,'cleanup':False}
     result={'schema':1,'operation':'s3_cleanup' if cleanup_catalog else 's3_check','purpose':purpose,
             'stages':stages,'capabilities':caps,'exit_code':1,'passed':False,'next_actions':next_actions(config,purpose,directory,read_only)}
@@ -240,17 +240,18 @@ def diagnose(config,purpose,directory=None,read_only=False,catalog_directory=Non
     def emit(stage,status,code,message):
         nonlocal current
         current=stage
-        stages.append({'stage':stage,'status':status,'code':code,'explanation':message,'next_actions':[]})
+        item={'stage':stage,'status':status,'code':code,'explanation':message,'next_actions':[]}
+        stages.append(item)
+        if progress:progress(item)
     try:
-        values=s3_config.read_profile(config)
+        values=s3_config.read_profile(config,purpose=purpose)
         emit('configuration','passed','config_valid','Файл приватный; bucket, region, credentials, endpoint и prefix проверены.')
         current='dependency'
         service=service or media_transfer.client(values)
         emit('dependency','passed','sdk_available','SDK доступен; SigV4 и проверка TLS включены.')
         current='dns'
         # Network callback updates current before the potentially failing stage.
-        def progress(stage,status,code,message):emit(stage,status,code,message)
-        transport(service.meta.endpoint_url,progress)
+        transport(service.meta.endpoint_url,emit)
         current='authentication'
         service.head_bucket(Bucket=values['S3_BUCKET'])
         emit('authentication','passed','signed_head_accepted','Подписанный HEAD принят; права GET/PUT ещё не подтверждены.')

@@ -215,7 +215,7 @@ def rotate(root, path):
     parent.chmod(0o700)
     folder = parent / uuid.uuid4().hex
     folder.mkdir(mode=0o700)
-    state_store.write_text(folder / 'original-settings.env', (root / 'settings.env').read_text())
+    state_store.write_text(folder / 'original-settings.env', __import__('configuration').export_text(root))
     state_store.write_json(folder / 'replacement.json', values)
     saved = {'format': 1, 'stage': str(folder.relative_to(root)), 'server_name': lifecycle.state()['domain'],
              'destination': media_transfer.identity(old), 'image_id': image_id}

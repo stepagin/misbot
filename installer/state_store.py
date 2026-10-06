@@ -167,6 +167,8 @@ def inherited_operation_descriptor(root):
 
 
 def assert_update_allowed(root, allow_restore_generation=False):
+    import configuration
+    configuration.pending(root)
     assert_restore_complete(root,allow_restore_generation)
     assert_s3_credentials_allowed(root)
     assert_database_allowed(root)

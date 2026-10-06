@@ -30,12 +30,29 @@ class CommandTests(unittest.TestCase):
         return root
 
     def test_help_version_without_root_docker_or_secrets(self):
-        for argv in ([],['help'],['storage','help'],['storage','s3','check','--help'],['version']):
+        for argv in ([],['help'],['storage','help'],['storage','s3','check','--help'],['version'],
+                ['ui','--help'],['config','validate','--help'],['users','invitation','show','--help']):
             output=io.StringIO()
             with patch.object(os,'geteuid',return_value=1000),patch.object(wrapper,'default_directory',side_effect=AssertionError('secret read')),contextlib.redirect_stdout(output):
                 self.assertEqual(misbot.main(argv),0)
             self.assertTrue(output.getvalue())
-        self.assertIn('1.0.0',output.getvalue())
+        with contextlib.redirect_stdout(io.StringIO()) as version:
+            self.assertEqual(misbot.main(['version']),0)
+        self.assertIn('1.0.0',version.getvalue())
+
+    def test_split_installation_routes_configuration_invitation_and_ui_without_shell(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=self.installation(Path(folder)/'Matrix Test')
+            (root/'installation.json').write_text(json.dumps({'domain':'fictional.invalid','config_format_version':2}))
+            for operation,script,action in (('config validate','configuration.py','validate'),
+                    ('config recover','configuration.py','recover'),('users invitation ensure','registration.py','ensure'),
+                    ('credentials admin show','registration.py','admin-show')):
+                cmd,opts,values=misbot.parse([*operation.split(),'--directory',str(root)])
+                self.assertEqual(misbot.plan(cmd,opts,values,source=BUNDLE),
+                    ['/usr/bin/python3',str(root/script),'--directory',str(root),action])
+            cmd,opts,values=misbot.parse(['ui','--directory',str(root)])
+            self.assertEqual(misbot.plan(cmd,opts,values,source=BUNDLE),
+                ['/usr/bin/python3',str(BUNDLE/'terminal_ui.py'),'--directory',str(root)])
 
     def test_actual_help_from_other_working_directory(self):
         with tempfile.TemporaryDirectory() as folder:

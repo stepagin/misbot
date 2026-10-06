@@ -60,7 +60,7 @@ def help_text(topic=''):
     if not topic:
         print('Misbot — команды управления Matrix\n\nСостояние и службы: status, check, start, stop, remove\nВерсия: version\n')
         for name,title in vocabulary.TOPICS.items():print('  '+name+' — '+title)
-        print('\nПодробно: misbot storage help; misbot storage s3 check --help\nВыбор установки: --directory PATH. До установки: python3 misbot.py help.\nБез аргументов показывается эта справка; интерактивного меню пока нет.')
+        print('\nПодробно: misbot storage help; misbot storage s3 check --help\nВыбор установки: --directory PATH. До установки: sudo python3 misbot.py ui.\nВ TTY без аргументов открывается мастер/меню; без TTY — эта справка. Явно: sudo misbot ui.')
         return
     found=[c for c in vocabulary.COMMANDS if c.path.startswith(topic+' ')]
     if not found:raise InputError('Неизвестная область. Выполните misbot help.')
@@ -128,6 +128,13 @@ def plan(command,options,values,source=None):
             command_wrapper.trusted_installation(root)
             args[1]=str(root/'s3_diagnostics.py')
         return args
+    if command.backend=='ui':
+        if root is not None and (not root.is_absolute() or root==Path('/') or root.resolve()!=root):raise InputError('UI требует отдельный абсолютный каталог без symlink и ..')
+        backend=source
+        if (source/'command.json').is_file():
+            if root is None:raise InputError('До init: sudo python3 misbot.py ui из распакованного комплекта.')
+            command_wrapper.trusted_installation(root);backend=root
+        return ['/usr/bin/python3',str(backend/'terminal_ui.py'),*(['--directory',str(root)] if root else [])]
     if root is None and not command.installed:root=Path('/opt/matrix-stack')
     if root is None:raise InputError('Установка не выбрана. Укажите --directory PATH; сначала выполните config init из распакованного комплекта.')
     if not root.is_absolute() or root==Path('/') or root.resolve()!=root:
@@ -153,11 +160,16 @@ def plan(command,options,values,source=None):
             raise InputError('Чужой комплект обновления.')
     if command.backend.startswith('wrapper-'):
         return ['/usr/bin/python3',str(root/'command_wrapper.py'),command.backend[8:],'--directory',str(root)]
+    if command.backend.startswith('configuration-'):
+        return ['/usr/bin/python3',str(backend/'configuration.py'),'--directory',str(root),command.backend[14:]]
+    if command.backend.startswith('invitation-'):
+        return ['/usr/bin/python3',str(backend/'registration.py'),'--directory',str(root),command.backend[11:]]
     return ['/bin/bash',str(backend/'install.sh'),*vocabulary.backend_argv(command,values,root)]
 
 
 def main(argv=None):
     argv=list(sys.argv[1:] if argv is None else argv)
+    if not argv and sys.stdin.isatty() and sys.stdout.isatty():argv=['ui']
     try:
         command,options,values=parse(argv)
         if command is None:help_text(values);return 0

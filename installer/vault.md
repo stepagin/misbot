@@ -11,7 +11,7 @@
 
 Это выбранная интеграция статических секретов. Дополнительный Vault Agent и
 динамические пароли БД/leases не используются. Snapshot включает `secrets/*`,
-settings.env, ключ и defaults MAS, сессию бота, его cross-signing файл,
+settings/ (или прежний settings.env до миграции), ключ и defaults MAS, сессию бота, его cross-signing файл,
 ключ подписи Synapse и checkpoint внешней PostgreSQL, когда они существуют.
 Размер исходных файлов ограничен 512 KiB. Тело передаётся по проверенному HTTPS,
 секреты не попадают в argv, output или diagnostic messages. AppRole token

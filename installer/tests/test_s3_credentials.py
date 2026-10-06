@@ -43,7 +43,7 @@ class S3CredentialTests(unittest.TestCase):
         values = {'S3_BUCKET':'fictional-bucket', 'S3_REGION':'fictional-region',
             'S3_ENDPOINT_URL':'https://s3.fictional.invalid', 'S3_PREFIX':'fictional/media/',
             'S3_ACCESS_KEY_ID':'FICTIONAL_OLD_ACCESS', 'S3_SECRET_ACCESS_KEY':'FICTIONAL_OLD_SECRET'}
-        state_store.write_text(root / 'settings.env', ''.join(k+'='+v+'\n' for k,v in values.items())+'UNRELATED_FIELD=FICTIONAL_RETAINED\n')
+        state_store.write_text(root / 'settings.env', ''.join(k+'='+v+'\n' for k,v in values.items())+'ACME_EMAIL=fictional@example.org\nDOMAIN=fictional.invalid\nMEDIA_MODE=s3\n')
         metadata = {'domain':'fictional.invalid', 'databases_initialized':True,
             'storage_committed':True, 'network_committed':True, 'media_mode':'s3',
             's3_identity':media_transfer.identity(values)}
@@ -133,7 +133,7 @@ class S3CredentialTests(unittest.TestCase):
                 self.assertFalse(lifecycle.emit.call_args.kwargs['changed'])
             actual=operation.preflight.settings(root)
             self.assertEqual(actual['S3_SECRET_ACCESS_KEY'],new['S3_SECRET_ACCESS_KEY'])
-            self.assertEqual(actual['UNRELATED_FIELD'],'FICTIONAL_RETAINED')
+            self.assertEqual(actual['ACME_EMAIL'],'fictional@example.org')
             self.assertEqual(json.loads((root/'installation.json').read_text()),metadata)
             self.assertEqual((root/'secrets/identity').read_text(),'FICTIONAL_KEEP_IDENTITY')
 

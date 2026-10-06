@@ -17,6 +17,9 @@ import state_store
 import media_transfer
 import vault_cache
 import postgres_setup
+import configuration
+import configuration_schema
+import preflight
 
 def merge(base, overlay):
     for key, value in overlay.items():
@@ -89,7 +92,7 @@ secret_dir = root / 'secrets'
 secret_dir.mkdir(mode=0o700, exist_ok=True)
 secret_dir.chmod(0o700)
 state = json.loads(state_path.read_text()) if state_path.exists() else {}
-if state.get('config_format_version', 1) != 1:
+if state.get('config_format_version', 1) not in (1,2):
     parser.error('Unsupported configuration format; use a compatible installer')
 
 def save_state():
@@ -100,78 +103,15 @@ if not selected_domain:
     fail('--domain is required for the first initialization')
 if state and (selected_domain != state.get('domain') or args.preview != state.get('preview', False)):
     fail('Domain and preview/production mode are immutable; use a new installation directory')
-state['config_format_version'] = 1
 domain = selected_domain
-env_path = root / 'settings.env'
-if not env_path.exists():
-    if state.get('seeded'):
-        fail('settings.env is missing; restore it from backup')
-    state_store.write_text(env_path, f'''# Literal KEY=value entries, not a shell script. Never run `source settings.env`.
-# Domain is immutable after initialization.
-DOMAIN={domain}
-# Required public IPv4; blank means resolve the single A record of DOMAIN at generation.
-PUBLIC_IP=
-# Optional Let's Encrypt contact email.
-ACME_EMAIL=
-DOCKER_SUBNET=172.30.50.0/24
-# Storage modes selected during init. Existing installations default to local.
-POSTGRES_MODE={args.database_mode}
-POSTGRES_HOST=
-POSTGRES_PORT=5432
-POSTGRES_SSL_MODE=require
-# Optional CA PEM path on this VPS; blank uses the system CA bundle for verify-full.
-POSTGRES_SSL_ROOT_CERT=
-POSTGRES_ADMIN_USER=postgres
-POSTGRES_ADMIN_PASSWORD=
-MEDIA_MODE={args.media_mode}
-S3_BUCKET=
-S3_REGION=
-S3_ENDPOINT_URL=
-S3_ACCESS_KEY_ID=
-S3_SECRET_ACCESS_KEY=
-S3_PREFIX=
-# Allowed remote Matrix server_name domains, separated by commas. Never empty.
-FEDERATION_SERVERS=misbot.ru
-# A supplied pair enables the provider. Blank pair disables it.
-GOOGLE_CLIENT_ID=
-GOOGLE_CLIENT_SECRET=
-TELEGRAM_CLIENT_ID=
-TELEGRAM_CLIENT_SECRET=
-# Optional persistent egress for Telegram, socks5://user:password@host:port
-SOCKS5_CONFIG=
-# New local password registrations, matching the current installation.
-OPEN_REGISTRATION=true
-# Referral bot invitation policy. Existing account login never needs a code.
-REGISTRATION_TOKEN_REQUIRED=true
-INVITATION_LIFETIME_SECONDS=604800
-INVITATION_USAGE_LIMIT=1
-''')
-env_path.chmod(0o600)
-allowed = {'DOMAIN','PUBLIC_IP','ACME_EMAIL','DOCKER_SUBNET','GOOGLE_CLIENT_ID',
-           'GOOGLE_CLIENT_SECRET','TELEGRAM_CLIENT_ID','TELEGRAM_CLIENT_SECRET',
-           'SOCKS5_CONFIG','OPEN_REGISTRATION','FEDERATION_SERVERS',
-           'REGISTRATION_TOKEN_REQUIRED','INVITATION_LIFETIME_SECONDS','INVITATION_USAGE_LIMIT',
-           'POSTGRES_MODE','POSTGRES_HOST','POSTGRES_PORT','POSTGRES_SSL_MODE','POSTGRES_SSL_ROOT_CERT',
-           'POSTGRES_ADMIN_USER','POSTGRES_ADMIN_PASSWORD','MEDIA_MODE','S3_BUCKET',
-           'S3_REGION','S3_ENDPOINT_URL','S3_ACCESS_KEY_ID','S3_SECRET_ACCESS_KEY','S3_PREFIX'}
-settings = {}
-for number,line in enumerate(env_path.read_text(encoding='utf-8-sig').splitlines(),1):
-    line=line.strip()
-    if not line or line.startswith('#'):
-        continue
-    if '=' not in line:
-        fail(f'Invalid settings.env syntax on line {number}')
-    key,value=line.split('=',1)
-    key,value=key.strip(),value.strip()
-    if key not in allowed or key in settings:
-        fail(f'Unknown or duplicate settings.env key on line {number}')
-    if value[:1] in ('"', "'"):
-        if len(value)<2 or value[-1]!=value[0]:
-            fail(f'Unclosed quotation on line {number}')
-        value=value[1:-1]
-    if any(ord(char)<32 for char in value):
-        fail(f'Invalid control character on line {number}')
-    settings[key]=value
+if not (root/'settings.env').exists() and not (root/'settings').exists():
+    if state.get('seeded'):fail('User configuration is missing; restore it from backup')
+    configuration.write_model(root,{'DOMAIN':domain,'MEDIA_MODE':'local','POSTGRES_MODE':'local'},preview=args.preview)
+state['config_format_version'] = 2 if (root/'settings').exists() else 1
+try:
+    settings=configuration.load(root,complete=not args.initialize_env,preview=args.preview)
+except configuration_schema.InvalidConfiguration as error:
+    fail(str(error),error.code)
 if domain_name(settings.get('DOMAIN','')) != domain:
     fail('Changing DOMAIN is not supported; create a new installation')
 database_mode=settings.get('POSTGRES_MODE','local')
@@ -313,7 +253,7 @@ if not args.preview:
 state['seeded']=True
 save_state()
 if args.initialize_env:
-    print('Initialized settings.env and private server credentials; contents omitted.')
+    print('Initialized user configuration and private server credentials; contents omitted.')
     raise SystemExit(0)
 if not args.preview:
     try:
@@ -331,7 +271,7 @@ if not public_ip:
                 raise ValueError()
             public_ip=addresses[0]
         except (ValueError,OSError):
-            fail('Set PUBLIC_IP in settings.env or create a single DOMAIN A record')
+            fail('Set PUBLIC_IP in '+str(preflight.settings_path(root))+' or create a single DOMAIN A record; retry misbot config generate')
 try:
     address=ipaddress.ip_address(public_ip)
     if address.version!=4 or (not args.preview and not address.is_global):

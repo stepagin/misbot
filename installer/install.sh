@@ -12,12 +12,12 @@ if [[ "$task_action" == version || "$task_action" == --version ]]; then
 fi
 if [[ "$task_action" == help || "$task_action" == --help ]]; then
   cat <<'EOF'
-init DOMAIN [DIRECTORY]   Create env template, private server secrets, installation files.
+init DOMAIN [DIRECTORY]   Create settings/server.env, private server secrets, installation files.
 up [DIRECTORY]           Install Docker if absent, generate/validate configs, start stack.
 update [DIRECTORY]       Apply this source release to an existing portable installation.
 update-recover [DIRECTORY]  Recover an interrupted source update from its private checkpoint.
 version                  Show the Misbot product version.
-generate [DIRECTORY]     Generate configs from settings.env, without restarting services.
+generate [DIRECTORY]     Validate current configuration and generate runtime files, without restarting services.
 preflight [DIRECTORY]    Check system, DNS, ports, subnet and optional Telegram proxy.
 check [DIRECTORY]        Verify DNS, discovery, HTTPS, RTC and container state.
 backup [DIRECTORY]       Consistent backup with short writer stop; service state restored.
@@ -75,17 +75,9 @@ if [[ "$task_action" == init ]]; then
   if [[ -z "$task_domain" ]]; then read -r -p 'Matrix domain (example.org): ' task_domain; fi
   task_root="${3:-/opt/matrix-stack}"
   task_storage_args=()
-  if [[ ! -e "$task_root/settings.env" ]]; then
+  if [[ ! -e "$task_root/settings.env" && ! -e "$task_root/settings/server.env" ]]; then
     task_database=local
     task_media=local
-    if [[ -t 0 ]]; then
-      read -r -p 'PostgreSQL: local or external? [local]: ' task_database
-      task_database="${task_database:-local}"
-      [[ "$task_database" == local || "$task_database" == external ]] || die 'Choose local or external PostgreSQL.'
-      read -r -p 'Media storage: local directory or S3? [local]: ' task_media
-      task_media="${task_media:-local}"
-      [[ "$task_media" == local || "$task_media" == s3 ]] || die 'Choose local or s3 media storage.'
-    fi
     task_storage_args=(--database-mode "$task_database" --media-mode "$task_media")
   fi
 else
@@ -308,7 +300,7 @@ case "$task_action" in
       python3 "$task_source/update.py" seed --source "$task_source" --directory "$task_root"
     fi
     python3 "$task_root/command_wrapper.py" install --directory "$task_root"
-    printf 'Initialized %s. Edit %s/settings.env, then run: sudo misbot start\n' "$task_root" "$task_root"
+    printf 'Initialized %s. Continue with sudo misbot ui; manual configuration: %s/settings/server.env, sudo misbot config validate, sudo misbot start\n' "$task_root" "$task_root"
     ;;
   update|update-recover)
     [[ -f "$task_root/installation.json" ]] || die 'Update requires an existing portable installation.'

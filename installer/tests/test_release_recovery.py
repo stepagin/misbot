@@ -116,3 +116,25 @@ class ReleaseRecoveryTests(unittest.TestCase):
                 update.perform_update(self.source,self.root,'apply')
             backup.assert_not_called();snapshot.assert_not_called()
         self.assert_persistent()
+
+    def test_split_configuration_failure_and_recovery_preserve_all_areas(self):
+        (self.root/'settings.env').unlink();self.persistent.pop('settings.env')
+        self.metadata['config_format_version']=2
+        state_store.write_json(self.root/'installation.json',self.metadata)
+        for name in ('server.env','policy.env','media-s3.env','backup.env','auth.env','database.env'):
+            target=self.root/'settings'/name;target.parent.mkdir(mode=0o700,exist_ok=True)
+            state_store.write_text(target,'FICTIONAL_PRIVATE_'+name)
+            self.persistent['settings/'+name]=target.read_bytes()
+        entries=update.validate_manifest(self.source)[0]
+        saved=update.snapshot(self.root,entries,'split-checkpoint')
+        for name in self.persistent:
+            if name.startswith('settings/'):
+                self.assertEqual((saved/name).read_bytes(),self.persistent[name])
+        state_store.write_text(self.root/'settings/auth.env','FICTIONAL_INTERRUPTED_VALUE')
+        (self.root/'install.sh').write_bytes((self.source/'install.sh').read_bytes())
+        update.record_owner(self.root,{'format':1,'stage':str(saved.relative_to(self.root)),
+                                      'candidate_files':sorted(entries),'component_transition':None})
+        with patch.object(update,'run_up',side_effect=self.start):update.recover_update(self.root)
+        self.assert_persistent()
+        self.assertEqual(update.state(self.root)['config_format_version'],2)
+        self.assertFalse((self.root/'settings.env').exists())

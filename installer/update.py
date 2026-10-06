@@ -65,11 +65,11 @@ ESSENTIAL = {'install.sh', 'generate.py', 'lifecycle.py', 'verify.py',
              'referral.py', 'versions.json', 'release.json', 'update.py'}
 SNAPSHOT_FILES = ('compose.yaml', 'images.lock.json', 'referral-images.lock.json',
                   'synapse-s3-image.lock.json',
-                  'installation.json', 'mas-proxy.env',
+                  'installation.json', 'mas-proxy.env', 'settings.env',
                   'data/referral-control/bot-config.json',
                   'data/referral-control/bot-policy.json')
-SNAPSHOT_DIRS = ('config', 'public')
-CONFIG_FORMAT_VERSION = 1
+SNAPSHOT_DIRS = ('config', 'public', 'settings')
+CONFIG_FORMAT_VERSIONS = (1,2)
 COMPONENT_SETS = {
     'synapse161': '44639c63a9c13f0c06c70b003731ab49c86f4ac2e3dd40176513be73f699a0b3',
     'synapse162': '145c2ac2c5d58ca922c00bad8ec32c33b8d68d769065034381d2b362a3916099',
@@ -442,7 +442,7 @@ def recover_update(root):
     entries, _ = validate_manifest(folder)
     release(folder)
     before = state(folder)
-    if before.get('config_format_version', 1) != CONFIG_FORMAT_VERSION:
+    if before.get('config_format_version', 1) not in CONFIG_FORMAT_VERSIONS:
         fail('Unsupported update recovery configuration format')
     if before.get('domain') != state(root, require_sources=False).get('domain'):
         fail('Update recovery checkpoint belongs to another Matrix identity')
@@ -473,7 +473,7 @@ def perform_update(source, root, action):
     entries, revision = validate_manifest(source)
     candidate = release(source)
     installed = state(root, require_sources=action != 'seed')
-    if installed.get('config_format_version', 1) != CONFIG_FORMAT_VERSION:
+    if installed.get('config_format_version', 1) not in CONFIG_FORMAT_VERSIONS:
         fail('Unsupported configuration format; obtain a compatible installer before changing files')
     old_version = installed.get('applied_release_version', '0.0.0')
     if version(candidate['version']) < version(old_version):

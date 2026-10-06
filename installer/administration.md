@@ -141,12 +141,12 @@ starting заканчивается сообщением с точной ком�
 ```bash
 sudo misbot backup create
 sudo misbot backup verify
-sudo nano /opt/matrix-stack/settings.env
+sudo nano /opt/matrix-stack/settings/server.env
 sudo misbot start
 sudo misbot check
 ```
 
-Редактируйте settings.env как файл, не выполняйте его shell-командой. Up может
+Редактируйте settings/*.env как файл, не выполняйте его shell-командой. Up может
 пересоздать службы; планируйте перерыв. Generate записывает конфигурации на диск
 без перезапуска, но следующий перезапуск применит их. При неверном вводе исправьте
 поле по сообщению и повторите. Сохранённые credentials и ключи не заменяйте для

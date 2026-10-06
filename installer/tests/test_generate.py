@@ -70,6 +70,19 @@ class GeneratorTests(unittest.TestCase):
     def invoke(self,*args,ok=True):
         result=subprocess.run(['python3',str(BUNDLE/'generate.py'),'--directory',str(self.root),*args],capture_output=True,text=True)
         self.assertEqual(result.returncode==0,ok,result.stderr)
+        # These historical runtime invariants exercise legacy-format compatibility.
+        # New split-format generation is covered independently in test_configuration.
+        if result.returncode==0 and (self.root/'settings').exists():
+            import configuration, configuration_schema, shutil
+            values={key:field.default for key,field in configuration_schema.FIELDS.items()}
+            values.update(configuration.load(self.root))
+            if '--database-mode' in args:values['POSTGRES_MODE']=args[args.index('--database-mode')+1]
+            if '--media-mode' in args:values['MEDIA_MODE']=args[args.index('--media-mode')+1]
+            shutil.rmtree(self.root/'settings')
+            import state_store
+            state_store.write_text(self.root/'settings.env',configuration.serialize(values))
+            metadata=json.loads((self.root/'installation.json').read_text());metadata['config_format_version']=1
+            state_store.write_json(self.root/'installation.json',metadata)
         return result
 
     def initialize(self):

@@ -46,7 +46,17 @@ def validate(values):
     return dict(values,S3_ENDPOINT_URL=endpoint)
 
 
-def read_profile(path):
+def read_profile(path,purpose='media'):
+    path=Path(path)
+    if path.name=='backup.env' and path.parent.name=='settings':
+        if purpose!='backup':raise ConfigError('profile_purpose','Этот файл относится к внешним копиям; используйте --purpose backup, а не media.')
+        import configuration
+        import configuration_schema
+        try:
+            model=configuration_schema.validate_backup(configuration.parse(configuration.read_private(path),path,configuration_schema.BACKUP_FIELDS),str(path))
+            if Path(model['BACKUP_KEY_FILE']).is_relative_to(path.parent.parent):raise ConfigError('key_location','Recovery key должен быть вне каталога установки.')
+        except configuration_schema.InvalidConfiguration as error:raise ConfigError(error.code,str(error)) from None
+        return validate({key:model[key] for key in FIELDS})
     path=Path(path)
     try:
         fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)

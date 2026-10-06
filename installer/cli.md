@@ -18,8 +18,7 @@ python3 misbot.py version
 sudo python3 misbot.py config init --domain example.org --directory /opt/matrix-stack
 ```
 
-Затем отредактируйте приватный `settings.env` и выполните `sudo misbot start`.
-Без аргументов команда показывает краткую справку. Терминального меню пока нет.
+Затем выполните `sudo misbot ui`. В TTY без аргументов открывается мастер/меню; без TTY — краткая справка. Ручной путь: [конфигурация](configuration.md).
 
 ```bash
 misbot help
@@ -172,10 +171,16 @@ JSON предназначен для будущего UI; UI не должен �
 
 ## Соответствие технических операций
 
-| CLI | Прежний backend | Обязательные аргументы |
+| CLI | Backend | Обязательные аргументы |
 |---|---|---|
+| `misbot ui` | `terminal_ui.py` | нет |
 | `misbot config init` | `init` | `--domain` |
 | `misbot config generate` | `generate` | нет |
+| `misbot config validate` | `configuration.py validate` | нет |
+| `misbot config migrate` | `configuration.py migrate` | нет |
+| `misbot config recover` | `configuration.py recover` | нет |
+| `misbot config rollback` | `configuration.py rollback` | нет |
+| `misbot config apply` | `configuration.py apply` | нет |
 | `misbot config preflight` | `preflight` | нет |
 | `misbot config command install` | `wrapper-install` | нет |
 | `misbot config command remove` | `wrapper-remove` | нет |
@@ -186,6 +191,12 @@ JSON предназначен для будущего UI; UI не должен �
 | `misbot remove` | `remove` | нет |
 | `misbot users password set` | `user-password` | `--input` |
 | `misbot users password recover` | `user-password-recover` | нет |
+| `misbot users invitation ensure` | `registration.py ensure` | нет |
+| `misbot users invitation status` | `registration.py status` | нет |
+| `misbot users invitation show` | `registration.py show` | нет |
+| `misbot users invitation revoke` | `registration.py revoke` | нет |
+| `misbot users invitation new` | `registration.py new` | нет |
+| `misbot credentials admin show` | `registration.py admin-show` | нет |
 | `misbot storage local` | `media-local` | нет |
 | `misbot storage s3 connect` | `media-s3` | `--config` |
 | `misbot storage recover` | `media-recover` | нет |

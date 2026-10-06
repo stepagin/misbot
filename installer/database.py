@@ -18,6 +18,7 @@ import media
 import postgres_setup
 import preflight
 import state_store
+import configuration
 import vault_cache
 
 
@@ -225,7 +226,8 @@ def external(root, settings_path):
     lifecycle.restore_check()
     stage = root / 'stages/database-transfers' / uuid.uuid4().hex
     stage.mkdir(mode=0o700, parents=True)
-    for name in ('settings.env', 'installation.json', 'compose.yaml'):
+    configuration.snapshot(root,stage)
+    for name in ('installation.json', 'compose.yaml'):
         shutil.copyfile(root / name, stage / name)
         (stage / name).chmod(0o600)
     shutil.copytree(root / 'config', stage / 'config', copy_function=shutil.copy2)
@@ -323,7 +325,7 @@ def resume(root, record):
         lifecycle.run(original + ['rm', '-s', '-f', 'postgres'])
         values = preflight.settings(folder)
         vault_cache.mark_dirty(root)
-        state_store.write_text(root / 'settings.env', (stage / 'settings.env').read_text())
+        configuration.restore_snapshot(root,stage)
         media.replace_settings(root, {**values, 'POSTGRES_MODE': 'external'})
         metadata = json.loads((stage / 'installation.json').read_text())
         metadata['database_mode'] = 'external'
@@ -379,7 +381,8 @@ def abort(root):
     stage = private_folder(root, record['stage'], 'database-transfers')
     record['phase'] = 'aborting'
     save(root, record)
-    for name in ('settings.env', 'installation.json', 'compose.yaml'):
+    configuration.restore_snapshot(root,stage)
+    for name in ('installation.json', 'compose.yaml'):
         state_store.write_text(root / name, (stage / name).read_text())
     shutil.copytree(stage / 'config', root / 'config', dirs_exist_ok=True, copy_function=shutil.copy2)
     for path in (stage / 'config').rglob('*'):
