@@ -321,7 +321,7 @@ After=docker.service
 [Service]
 Type=oneshot
 Environment=DOCKER_HOST=unix:///var/run/docker.sock
-ExecStart=/usr/bin/python3 {ROOT}/lifecycle.py --directory {ROOT} cert-renew
+ExecStart=/usr/bin/python3 "{ROOT}/lifecycle.py" --directory "{ROOT}" cert-renew
 ''')
     (system/'matrix-stack-turn-cert.path').write_text(f'''[Unit]
 Description=Watch renewed Matrix TURN certificate
@@ -349,15 +349,16 @@ WantedBy=timers.target
 
 
 def up_admission_check():
+    import cli_commands
     state_store.assert_database_allowed(ROOT)
     if state().get('credential_transition_pending'):
-        raise RuntimeError('Administrator password change was interrupted. Keep private checkpoints; run: sudo bash '+str(ROOT/'install.sh')+' admin-password-recover')
+        raise RuntimeError('Administrator password change was interrupted. Keep private checkpoints; run: '+cli_commands.recovery_command('admin-password-recover',ROOT)+' (technical entry: sudo bash '+str(ROOT/'install.sh')+' admin-password-recover)')
     if state().get('migration_frozen'):
-        raise RuntimeError('Source is frozen for migration; do not start a second writer. To abandon the move, stop the target and use install.sh move-abort target-stopped')
+        raise RuntimeError('Source is frozen for migration; do not start a second writer. To abandon the move, stop the target and use '+cli_commands.recovery_command('move-abort',ROOT)+' --confirm target-stopped (technical entry: install.sh move-abort target-stopped)')
     if state().get('restore_pending'):
-        raise RuntimeError('Restored target is staged with writers disabled. Stop the source, switch DNS, then run install.sh restore-activate source-stopped')
+        raise RuntimeError('Restored target is staged with writers disabled. Stop the source, switch DNS, then run '+cli_commands.recovery_command('restore-activate',ROOT)+' --confirm source-stopped (technical entry: install.sh restore-activate source-stopped)')
     if state().get('media_transition_pending'):
-        raise RuntimeError('Media transfer was interrupted; run install.sh media-recover, then repeat media-s3 with the same private settings file')
+        raise RuntimeError('Media transfer was interrupted; run '+cli_commands.recovery_command('media-recover',ROOT)+' (technical entry: install.sh media-recover), then repeat storage s3 connect with the same private settings file')
 
 
 def up():
@@ -490,13 +491,22 @@ def status():
             ('credential_transition_pending','admin-password-recover'),
             ('user_password_recovery_pending','user-password-recover'),
             ('media_transition_pending','media-recover')):
-        if pending[flag]:actions.append(command+operation)
+        if pending[flag]:
+            import cli_commands
+            actions.extend([cli_commands.recovery_command(operation,ROOT),command+operation])
     if pending['update_recovery_pending']:
+        import cli_commands
+        actions.append(cli_commands.recovery_command('update-recover',ROOT)+' --source /root/matrix-installer')
         actions.append('From a trusted extracted installer directory run: sudo bash install.sh update-recover '+str(ROOT))
     if pending['migration_frozen']:
+        import cli_commands
+        actions.extend([cli_commands.recovery_command('move-export',ROOT),
+            'Only after target writers are stopped and DNS returned: '+cli_commands.recovery_command('move-abort',ROOT)+' --confirm target-stopped'])
         actions.extend([command+'move-export',
             'To cancel only after target writers are stopped and DNS returned: '+command+'move-abort target-stopped'])
     if pending['restore_pending']:
+        import cli_commands
+        actions.append('After stopping original source and switching DNS: '+cli_commands.recovery_command('restore-activate',ROOT)+' --confirm source-stopped')
         actions.append('After the original source is stopped and target DNS is ready: '+command+'restore-activate source-stopped')
     emit('installation_status',applied_release=metadata.get('applied_release_version'),
          **pending,next_actions=actions,
@@ -818,8 +828,12 @@ def main():
     parser.add_argument('--directory',required=True)
     parser.add_argument('action',choices=['up','generate','check','backup','backup-recover','restore-check','restore-activate','move-export','move-abort','status','stop','down','cert-renew'])
     parser.add_argument('--check-up-only',action='store_true',help=argparse.SUPPRESS)
+    parser.add_argument('--register-command',action='store_true',help=argparse.SUPPRESS)
+    parser.add_argument('--remove-command',action='store_true',help=argparse.SUPPRESS)
     args=parser.parse_args()
     if args.check_up_only and args.action!='up':parser.error('--check-up-only requires up')
+    if args.register_command and args.action not in ('up','restore-activate'):parser.error('--register-command requires up or restore-activate')
+    if args.remove_command and args.action!='down':parser.error('--remove-command requires down')
     configure(args.directory,args.action)
     def interrupted(signum,frame):raise state_store.OperationInterrupted('Installer operation interrupted')
     for signum in (signal.SIGTERM,signal.SIGINT):signal.signal(signum,interrupted)
@@ -836,6 +850,11 @@ def main():
             {'up':up,'generate':generate,'check':check,'backup':backup,'backup-recover':backup_recover,'restore-check':restore_check,
              'restore-activate':restore_activate,'move-export':move_export,'move-abort':move_abort,
              'cert-renew':cert_renew,'status':status,'stop':lambda:dc('stop'),'down':down}[args.action]()
+            if args.register_command or args.remove_command:
+                subprocess.run(['/usr/bin/python3',str(ROOT/'command_wrapper.py'),
+                    'install' if args.register_command else 'remove','--directory',str(ROOT),
+                    '--keep-default'],check=True,
+                    **state_store.child_process_options())
     except Exception as error:
         recovery = ({'next_action':'Check install.sh status; retry install.sh move-export [DIRECTORY]. Before any source restart, stop the target and return DNS, then use install.sh move-abort target-stopped [DIRECTORY]; do not transfer an incomplete archive'}
             if args.action=='move-export' else {})

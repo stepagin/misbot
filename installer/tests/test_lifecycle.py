@@ -149,6 +149,7 @@ class LifecycleTests(unittest.TestCase):
             self.assertIn('synapse exited',output.getvalue());self.assertIn('mas exited',output.getvalue())
             fields=emit.call_args.kwargs;self.assertTrue(fields['migration_frozen'])
             self.assertIn('sudo bash '+str(root/'install.sh')+' move-export',fields['next_actions'])
+            self.assertIn('sudo misbot --directory '+str(root)+' backup move export',fields['next_actions'])
             self.assertTrue(any('target writers are stopped' in value and 'move-abort target-stopped' in value for value in fields['next_actions']))
             self.assertNotIn('FICTIONAL_PRIVATE_VALUE',json.dumps(fields))
             self.assertEqual(list(root.iterdir()),[])

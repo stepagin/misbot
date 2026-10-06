@@ -349,6 +349,24 @@ def update_resource_check(root, entries):
             'files without deleting Matrix data/keys/backups, then retry update from the trusted bundle')
 
 
+def refresh_command(root):
+    """Refresh only after source/health verification; legacy rollback removes
+    an owned new wrapper rather than advertising unavailable runtime commands.
+    """
+    helper=root/'command_wrapper.py'
+    action='install'
+    if not helper.is_file():
+        record=Path('/usr/local/lib/misbot/command.json')
+        try:owned=json.loads(record.read_text())
+        except (OSError,ValueError):return
+        if owned.get('family')!=FAMILY or owned.get('directory')!=str(root):return
+        helper=Path(__file__).resolve().parent/'command_wrapper.py';action='remove'
+        if not helper.is_file():fail('Restore the owned command using the trusted current bundle')
+    result=subprocess.run(['/usr/bin/python3',str(helper),action,'--directory',str(root),'--keep-default'],
+        capture_output=True,**state_store.child_process_options())
+    if result.returncode:fail('Command refresh failed; check owned wrapper permissions/conflict without deleting data')
+
+
 def apply_changes(root, folder, entries, candidate, revision, component_transition=None):
     try:
         changed = copy_sources(entries, root)
@@ -362,6 +380,7 @@ def apply_changes(root, folder, entries, candidate, revision, component_transiti
         if (current.get('applied_release_version') != candidate['version'] or
                 current.get('applied_release_revision') != revision):
             fail('Candidate release verification failed')
+        refresh_command(root)
         return changed
     except BaseException:
         if component_transition:
@@ -369,6 +388,7 @@ def apply_changes(root, folder, entries, candidate, revision, component_transiti
         previous = validate_manifest(folder)[0] if (folder / 'SHA256SUMS').is_file() else {}
         restore(root, folder, dict.fromkeys(set(entries) | set(previous)))
         recovered = run_up(root, folder / 'rollback.log') == 0
+        if recovered:refresh_command(root)
         if recovered:
             (root / 'update-journal.json').unlink(missing_ok=True)
         fail('Update failed; previous files restored; rollback healthy=' + str(recovered) +
@@ -435,6 +455,7 @@ def recover_update(root):
     restore(root, folder, dict.fromkeys(set(names) | set(entries)))
     if run_up(root, folder / 'recovery.log'):
         fail('Previous files restored but service recovery failed. Keep the checkpoint, correct the cause and repeat update-recover from the trusted installer')
+    refresh_command(root)
     validate_manifest(root)
     journal.unlink()
     print('update_recovered', before.get('applied_release_version'), 'healthy', True)

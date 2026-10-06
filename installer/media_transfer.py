@@ -5,6 +5,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import state_store
+import s3_config
 
 FIELDS={'S3_BUCKET','S3_REGION','S3_ENDPOINT_URL','S3_ACCESS_KEY_ID',
         'S3_SECRET_ACCESS_KEY','S3_PREFIX'}
@@ -15,6 +16,7 @@ def identity(values):
 
 
 def client(values):
+    values=s3_config.validate({key:value for key,value in values.items() if key in FIELDS})
     import boto3
     from botocore.config import Config
     if not all(values.get(key) for key in FIELDS-{'S3_ENDPOINT_URL'}):

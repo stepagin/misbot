@@ -152,7 +152,7 @@ elif [[ "$task_action" == backup-fetch ]]; then
   task_backup_digest="$5"
   task_backup_destination="$6"
 fi
-[[ "$task_root" =~ ^/[a-zA-Z0-9._/-]+$ && "$task_root" != / && "$task_root" != *'/../'* && "$task_root" != */.. && ! -L "$task_root" ]] || die 'Use an absolute installation path without spaces or symlinks.'
+[[ "$task_root" =~ ^/[a-zA-Z0-9.\ _/-]+$ && "$task_root" != / && "$task_root" != *'/../'* && "$task_root" != */.. && ! -L "$task_root" ]] || die 'Use an absolute installation path with letters, digits, spaces, dot, dash or underscore, without traversal or symlinks.'
 
 host_dependencies() {
   command -v apt-get >/dev/null || die 'Supported hosts: Ubuntu 24.04/26.04 or Debian 12/13.'
@@ -296,15 +296,19 @@ case "$task_action" in
     ;;
   restore-activate|move-abort)
     [[ -f "$task_root/installation.json" ]] || die 'Restore into an empty target first.'
-    exec python3 "$task_root/lifecycle.py" --directory "$task_root" "$task_action"
+    task_command_args=()
+    [[ "$task_action" != restore-activate ]] || task_command_args=(--register-command)
+    exec python3 "$task_root/lifecycle.py" --directory "$task_root" "$task_action" "${task_command_args[@]}"
     ;;
   init)
     host_dependencies
+    python3 "$task_source/command_wrapper.py" check --directory "$task_root"
     python3 "$task_source/generate.py" --directory "$task_root" --domain "$task_domain" --initialize-env "${task_storage_args[@]}"
     if [[ "$task_source" != "$task_root" ]]; then
       python3 "$task_source/update.py" seed --source "$task_source" --directory "$task_root"
     fi
-    printf 'Initialized %s. Edit %s/settings.env, then run: sudo bash %s/install.sh up\n' "$task_root" "$task_root" "$task_root"
+    python3 "$task_root/command_wrapper.py" install --directory "$task_root"
+    printf 'Initialized %s. Edit %s/settings.env, then run: sudo misbot start\n' "$task_root" "$task_root"
     ;;
   update|update-recover)
     [[ -f "$task_root/installation.json" ]] || die 'Update requires an existing portable installation.'
@@ -316,6 +320,7 @@ case "$task_action" in
     [[ -f "$task_root/installation.json" ]] || die 'Run init DOMAIN first.'
     if [[ "$task_action" == up ]]; then
       python3 "$task_source/lifecycle.py" --directory "$task_root" up --check-up-only
+      python3 "$task_root/command_wrapper.py" check --directory "$task_root" --keep-default
     fi
     host_dependencies
     if [[ "$task_action" == up ]]; then
@@ -324,7 +329,9 @@ case "$task_action" in
       [[ "$task_media_mode" != s3 ]] || storage_dependencies
     fi
     docker_dependencies
-    exec python3 "$task_root/lifecycle.py" --directory "$task_root" "$task_action"
+    task_command_args=()
+    [[ "$task_action" != up || -n "${MATRIX_INSTALLER_UPDATE_STAGE:-}" ]] || task_command_args=(--register-command)
+    exec python3 "$task_root/lifecycle.py" --directory "$task_root" "$task_action" "${task_command_args[@]}"
     ;;
   preflight)
     [[ -f "$task_root/installation.json" ]] || die 'Run init DOMAIN first.'
@@ -344,9 +351,11 @@ case "$task_action" in
     fi
     exec python3 "$task_root/user_credentials.py" --directory "$task_root" recover
     ;;
-  check|backup|backup-recover|restore-check|move-export|status|stop|down)
+  check|backup|backup-recover|restore-check|move-export|status|stop|down|remove)
     [[ -f "$task_root/installation.json" ]] || die 'Run init DOMAIN first.'
-    exec python3 "$task_root/lifecycle.py" --directory "$task_root" "$task_action"
+    task_command_args=()
+    if [[ "$task_action" == remove ]]; then task_action=down; task_command_args=(--remove-command); fi
+    exec python3 "$task_root/lifecycle.py" --directory "$task_root" "$task_action" "${task_command_args[@]}"
     ;;
   *) die 'Unknown command. Run install.sh help.';;
 esac

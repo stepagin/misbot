@@ -19,9 +19,9 @@ sudo nano /root/matrix-s3-next.env
 Не меняйте destination поля. Затем:
 
 ```bash
-sudo bash /opt/matrix-stack/install.sh check
-sudo bash /opt/matrix-stack/install.sh s3-credentials /root/matrix-s3-next.env
-sudo bash /opt/matrix-stack/install.sh check
+sudo misbot check
+sudo misbot credentials s3 rotate --config /root/matrix-s3-next.env
+sudo misbot check
 ```
 
 Установщик проверяет HEAD/list/read, создаёт и восстанавливает копию обеих БД,
@@ -36,9 +36,9 @@ credentials сохраняются. Успех — `s3_credentials_changed`, `pa
 При pending журнале обычные up/backup/update/изменения хранилищ запрещены:
 
 ```bash
-sudo bash /opt/matrix-stack/install.sh status
-sudo bash /opt/matrix-stack/install.sh s3-credentials-recover
-sudo bash /opt/matrix-stack/install.sh check
+sudo misbot status
+sudo misbot credentials s3 recover
+sudo misbot check
 ```
 
 updater проверяет незавершённую смену S3 ключей до обращения к БД
@@ -58,7 +58,7 @@ Probe catalog находится в private `stages/s3-credentials/<ID>/probe.js
 остаться; остальные media не удаляются. После разрешения удаления выполните:
 
 ```bash
-sudo bash /opt/matrix-stack/install.sh s3-credentials-cleanup
+sudo misbot credentials s3 cleanup
 ```
 
 отказ этой команды показывает именно `s3-credentials-cleanup`
@@ -89,9 +89,9 @@ snapshot сохраняются. Неизвестные версии объек�
 В SSH-сессии на установленном тестовом/собственном VPS:
 
 ```bash
-sudo bash /opt/matrix-stack/install.sh check
-sudo bash /opt/matrix-stack/install.sh database-password
-sudo bash /opt/matrix-stack/install.sh check
+sudo misbot check
+sudo misbot credentials database rotate
+sudo misbot check
 ```
 
 Все службы должны быть готовы; завершите предыдущие операции восстановления
@@ -116,9 +116,9 @@ Matrix не отзываются.
 хранилища блокируются. Проверьте состояние и закончите ту же смену:
 
 ```bash
-sudo bash /opt/matrix-stack/install.sh status
-sudo bash /opt/matrix-stack/install.sh database-password-recover
-sudo bash /opt/matrix-stack/install.sh check
+sudo misbot status
+sudo misbot credentials database recover
+sudo misbot check
 ```
 
 `status` показывает `database_password_recovery_pending` и точную команду.
@@ -155,8 +155,8 @@ recovery из доверенного распакованного комплек
 
 ```bash
 sudo python3 /root/matrix-installer/pg_credentials.py --directory /opt/matrix-stack recover
-sudo bash /root/matrix-installer/install.sh update /opt/matrix-stack
-sudo bash /opt/matrix-stack/install.sh check
+sudo misbot --directory /opt/matrix-stack update apply --source /root/matrix-installer
+sudo misbot check
 ```
 
 Замените `/root/matrix-installer` путём своего распакованного проверенного
@@ -193,7 +193,7 @@ sudo nano /root/matrix-admin-password.json
 root и иметь права 600; symlink и доступ группе/остальным запрещены.
 
 ```bash
-sudo bash /opt/matrix-stack/install.sh admin-password /root/matrix-admin-password.json
+sudo misbot credentials admin set --input /root/matrix-admin-password.json
 ```
 
 Перед изменением установщик создаёт согласованную резервную копию и проверяет
@@ -227,7 +227,7 @@ SIGTERM/SIGINT запускают cleanup; после SIGKILL нужен explici
 Если MAS недоступен или процесс прерван, состояние остаётся pending:
 
 ```bash
-sudo bash /opt/matrix-stack/install.sh admin-password-recover
+sudo misbot credentials admin recover
 ```
 
 Успех: `administrator_password_recovered`, `passed=true`. Войдите заново со
@@ -240,7 +240,7 @@ sudo bash /opt/matrix-stack/install.sh admin-password-recover
 
 ```bash
 sudo docker compose --project-directory /opt/matrix-stack -f /opt/matrix-stack/compose.yaml up -d synapse mas
-sudo bash /opt/matrix-stack/install.sh admin-password-recover
+sudo misbot credentials admin recover
 ```
 
 Существующую отключённую или неадминистративную учётную запись команда не

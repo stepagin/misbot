@@ -21,7 +21,7 @@ class MediaOperationTests(unittest.TestCase):
     def tearDown(self):self.temp.cleanup()
     def test_bad_s3_credentials_preserve_settings_and_hide_sdk_secret(self):
         settings=self.root/'private-s3.env'
-        settings.write_text('S3_BUCKET=example-bucket\n')
+        settings.write_text('S3_BUCKET=example-bucket\nS3_REGION=us-east-1\nS3_ACCESS_KEY_ID=FICTIONAL_ACCESS\nS3_SECRET_ACCESS_KEY=FICTIONAL_SECRET\nS3_PREFIX=media/example/\n')
         settings.chmod(0o600)
         previous=(self.root/'settings.env').read_bytes()
         with patch.object(media.media_transfer,'client',side_effect=RuntimeError('EXAMPLE_PRIVATE_SECRET')):
@@ -35,11 +35,11 @@ class MediaOperationTests(unittest.TestCase):
         settings.write_text('S3_BUCKET=example-bucket\n');settings.chmod(0o644)
         previous=(self.root/'settings.env').read_bytes()
         with patch.object(media.media_transfer,'client') as client:
-            with self.assertRaisesRegex(RuntimeError,'mode 600'):
+            with self.assertRaisesRegex(RuntimeError,'mode 0600'):
                 media.s3(self.root,settings)
             settings.chmod(0o600)
             alias=self.root/'alias';alias.symlink_to(settings)
-            with self.assertRaisesRegex(RuntimeError,'without symlinks'):
+            with self.assertRaisesRegex(RuntimeError,'недоступен'):
                 media.s3(self.root,alias)
         client.assert_not_called()
         self.assertEqual((self.root/'settings.env').read_bytes(),previous)

@@ -9,9 +9,11 @@ import os
 import re
 from pathlib import Path
 import secrets
+import shlex
 import stat
 import subprocess
 import tempfile
+import cli_commands
 
 
 class OperationInterrupted(Exception):
@@ -181,7 +183,7 @@ def assert_update_allowed(root, allow_restore_generation=False):
     if (os.environ.get('MATRIX_INSTALLER_UPDATE_STAGE') != record.get('stage')
             or not related_owner(record)):
         raise RuntimeError('An interrupted update needs recovery. From a trusted extracted installer run: '
-            'sudo bash install.sh update-recover ' + str(root) + '. Keep data, secrets and update checkpoints')
+            'sudo bash install.sh update-recover ' + str(root) + '. Or: sudo misbot --directory '+shlex.quote(str(root))+' update recover --source /root/matrix-installer. Keep data, secrets and update checkpoints')
 
 
 def assert_restore_complete(root, allow_generation=False):
@@ -250,7 +252,7 @@ def assert_database_allowed(root):
     if (os.environ.get('MATRIX_INSTALLER_DATABASE_STAGE') != record['stage']
             or not related_owner(record)):
         raise RuntimeError('A database storage transition is pending. Keep both datasets and private checkpoints; run: sudo bash '
-            + str(Path(root) / 'install.sh') + ' database-recover. database-abort is allowed only before destination activation; do not start an independent writer')
+            + str(Path(root) / 'install.sh') + ' database-recover. CLI: '+cli_commands.recovery_command('database-recover',root)+'. database-abort is allowed only before destination activation; do not start an independent writer')
 
 
 def assert_s3_credentials_allowed(root):
@@ -271,7 +273,7 @@ def assert_s3_credentials_allowed(root):
     if (not valid or os.environ.get('MATRIX_INSTALLER_S3_CREDENTIAL_STAGE') != record['stage']
             or not related_owner(record)):
         raise S3CredentialRecoveryRequired('An S3 credential change needs recovery. Keep private checkpoints and verified backup; run: sudo bash '
-            + str(root / 'install.sh') + ' s3-credentials-recover. Do not start Synapse manually')
+            + str(root / 'install.sh') + ' s3-credentials-recover. CLI: '+cli_commands.recovery_command('s3-credentials-recover',root)+'. Do not start Synapse manually')
 
 
 def assert_database_password_allowed(root):
@@ -292,7 +294,7 @@ def assert_database_password_allowed(root):
     if (not valid or os.environ.get('MATRIX_INSTALLER_DATABASE_PASSWORD_STAGE') != record['stage']
             or not related_owner(record)):
         raise RuntimeError('A database password change needs recovery. Keep private checkpoints and the verified backup; run: sudo bash '
-            + str(root / 'install.sh') + ' database-password-recover. Do not start writers manually')
+            + str(root / 'install.sh') + ' database-password-recover. CLI: '+cli_commands.recovery_command('database-password-recover',root)+'. Do not start writers manually')
 
 
 def backup_pause_record(root):
@@ -358,7 +360,7 @@ def operation_guard(root):
                     pass
                 if not inherited:
                     raise RuntimeError('Another installer operation is running for this directory. '
-                        'Use install.sh status, wait for that operation, then retry the same command; do not remove the lock file') from None
+                        'Use sudo misbot --directory '+shlex.quote(str(root))+' status (technical entry: install.sh status), wait for that operation, then retry the same command; do not remove the lock file') from None
         if acquired:
             token = secrets.token_hex(32)
             owner = {'pid': os.getpid(), 'started': process_identity(os.getpid())[1], 'token': token}

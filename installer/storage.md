@@ -17,8 +17,8 @@ Endpoint — HTTPS origin, без пароля и пути. Region исполь�
 успешной установки можно продолжить локально:
 
 ```bash
-sudo bash /opt/matrix-stack/install.sh media-local
-sudo bash /opt/matrix-stack/install.sh up
+sudo misbot storage local
+sudo misbot start
 ```
 
 Ожидается media_local_selected, затем обычный успешный up. S3-параметры остаются
@@ -36,8 +36,9 @@ region/prefix работающего S3 обычным редактирован�
 смена назначения требует отдельного переноса данных.
 
 ```bash
-sudo bash /opt/matrix-stack/install.sh media-s3 /root/matrix-s3.env
-sudo bash /opt/matrix-stack/install.sh check
+sudo misbot storage s3 check --config /root/matrix-s3.env --purpose media
+sudo misbot storage s3 connect --config /root/matrix-s3.env
+sudo misbot check
 ```
 
 Сначала проверяется S3 без изменения локальной установки. Затем создаётся
@@ -55,19 +56,19 @@ files_verified и local_files_retained=true. После старта допол�
 перезагрузке может остаться media_transition_pending:
 
 ```bash
-sudo bash /opt/matrix-stack/install.sh media-recover
-sudo bash /opt/matrix-stack/install.sh media-s3 /root/matrix-s3.env
+sudo misbot storage recover
+sudo misbot storage s3 connect --config /root/matrix-s3.env
 ```
 
 Первая команда возвращает сохранённые локальные настройки и запускает стек
 без обращения к S3. Вторую выполняйте после восстановления доступности S3.
 Если переключение уже зафиксировано и pending отсутствует, продолжение —
-`sudo bash /opt/matrix-stack/install.sh up`. При конфликте разных удалённых
+`sudo misbot start`. При конфликте разных удалённых
 данных сохраните checkpoint и выберите новый пустой prefix; новый перенос
 получит отдельный checkpoint. Уже подключённое назначение S3 этой командой не меняется.
 
-Если SSH оборвался, сначала выполните `sudo bash /opt/matrix-stack/install.sh status`
-и `sudo bash /opt/matrix-stack/install.sh check`: операция могла завершиться на
+Если SSH оборвался, сначала выполните `sudo misbot status`
+и `sudo misbot check`: операция могла завершиться на
 сервере. При успешном `check` и сохранённом MEDIA_MODE=s3 повторное подключение
 не требуется. HTTP401 при скачивании медиа означает проблему авторизации:
 обновите сессию клиента или войдите снова, затем повторите запрос. Не удаляйте
@@ -95,7 +96,7 @@ synapse/mas и UTF8/C. После потери ответа повторный `
 продолжает создание своих объектов, не меняет прежние пароли и не присваивает
 чужие роли/базы. Сохраните checkpoint; не удаляйте роли или базы ради повтора.
 При ошибке проверьте приватные реквизиты, hostname, CA и сетевой доступ, затем
-Повторите `sudo bash /opt/matrix-stack/install.sh up`. Ошибка совместимости
+Повторите `sudo misbot start`. Ошибка совместимости
 или чужие объекты требуют отдельного пустого кластера, а не автоматической очистки.
 Для действующей локальной установки простая смена POSTGRES_MODE запрещена.
 Внешние копии и их ограничения описаны в [backup.md](backup.md).
@@ -103,7 +104,7 @@ generate/up отказываются менять host/port уже подклю�
 Проверяется сохранённый ownership checkpoint, для старого комплекта — прежняя
 connection identity из homeserver.yaml. Реквизиты не сравниваются и не выводятся.
 При ошибочном редактировании восстановите POSTGRES_HOST/POSTGRES_PORT из
-проверенной private копии и повторите `sudo bash /opt/matrix-stack/install.sh up`.
+проверенной private копии и повторите `sudo misbot start`.
 Перенос external→external пока не реализован; новое имя хоста само по себе
 не переносит прежние данные. Изменение IP backend за прежним hostname управляет
 оператор кластера; оно не подтверждает сохранность данных автоматически.
@@ -163,8 +164,8 @@ CA path должен существовать на этом VPS; для публ
 в командную строку или историю shell. Выполняйте после обновления установщика:
 
 ```bash
-sudo bash /opt/matrix-stack/install.sh database-external /root/matrix-postgres.env
-sudo bash /opt/matrix-stack/install.sh check
+sudo misbot storage database connect --config /root/matrix-postgres.env
+sudo misbot check
 ```
 
 Ожидается database_external_connected/databases2/local_data_retained=true.
@@ -189,8 +190,8 @@ adjustments влияют на wall-clock измерение; старый journa
 остановки или разрыве SSH не запускайте другой writer:
 
 ```bash
-sudo bash /opt/matrix-stack/install.sh status
-sudo bash /opt/matrix-stack/install.sh database-recover
+sudo misbot status
+sudo misbot storage database recover
 ```
 
 Если во время `database-recover` проверка S3 отказывает перед запуском,
@@ -203,7 +204,7 @@ SQL-импорт и не возвращает устаревшую локаль�
 
 Работающий прежний клиент PostgreSQL блокирует recovery до его завершения;
 журнал не удаляйте. До активации назначения можно отменить перенос командой
-`sudo bash /opt/matrix-stack/install.sh database-abort`: вернутся исходные
+`sudo misbot storage database abort`: вернутся исходные
 локальные настройки и прежде запущенные writers; внешние данные сохранятся.
 После начала запуска новых writers abort запрещён: там уже могли появиться
 записи. Продолжайте database-recover, не возвращайтесь к устаревшему локальному
@@ -217,6 +218,6 @@ SQL-импорт и не возвращает устаревшую локаль�
 dirty. После успешного up обычный CAS/readback сохраняет новый snapshot с
 прежним owner/path/AppRole. Отказ Vault не удаляет локальные runtime файлы:
 сервер может продолжить, но старый snapshot не считается пригодным для recovery.
-Восстановите доступ и выполните `sudo bash /opt/matrix-stack/install.sh vault-sync`.
+Восстановите доступ и выполните `sudo misbot credentials vault sync`.
 Preactivation abort возвращает исходные config/права и прежнюю cache запись;
 он не удаляет удалённые версии Vault и данные назначенной БД.

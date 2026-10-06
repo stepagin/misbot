@@ -14,6 +14,7 @@ import media
 import media_transfer
 import preflight
 import state_store
+import s3_config
 import vault_cache
 
 JOURNAL = 's3-credentials-transition.json'
@@ -39,7 +40,7 @@ def private_json(path):
 
 
 def private_profile(path):
-    return preflight.settings_text(private_bytes(path).decode('utf-8-sig'))
+    return s3_config.read_profile(path)
 
 
 def current(root):

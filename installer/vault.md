@@ -92,10 +92,10 @@ PEM на VPS. Не отключайте проверку TLS. Три файла 
 После `init`, когда установлены исходники, на VPS:
 
 ```bash
-sudo bash /opt/matrix-stack/install.sh vault-connect /root/vault-connection.env
-sudo bash /opt/matrix-stack/install.sh up
-sudo bash /opt/matrix-stack/install.sh vault-sync
-sudo bash /opt/matrix-stack/install.sh check
+sudo misbot credentials vault connect --config /root/vault-connection.env
+sudo misbot start
+sudo misbot credentials vault sync
+sudo misbot check
 ```
 
 Ожидается `vault_snapshot passed=true`, число файлов и version без содержимого.
@@ -117,9 +117,9 @@ sudo bash /opt/matrix-stack/install.sh check
 до проверки. Создайте новый env с теми же address/mount/path, новыми auth paths.
 
 ```bash
-sudo bash /opt/matrix-stack/install.sh vault-auth /root/vault-connection-new.env
-sudo bash /opt/matrix-stack/install.sh vault-sync
-sudo bash /opt/matrix-stack/install.sh check
+sudo misbot credentials vault auth --config /root/vault-connection-new.env
+sudo misbot credentials vault sync
+sudo misbot check
 ```
 
 Ожидается snapshot passed=true. При отказе auth/policy старый connection.env
@@ -134,10 +134,10 @@ sudo bash /opt/matrix-stack/install.sh check
 каталоги сохранились. Не применяется к потере всей машины/БД или dirty snapshot.
 
 ```bash
-sudo bash /opt/matrix-stack/install.sh stop
-sudo bash /opt/matrix-stack/install.sh vault-recover
-sudo bash /opt/matrix-stack/install.sh up
-sudo bash /opt/matrix-stack/install.sh check
+sudo misbot stop
+sudo misbot credentials vault recover
+sudo misbot start
+sudo misbot check
 ```
 
 Ожидается `vault_recovered passed=true` с количеством **недостающих** файлов,
@@ -162,9 +162,9 @@ restore-local команду тем же
 При доступном полном локальном кэше, включая все перечисленные snapshot файлы:
 
 ```bash
-sudo bash /opt/matrix-stack/install.sh vault-disconnect
-sudo bash /opt/matrix-stack/install.sh up
-sudo bash /opt/matrix-stack/install.sh check
+sudo misbot credentials vault disconnect
+sudo misbot start
+sudo misbot check
 ```
 
 Vault может быть недоступен. Локальные credentials не меняются, remote versions

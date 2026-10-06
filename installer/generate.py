@@ -222,6 +222,9 @@ if database_mode == 'external' and not args.initialize_env:
         if previous.get('POSTGRES_HOST')!=database_host or str(previous.get('POSTGRES_PORT'))!=database_port:
             fail('Changing installed external PostgreSQL host or port requires a separate data migration. Restore the original POSTGRES_HOST/POSTGRES_PORT from your verified backup, then retry install.sh up; keep both datasets and the ownership checkpoint', 'postgres_destination_changed')
 if media_mode == 's3' and not args.initialize_env:
+    import s3_config
+    try:s3_config.validate({k:v for k,v in settings.items() if k in s3_config.FIELDS})
+    except s3_config.ConfigError as error:fail(str(error),error.code)
     if not all(settings.get(k) for k in ('S3_BUCKET','S3_REGION','S3_ACCESS_KEY_ID','S3_SECRET_ACCESS_KEY','S3_PREFIX')):
         fail('S3 media requires bucket, region, credentials and an installation-specific prefix')
     endpoint=settings.get('S3_ENDPOINT_URL','')

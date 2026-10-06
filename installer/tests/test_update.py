@@ -14,6 +14,20 @@ import update
 
 
 class UpdateTests(unittest.TestCase):
+    def test_command_refresh_uses_verified_backend_and_safe_failure(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            (root/'command_wrapper.py').write_text('# fictional owned helper')
+            (root/'identity').write_text('FICTIONAL_KEEP')
+            for returncode in (0,23):
+                with patch.object(update.subprocess,'run',return_value=subprocess.CompletedProcess([],returncode,stdout=b'FICTIONAL_SECRET')) as execute:
+                    if returncode:
+                        with self.assertRaisesRegex(RuntimeError,'Command refresh failed') as caught:update.refresh_command(root)
+                        self.assertNotIn('FICTIONAL_SECRET',str(caught.exception))
+                    else:update.refresh_command(root)
+                    self.assertEqual(execute.call_args.args[0],['/usr/bin/python3',str(root/'command_wrapper.py'),'install','--directory',str(root),'--keep-default'])
+            self.assertEqual((root/'identity').read_text(),'FICTIONAL_KEEP')
+
     def test_pending_s3_credentials_refuses_before_resource_query_or_source_mutation(self):
         import state_store
         with tempfile.TemporaryDirectory() as folder:

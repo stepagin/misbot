@@ -6,7 +6,7 @@
 
 Первоначальный администратор создаётся через внутренний API MAS; пароль передаётся
 через stdin и тело запроса, без секретов в аргументах процессов. Если создание
-прервалось, выполните `sudo bash /opt/matrix-stack/install.sh up` повторно:
+прервалось, выполните `sudo misbot start` повторно:
 установщик использует сохранённый пароль и проверяет принадлежность частично
 созданной учётной записи. Чужую, заблокированную или отключённую учётную запись
 он не перезаписывает. Не удаляйте данные и каталог `secrets` для повторной попытки.
@@ -38,6 +38,8 @@ Compose-проект командой `sudo bash /путь/исходной/ус
 Основная конфигурация — локальная PostgreSQL, локальные медиа или S3 и защищённые
 внешние резервные копии. Архив содержит runtime и пользовательские инструкции.
 Тесты и сборочные инструменты доступны разработчикам в исходниках проекта.
+
+Основной командный интерфейс и диагностика S3: [команда misbot](cli.md).
 
 ## 1. Что подготовить
 
@@ -109,11 +111,11 @@ ACME account/validation требуют отдельного согласован
 tar -xzf matrix-installer.tar.gz
 cd matrix-installer
 sha256sum -c SHA256SUMS
-sudo bash install.sh init example.org
+sudo python3 misbot.py config init --domain example.org
 sudo nano /opt/matrix-stack/settings.env
 ```
 
-Другой пустой каталог можно указать третьим аргументом: `sudo bash install.sh init example.org /opt/my-matrix`. Во всех дальнейших командах замените путь. Повторный `init` не перезаписывает уже заполненный env и не меняет внутренние секреты.
+Другой пустой каталог выберите через `--directory`: `sudo python3 misbot.py config init --domain example.org --directory '/opt/My Matrix'`. Дальнейшие команды `misbot` используют этот каталог из любого рабочего каталога; другую установку выбирайте явно через `--directory`. Повторный `init` не перезаписывает уже заполненный env и не меняет внутренние секреты.
 
 Команды этого блока выполняйте в SSH-сессии на VPS. У `sha256sum` каждая строка
 должна закончиться `OK`; при несовпадении остановитесь и загрузите архив заново.
@@ -215,12 +217,12 @@ https://mas.example.org/upstream/authorize/01K5WZ00000000000000000002
 После заполнения DNS, сетевых правил и env:
 
 ```bash
-sudo bash /opt/matrix-stack/install.sh up
-sudo bash /opt/matrix-stack/install.sh status
-sudo bash /opt/matrix-stack/install.sh check
+sudo misbot start
+sudo misbot status
+sudo misbot check
 ```
 
-Перед `up` можно отдельно выполнить `sudo bash /opt/matrix-stack/install.sh preflight`.
+Перед `up` можно отдельно выполнить `sudo misbot config preflight`.
 Успех — `{"check": "preflight", "passed": true, "hosts": 7}`. Эта команда читает
 настройки и проверяет систему/DNS/сети/порты/прокси, не запускает Matrix и не
 меняет его данные. `up` выполняет её автоматически до загрузки образов. Для
@@ -314,14 +316,14 @@ sudo cat /opt/matrix-stack/secrets/admin-access.json
 
 ```bash
 # Сохранить копию перед изменением настроек
-sudo bash /opt/matrix-stack/install.sh backup
+sudo misbot backup create
 sudo nano /opt/matrix-stack/settings.env
 # Применить изменения; часть контейнеров будет пересоздана
-sudo bash /opt/matrix-stack/install.sh up
+sudo misbot start
 # Только сгенерировать и проверить файлы, без перезапуска
-sudo bash /opt/matrix-stack/install.sh generate
+sudo misbot config generate
 # Остановить, сохранив данные
-sudo bash /opt/matrix-stack/install.sh stop
+sudo misbot stop
 ```
 
 `generate` уже меняет конфигурационные файлы на диске; перезапуск службы может применить их. Для диагностики контейнеров:
@@ -344,8 +346,8 @@ sudo docker compose --project-directory /opt/matrix-stack -f /opt/matrix-stack/c
 [backup.md](backup.md). Проверяйте пригодность копии для своей установки отдельно.
 
 ```bash
-sudo bash /opt/matrix-stack/install.sh backup
-sudo bash /opt/matrix-stack/install.sh restore-check
+sudo misbot backup create
+sudo misbot backup verify
 ```
 
 Копирование кратко останавливает работающие referral-bot/referral-control/Synapse/MAS/JWT, делает логические дампы обеих баз и копирует конфигурации, ключи, env, исходники, медиа и сертификаты. В копию включены сессия и устройство бота, криптобаза, cross-signing keys, названия, диалоги и база владения приглашениями. Затем запускаются только те из этих служб, которые работали до копирования. Архив лежит в `backups/`, ссылка `latest.tar.gz` указывает на последнюю копию. `restore-check` проверяет SHA256, согласованность сессии бота и целостность его SQLite-баз, восстанавливает дампы в две временные базы, затем удаляет их; рабочие базы не заменяет. Эта проверка не заменяет полный пробный запуск восстановления на отдельном VPS.
@@ -368,7 +370,7 @@ sudo bash /opt/matrix-stack/install.sh restore-check
    назначения должен быть пустым. `init` перед восстановлением не требуется.
 
 ```bash
-sudo bash install.sh restore /root/matrix-backup.tar.gz /opt/matrix-stack SHA256_С_ИСТОЧНИКА 203.0.113.20
+sudo python3 misbot.py backup restore --archive /root/matrix-backup.tar.gz --sha256 'SHA256_С_ИСТОЧНИКА' --public-ip 203.0.113.20 --directory /opt/matrix-stack
 ```
 
 Команда проверяет SHA256, пути и типы файлов в обоих архивах, комплект исходников
@@ -379,19 +381,19 @@ sudo bash install.sh restore /root/matrix-backup.tar.gz /opt/matrix-stack SHA256
 При прерывании повторите **ту же команду с тем же архивом**: промежуточное состояние
 сохранено в `restore-journal.json`. Проверенный архив копируется
 в приватный `backups/` назначения; для этого нужно дополнительное место размером
-с архив. Выполните `sudo bash /opt/matrix-stack/install.sh restore-check` для
+с архив. До регистрации команды из распакованного комплекта выполните `sudo python3 misbot.py --directory /opt/matrix-stack backup verify` для
 проверки обоих дампов во временных БД. Относительная `backups/latest.tar.gz`,
 созданная restore, допускается при повторе; произвольные ссылки
 и ссылки вне каталога резервных копий отклоняются. Частичный импорт сбрасывается только в этом
 каталоге восстановления. Непустая действующая установка и другой архив отклоняются.
 
-3. На источнике текущим установщиком выполните `sudo bash /opt/matrix-stack/install.sh move-export`,
+3. На источнике текущим установщиком выполните `sudo misbot backup move export`,
    затем `restore-check`. Успех — `migration_source_frozen` с путём финального
    архива; запись остаётся остановленной. S3 originals проверяются и
    отсутствующие локальные файлы докачиваются до архива. При отказе сохраняйте
    источник, проверьте status и повторите move-export после исправления ресурса.
    Подробный путь внешней защищённой копии и отмены — [backup.md](backup.md#финальная-копия-перед-переносом).
-   После обрыва SSH или прерывания выполните `sudo bash /opt/matrix-stack/install.sh status`.
+   После обрыва SSH или прерывания выполните `sudo misbot status`.
    вывод включает stopped containers, migration_frozen и точные
    next_actions; дождитесь завершения активной операции перед recovery.
    жёсткие ссылки, оставшиеся после аварийного завершения скачивания,
@@ -406,8 +408,8 @@ sudo bash install.sh restore /root/matrix-backup.tar.gz /opt/matrix-stack SHA256
    обновления DNS. Затем из восстановленного каталога:
 
 ```bash
-sudo bash /opt/matrix-stack/install.sh restore-activate source-stopped
-sudo bash /opt/matrix-stack/install.sh check
+sudo python3 misbot.py --directory /opt/matrix-stack backup activate --confirm source-stopped
+sudo misbot check
 ```
 
 `source-stopped` — явное подтверждение администратора, что источник остановлен;
@@ -425,7 +427,7 @@ sudo bash /opt/matrix-stack/install.sh check
 восстановление обеих БД в новую локальную PostgreSQL18:
 
 ```bash
-sudo bash install.sh restore-local /root/matrix-backup.tar.gz /opt/matrix-stack SHA256_С_ИСТОЧНИКА 203.0.113.20
+sudo python3 misbot.py backup restore-local --archive /root/matrix-backup.tar.gz --sha256 'SHA256_С_ИСТОЧНИКА' --public-ip 203.0.113.20 --directory /opt/matrix-stack
 ```
 
 Исходная внешняя БД при этом не подключается и не изменяется. Остальные проверки,
@@ -498,8 +500,8 @@ Element Web — официальный браузерный клиент; отд
 `sha256sum -c SHA256SUMS` и из этого каталога выполните:
 
 ```bash
-sudo bash install.sh update /opt/matrix-stack
-sudo bash /opt/matrix-stack/install.sh check
+sudo misbot update apply --directory /opt/matrix-stack --source /root/matrix-installer
+sudo misbot check
 ```
 
 Перед заменой исходников кандидат создаёт полную согласованную копию и проверяет
@@ -519,8 +521,8 @@ sudo bash /opt/matrix-stack/install.sh check
 установки мог оказаться частично заменён.
 
 ```bash
-sudo bash install.sh update-recover /opt/matrix-stack
-sudo bash /opt/matrix-stack/install.sh check
+sudo misbot update recover --directory /opt/matrix-stack --source /root/matrix-installer
+sudo misbot check
 ```
 
 Ожидается `update_recovered` прежней версии и `healthy True`. После этого

@@ -7,8 +7,8 @@
 ## Локальная согласованная копия
 
 ```bash
-sudo bash /opt/matrix-stack/install.sh backup
-sudo bash /opt/matrix-stack/install.sh restore-check
+sudo misbot backup create
+sudo misbot backup verify
 sudo df -h /opt/matrix-stack
 ```
 
@@ -85,8 +85,8 @@ S3_PREFIX=matrix-backups/example.org/
 Создайте ключ один раз, вне каталога установки:
 
 ```bash
-sudo bash /opt/matrix-stack/install.sh backup-key /root/matrix-backup.key
-sudo bash /opt/matrix-stack/install.sh backup-external /root/matrix-backup-s3.env /root/matrix-backup.key
+sudo misbot backup key create --key /root/matrix-backup.key
+sudo misbot backup external create --config /root/matrix-backup-s3.env --key /root/matrix-backup.key
 ```
 
 Ожидается `backup_recovery_key` с `created=true`, затем
@@ -116,15 +116,15 @@ signed requests и секретов. При исчерпании попыток 
 исправьте ресурс и повторите исходную backup-external команду.
 Исходные данные, ключ и локальная копия сохраняются. При обрыве связи сначала
 проверьте, завершилась ли команда на VPS: просмотрите приватный catalog и
-`sudo bash /opt/matrix-stack/install.sh status`. SIGINT/SIGTERM во время создания
+`sudo misbot status`. SIGINT/SIGTERM во время создания
 архива возвращают ранее работавшие службы. После аварийного выключения или
 SIGKILL сохраняется private `backup-writers.json`: обычный повтор backup,
 up или update откажется менять установку до восстановления. Выполните:
 
 ```bash
-sudo bash /opt/matrix-stack/install.sh status
-sudo bash /opt/matrix-stack/install.sh backup-recover
-sudo bash /opt/matrix-stack/install.sh check
+sudo misbot status
+sudo misbot backup recover
+sudo misbot check
 ```
 
 Успех — `backup_recovery pending=false`: возвращены только службы, работавшие до
@@ -143,7 +143,7 @@ recovery откажется; дождитесь его завершения. П�
 восстановления. Для повторной очистки выполните по SSH на исходной установке:
 
 ```bash
-sudo bash /opt/matrix-stack/install.sh backup-cleanup /root/matrix-backup-s3.env /opt/matrix-stack/stages/external-backups/ИМЯ_ПОПЫТКИ/catalog.json
+sudo misbot backup external cleanup --config /root/matrix-backup-s3.env --catalog '/opt/matrix-stack/stages/external-backups/ИМЯ_ПОПЫТКИ/catalog.json'
 ```
 
 Замените полный путь catalog на `private_catalog` из сообщения; не вводите
@@ -179,7 +179,7 @@ Legacy unverified объект проверяет администратор ч�
 Для local media без S3 можно использовать локальную копию ежедневно в 03:00 UTC:
 
 ```bash
-sudo bash /opt/matrix-stack/install.sh backup-schedule-local '*-*-* 03:00:00 UTC'
+sudo misbot backup schedule local --calendar '*-*-* 03:00:00 UTC'
 ```
 
 Локальный архив не защищает от потери VPS. Для полной зашифрованной внешней копии,
@@ -187,8 +187,8 @@ sudo bash /opt/matrix-stack/install.sh backup-schedule-local '*-*-* 03:00:00 UTC
 по предыдущему разделу, затем:
 
 ```bash
-sudo bash /opt/matrix-stack/install.sh backup-schedule /root/matrix-backup-s3.env /root/matrix-backup.key '*-*-* 03:00:00 UTC'
-sudo bash /opt/matrix-stack/install.sh backup-schedule-status
+sudo misbot backup schedule external --config /root/matrix-backup-s3.env --key /root/matrix-backup.key --calendar '*-*-* 03:00:00 UTC'
+sudo misbot backup schedule status
 ```
 
 Выражение календаря берут в кавычки. Оно проверяется `systemd-analyze calendar`;
@@ -228,8 +228,8 @@ service сообщает failure; следующая попытка не уда�
 Timer не освобождает место автоматически: контролируйте `df -h` и рост архивов.
 
 ```bash
-sudo bash /opt/matrix-stack/install.sh backup-schedule-disable
-sudo bash /opt/matrix-stack/install.sh backup-schedule-status
+sudo misbot backup schedule disable
+sudo misbot backup schedule status
 ```
 
 Disable останавливает будущие срабатывания; уже работающий backup продолжает
@@ -252,8 +252,8 @@ unit в /etc/systemd/system и внешний recovery key. При ином пу
 Из распакованного доверенного комплекта:
 
 ```bash
-sudo bash install.sh backup-fetch /root/matrix-backup-s3.env /root/matrix-backup.key OBJECT_KEY CIPHERTEXT_SHA256 /root/matrix-restored.tar.gz
-sudo bash install.sh restore /root/matrix-restored.tar.gz /opt/matrix-stack ARCHIVE_SHA256 203.0.113.20
+sudo python3 misbot.py backup fetch --config /root/matrix-backup-s3.env --key /root/matrix-backup.key --object OBJECT_KEY --sha256 CIPHERTEXT_SHA256 --output /root/matrix-restored.tar.gz
+sudo python3 misbot.py backup restore --archive /root/matrix-restored.tar.gz --sha256 ARCHIVE_SHA256 --public-ip 203.0.113.20 --directory /opt/matrix-stack
 ```
 
 Замените заглавные заполнители и IPv4 значениями своей копии и новой машины.
@@ -274,7 +274,7 @@ SHA256, усечённом или подменённом файле архив �
 до preflight и очистки восстановленных одноразовых ключей; staged данные и журнал
 сохраняются. На целевой машине выполните `sudo bash /opt/matrix-stack/install.sh down`,
 убедитесь через `status`, что её контейнеры удалены, затем после остановки источника
-Повторите `sudo bash /opt/matrix-stack/install.sh restore-activate source-stopped`.
+Повторите `sudo misbot backup activate --confirm source-stopped`.
 При старом доверенном архиве используйте текущий совместимый комплект для
 `restore`/`restore-local`: он устанавливает обновлённую защиту в staged target.
 
@@ -283,7 +283,7 @@ SHA256, усечённом или подменённом файле архив �
 активации выполните :
 
 ```bash
-sudo bash /opt/matrix-stack/install.sh vault-disconnect
+sudo misbot credentials vault disconnect
 ```
 
 Ожидается `vault_disconnected`, `local_files_retained=true`,
@@ -306,9 +306,9 @@ latest-ссылки вручную: они отвергаются при про�
 На источнике выполните:
 
 ```bash
-sudo bash /opt/matrix-stack/install.sh move-export
-sudo bash /opt/matrix-stack/install.sh restore-check
-sudo bash /opt/matrix-stack/install.sh status
+sudo misbot backup move export
+sudo misbot backup verify
+sudo misbot status
 ```
 
 `move-export` сохраняет migration freeze и останавливает Synapse/MAS/JWT/бота.
@@ -331,7 +331,7 @@ writers остаются остановленными. Другой успешн
 Источник остаётся отмечен frozen; проверьте `status`, исправьте причину приватно
 и повторите `move-export`. После прерывания дождитесь освобождения общего lock.
 Если выбираете отмену, сначала остановите writers назначения и верните DNS
-на источник, затем `sudo bash /opt/matrix-stack/install.sh move-abort target-stopped`
+на источник, затем `sudo misbot backup move abort --confirm target-stopped`
 и `check`. Подтверждение не проверяет другую машину автоматически. Не запускайте
 Обычный `up` и не снимайте freeze вручную. Public DNS/client acceptance/final
 provider sync и проверенная внешняя финальная копия остаются обязательными
@@ -386,8 +386,8 @@ external архив с сообщением о доступном маршрут
 На новой машине, из нового распакованного совместимого комплекта:
 
 ```bash
-sudo bash install.sh restore-local /root/matrix-restored.tar.gz /opt/matrix-stack ARCHIVE_SHA256 203.0.113.20
-sudo bash /opt/matrix-stack/install.sh restore-check
+sudo python3 misbot.py backup restore-local --archive /root/matrix-restored.tar.gz --sha256 ARCHIVE_SHA256 --public-ip 203.0.113.20 --directory /opt/matrix-stack
+sudo misbot backup verify
 ```
 
 Замените пути, checksum и IPv4. Каталог должен быть пустым; `init` не нужен.

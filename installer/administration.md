@@ -43,7 +43,7 @@ Docker ps. Если сам Docker недоступен, проверка при�
 ```bash
 sudo systemctl status docker
 sudo systemctl start docker
-sudo bash /opt/matrix-stack/install.sh status
+sudo misbot status
 ```
 
 После восстановления Docker сначала закончите pending операцию по `status`,
@@ -63,14 +63,14 @@ pg_dump, pg_restore и генерацию RSA, которые раньше об�
 
 | Задача | Команда / инструмент | Успех и проверка | При ошибке |
 |---|---|---|---|
-| Состояние контейнеров | `sudo bash /opt/matrix-stack/install.sh status` | 11 служб для local PG, 10 для external PG; running, health healthy либо отсутствует | starting может требовать ожидания; запустить check, найти службу в выводе |
-| Проверка публичной работы | `sudo bash /opt/matrix-stack/install.sh check` | DNS, HTTPS/discovery, OAuth metadata, защищённые admin API, RTC/TURN TLS и службы успешны, exit 0 | Исправить указанную DNS/сетевую/служебную ошибку; повторить check |
-| Запуск или продолжение | `sudo bash /opt/matrix-stack/install.sh up` | installation_running, затем успешный check | Следовать команде recovery из сообщения; сохранить существующие данные и credentials |
-| Временная остановка | `sudo bash /opt/matrix-stack/install.sh stop` | status показывает остановленные службы; файлы и БД остаются | Проверить status; после устранения причины выполнить up |
+| Состояние контейнеров | `sudo misbot status` | 11 служб для local PG, 10 для external PG; running, health healthy либо отсутствует | starting может требовать ожидания; запустить check, найти службу в выводе |
+| Проверка публичной работы | `sudo misbot check` | DNS, HTTPS/discovery, OAuth metadata, защищённые admin API, RTC/TURN TLS и службы успешны, exit 0 | Исправить указанную DNS/сетевую/служебную ошибку; повторить check |
+| Запуск или продолжение | `sudo misbot start` | installation_running, затем успешный check | Следовать команде recovery из сообщения; сохранить существующие данные и credentials |
+| Временная остановка | `sudo misbot stop` | status показывает остановленные службы; файлы и БД остаются | Проверить status; после устранения причины выполнить up |
 | Освободить Compose-проект для восстановления в другой каталог | `sudo bash /opt/matrix-stack/install.sh down` | `installation_down`, контейнеры и принадлежащая установке сеть удалены; данные, секреты, копии и journals сохранены | При чужой сети/контейнере отказ до удаления; устранить конфликт с владельцем. Для возврата выполнить status, нужную recovery-команду и up из прежнего каталога |
 | Свободное место | `sudo df -h /opt/matrix-stack` | Достаточно места для роста данных и копий; до первого запуска нужны 10 GiB, после образов минимум 3 GiB | Увеличить диск либо удалить согласованно выбранные старые копии после проверки внешней; повторить df |
 | Оценить размер данных | `sudo du -sh /opt/matrix-stack/data /opt/matrix-stack/backups` | Размеры каталогов, без содержимого файлов | Большой S3 не освобождает локальный диск: локальные оригиналы сохраняются |
-| Сделать и проверить копию | `sudo bash /opt/matrix-stack/install.sh backup`, затем `restore-check` | consistent_backup и две temporary_database_restore; см. backup.md | Исправить диск/доступ к БД, повторить обе команды |
+| Сделать и проверить копию | `sudo misbot backup create`, затем `restore-check` | consistent_backup и две temporary_database_restore; см. backup.md | Исправить диск/доступ к БД, повторить обе команды |
 | Просмотреть пользователей | `https://admin.example.org` в браузере | MAS вход администратора, список пользователей в Element Admin | Проверить check, административные права аккаунта и выбранный homeserver |
 
 Публичный check не подтверждает настоящий callback Google/Telegram, федерацию
@@ -90,7 +90,7 @@ pg_dump, pg_restore и генерацию RSA, которые раньше об�
 
 ```bash
 sudo docker compose --project-directory /opt/matrix-stack -f /opt/matrix-stack/compose.yaml logs --tail=100 synapse mas
-sudo bash /opt/matrix-stack/install.sh preflight
+sudo misbot config preflight
 sudo ss -lntup
 ```
 
@@ -139,11 +139,11 @@ starting заканчивается сообщением с точной ком�
 ## Настройки и обновления
 
 ```bash
-sudo bash /opt/matrix-stack/install.sh backup
-sudo bash /opt/matrix-stack/install.sh restore-check
+sudo misbot backup create
+sudo misbot backup verify
 sudo nano /opt/matrix-stack/settings.env
-sudo bash /opt/matrix-stack/install.sh up
-sudo bash /opt/matrix-stack/install.sh check
+sudo misbot start
+sudo misbot check
 ```
 
 Редактируйте settings.env как файл, не выполняйте его shell-командой. Up может
@@ -153,7 +153,7 @@ sudo bash /opt/matrix-stack/install.sh check
 устранения сетевой ошибки.
 
 Совместимые исходники обновляются из нового распакованного доверенного комплекта:
-`sudo bash install.sh update /opt/matrix-stack`, затем check.
+`sudo misbot update apply --directory /opt/matrix-stack --source /root/matrix-installer`, затем check.
 Порядок, версии и ограничения отката — в [README §10](README.md#10-обновление).
 реализован ограниченный переход Synapse1.161.0→1.162.0 с прежними
 остальными закреплёнными образами и проверкой фактической схемы перед откатом.

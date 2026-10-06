@@ -11,6 +11,7 @@ import uuid
 import lifecycle
 import media_transfer
 import preflight
+import s3_config
 import state_store
 
 
@@ -46,7 +47,7 @@ def s3(root,settings_path):
         raise RuntimeError('Storage changes are disabled on staged or frozen migration machines')
     if metadata.get('media_mode','local')!='local':
         raise RuntimeError('This operation adopts S3 from local media; changing an existing S3 destination requires a separate migration')
-    values=preflight.private_settings_file(settings_path)
+    values=s3_config.read_profile(settings_path)
     if set(values)-media_transfer.FIELDS:
         raise RuntimeError('The private S3 file must contain only S3 parameter names from the template')
     try:

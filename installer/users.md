@@ -89,8 +89,8 @@ root, mode600; symlink/hardlink и доступ группе/остальным 
 или административного пользователя. Для matrix-admin используйте admin-password.
 
 ```bash
-sudo bash /opt/matrix-stack/install.sh user-password /root/matrix-user-password.json
-sudo bash /opt/matrix-stack/install.sh check
+sudo misbot users password set --input /root/matrix-user-password.json
+sudo misbot check
 ```
 
 Установщик сначала проверяет существующую активную обычную учётную запись,
@@ -113,8 +113,8 @@ MAS по инструкции выше, повторите команду с т�
 для того же ID, без восстановления всей БД и потери последующих сообщений.
 
 ```bash
-sudo bash /opt/matrix-stack/install.sh user-password-recover
-sudo bash /opt/matrix-stack/install.sh check
+sudo misbot users password recover
+sudo misbot check
 ```
 
 Успех — `user_password_recovered`, passed=true, exit0; проверьте новый вход.

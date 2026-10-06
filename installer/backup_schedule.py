@@ -31,9 +31,9 @@ def command(*arguments, allowed=(0,)):
 def safe_path(value):
     path = Path(value)
     if (not path.is_absolute() or path == Path('/') or '..' in path.parts
-            or not re.fullmatch(r'/[A-Za-z0-9._/-]+', str(path))
+            or not re.fullmatch(r'/[A-Za-z0-9 ._/-]+', str(path))
             or path.resolve() != path.absolute()):
-        raise RuntimeError('Use absolute backup paths without spaces, parent traversal or symlinks')
+        raise RuntimeError('Use absolute backup paths without parent traversal or symlinks')
     return path
 
 
@@ -113,7 +113,7 @@ def unit_texts(root, record):
     service = header + ('[Unit]\nDescription=Verified Matrix backup\nAfter=docker.service network-online.target\n'
         'Wants=network-online.target\n\n[Service]\nType=oneshot\nUser=root\nGroup=root\nUMask=0077\n'
         'Environment=DOCKER_HOST=unix:///var/run/docker.sock\nEnvironment=DOCKER_CONTEXT=\n'
-        'ExecStart=/usr/bin/python3 ' + str(root / 'backup_schedule.py') + ' run --directory ' + str(root) + '\n'
+        'ExecStart=/usr/bin/python3 "' + str(root / 'backup_schedule.py') + '" run --directory "' + str(root) + '"\n'
         'TimeoutStartSec=6h\nTimeoutStopSec=10min\nKillMode=mixed\n'
         'StandardOutput=append:' + str(root / 'stages/backup-scheduled.log') + '\nStandardError=inherit\n')
     timer = header + ('[Unit]\nDescription=Regular verified Matrix backup\n\n[Timer]\n'

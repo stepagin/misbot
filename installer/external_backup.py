@@ -22,6 +22,7 @@ import media_snapshot
 import media_transfer
 import preflight
 import state_store
+import s3_config
 
 
 def failure_message(error):
@@ -47,7 +48,7 @@ def failure_message(error):
 
 
 def settings(path):
-    values = preflight.private_settings_file(path)
+    values = s3_config.read_profile(path)
     if set(values) - media_transfer.FIELDS:
         raise RuntimeError('The backup S3 env must contain only the six S3 parameter names')
     return values
