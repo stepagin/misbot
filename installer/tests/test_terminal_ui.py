@@ -9,6 +9,72 @@ import configuration_schema as schema
 
 
 class UITests(unittest.TestCase):
+    def initialized_ui(self,folder,step=7,reader=None):
+        import configuration,state_store
+        root=Path(folder)/'target';root.mkdir(mode=0o700)
+        state_store.write_json(root/'installation.json',{'domain':'example.org','databases_initialized':True,'config_format_version':2})
+        configuration.write_model(root,{'DOMAIN':'example.org'})
+        interface=ui.UI(root,draft=Path(folder)/'draft.json',reader=reader)
+        interface.step=step;interface.model={'DOMAIN':'stale.example.org'}
+        interface.save()
+        return interface
+
+    def test_initialized_draft_resumes_check_without_reapplying(self):
+        import configuration
+        for step in (0,6,7,8,9):
+            with self.subTest(step=step),tempfile.TemporaryDirectory() as folder:
+                interface=self.initialized_ui(folder,step)
+                before={p:p.read_bytes() for p in interface.root.rglob('*') if p.is_file()}
+                calls=[]
+                with patch('sys.stdout',new=io.StringIO()),patch.object(interface,'run',side_effect=lambda command,**kw:calls.append(command) or 0),patch.object(interface,'finish') as finish,patch.object(configuration,'write_model',side_effect=AssertionError('must not reapply')):
+                    self.assertEqual(interface.wizard(),0)
+                self.assertEqual(calls,[] if step==9 else ['check'])
+                finish.assert_called_once()
+                self.assertEqual(interface.model['DOMAIN'],'example.org')
+                self.assertEqual(before,{p:p.read_bytes() for p in interface.root.rglob('*') if p.is_file()})
+
+    def test_back_after_failed_check_opens_menu(self):
+        with tempfile.TemporaryDirectory() as folder:
+            interface=self.initialized_ui(folder,8,reader=lambda *args:'назад')
+            with patch('sys.stdout',new=io.StringIO()) as output,patch.object(interface,'run',return_value=1),patch.object(interface,'menu',return_value=0) as menu:
+                self.assertEqual(interface.wizard(),0)
+            menu.assert_called_once()
+            self.assertIn('sudo misbot start',output.getvalue())
+            self.assertNotIn('config validate/status',output.getvalue())
+
+    def test_initialization_completed_during_failed_start_resumes_check(self):
+        import configuration,state_store
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)/'target';root.mkdir(mode=0o700)
+            state_store.write_json(root/'installation.json',{'domain':'example.org','databases_initialized':False,'config_format_version':2})
+            configuration.write_model(root,{'DOMAIN':'example.org'})
+            interface=ui.UI(root,draft=Path(folder)/'draft.json',reader=lambda *args:'повторить')
+            interface.step=7;calls=[]
+            def run(command,**kwargs):
+                calls.append(command)
+                if command=='start':
+                    state_store.write_json(root/'installation.json',{'domain':'example.org','databases_initialized':True,'config_format_version':2})
+                    return 1
+                return 0
+            with patch('sys.stdout',new=io.StringIO()),patch.object(interface,'run',side_effect=run),patch.object(interface,'finish'):
+                self.assertEqual(interface.wizard(),0)
+            self.assertEqual(calls,['start','check'])
+
+    def test_back_at_completion_opens_menu_without_initial_form(self):
+        with tempfile.TemporaryDirectory() as folder:
+            interface=self.initialized_ui(folder,9)
+            with patch('sys.stdout',new=io.StringIO()),patch.object(interface,'finish',side_effect=ui.Back),patch.object(interface,'menu',return_value=0) as menu:
+                self.assertEqual(interface.wizard(),0)
+            menu.assert_called_once()
+
+    def test_apply_guard_skips_write_when_installation_is_initialized(self):
+        import configuration
+        with tempfile.TemporaryDirectory() as folder:
+            interface=self.initialized_ui(folder)
+            with patch('sys.stdout',new=io.StringIO()),patch.object(configuration,'write_model',side_effect=AssertionError('must not write')),patch.object(interface,'run',side_effect=AssertionError('must not start')):
+                interface.setup_step(7)
+            self.assertEqual(interface.model['DOMAIN'],'example.org')
+
     def test_site_form_uses_common_schema_and_confirmation_preserves_on_cancel(self):
         import configuration,homepage,state_store
         with tempfile.TemporaryDirectory() as folder:

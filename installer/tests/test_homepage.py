@@ -28,7 +28,8 @@ class HomepageTests(unittest.TestCase):
         page=homepage.render(model)
         self.assertNotIn('<script>',page);self.assertNotIn('<img',page)
         self.assertIn('&lt;script&gt;',page);self.assertIn('#/login',page);self.assertIn('#/register',page)
-        self.assertIn('https://matrix.fictional.example.org',page)
+        self.assertIn('<code>fictional.example.org</code>',page)
+        self.assertNotIn('https://matrix.fictional.example.org',page)
         page=homepage.render({'DOMAIN':'fictional.example.org','OPEN_REGISTRATION':'false'})
         self.assertNotIn('#/register',page);self.assertNotIn('Связаться с поддержкой',page)
     def test_url_validation_and_cycles(self):

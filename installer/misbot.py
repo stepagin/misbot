@@ -18,7 +18,25 @@ class InputError(ValueError):pass
 
 class Parser(argparse.ArgumentParser):
     def error(self,message):
-        raise InputError('Неверная команда или аргументы. Выполните misbot help или справку операции --help.')
+        # argparse messages may contain secret values. Only registered option
+        # names and static explanations may reach the user.
+        if message.startswith('the following arguments are required:'):
+            names=[action.option_strings[0] for action in self._actions
+                   if action.required and action.option_strings and action.option_strings[0] in message.split(':',1)[1].strip().split(', ')]
+            explanation='Не указаны обязательные аргументы: '+', '.join(names)+'.'
+        else:
+            action=next((action for action in self._actions if any(
+                message.startswith('argument '+option+': expected one argument')
+                for option in action.option_strings)),None)
+            if action:explanation='Для аргумента '+action.option_strings[0]+' требуется значение.'
+            elif message.startswith('unrecognized arguments:'):explanation='Указан неизвестный аргумент или лишнее значение.'
+            else:explanation='Неверная команда или аргументы.'
+        raise InputError(explanation+' Справка: '+self.prog+' --help')
+
+    def _check_value(self,action,value):
+        if action.choices is not None and value not in action.choices:
+            raise InputError('Недопустимое значение '+action.option_strings[0]+'. Допустимо: '+
+                             ', '.join(action.choices)+'. Справка: '+self.prog+' --help')
 
 
 def operation_help(command):
@@ -74,7 +92,7 @@ def help_text(topic=''):
 
 def parse(argv):
     # Extract global options wherever they appear; argv values are never executed.
-    common=Parser(add_help=False,allow_abbrev=False)
+    common=Parser(prog='misbot',add_help=False,allow_abbrev=False)
     common.add_argument('--directory');common.add_argument('--source')
     defaults,remaining=common.parse_known_args(argv)
     if not remaining or remaining==['--help'] or remaining==['help']:return None,defaults,''
@@ -92,7 +110,7 @@ def parse(argv):
         words.append(value)
     command=vocabulary.BY_PATH.get(' '.join(words))
     if command is None:raise InputError('Неизвестная команда. Выполните misbot help.')
-    parser=Parser(add_help=False,allow_abbrev=False)
+    parser=Parser(prog='misbot '+command.path,add_help=False,allow_abbrev=False)
     for name in command.arguments:
         parser.add_argument('--'+name,dest=name,required=True,choices=('media','backup') if name=='purpose' else None)
     if command.backend in ('s3-check','s3-cleanup'):

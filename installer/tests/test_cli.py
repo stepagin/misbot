@@ -95,6 +95,31 @@ class CommandTests(unittest.TestCase):
             with contextlib.redirect_stderr(output):self.assertEqual(misbot.main(args),2)
             self.assertNotIn('FICTIONAL_SECRET',output.getvalue())
 
+    def test_missing_required_arguments_name_options_and_operation_help(self):
+        for command in cli_commands.COMMANDS:
+            if not command.arguments:continue
+            with self.subTest(command=command.path):
+                output=io.StringIO()
+                with patch.object(os,'geteuid',side_effect=AssertionError('must validate before privileges')),contextlib.redirect_stderr(output):
+                    self.assertEqual(misbot.main(command.path.split()),2)
+                for argument in command.arguments:self.assertIn('--'+argument,output.getvalue())
+                self.assertIn('Справка: misbot '+command.path+' --help',output.getvalue())
+
+    def test_invalid_values_and_missing_option_value_are_safe_and_actionable(self):
+        cases=[(['federation','check','--server'],'Для аргумента --server требуется значение.','misbot federation check --help'),
+               (['--directory'],'Для аргумента --directory требуется значение.','misbot --help'),
+               (['storage','s3','check','--config','FICTIONAL_PRIVATE_PATH','--purpose','FICTIONAL_SECRET'],
+                'Допустимо: media, backup.','misbot storage s3 check --help'),
+               (['status','--FICTIONAL_SECRET','FICTIONAL_PRIVATE_PATH'],
+                'Указан неизвестный аргумент','misbot status --help')]
+        for argv,message,help_command in cases:
+            with self.subTest(argv=argv):
+                output=io.StringIO()
+                with contextlib.redirect_stderr(output):self.assertEqual(misbot.main(argv),2)
+                self.assertIn(message,output.getvalue());self.assertIn(help_command,output.getvalue())
+                self.assertNotIn('FICTIONAL_SECRET',output.getvalue())
+                self.assertNotIn('FICTIONAL_PRIVATE_PATH',output.getvalue())
+
     def test_bootstrap_s3_json_before_any_installation(self):
         if os.geteuid()!=0:self.skipTest('isolated root CLI requires root')
         with tempfile.TemporaryDirectory() as folder:

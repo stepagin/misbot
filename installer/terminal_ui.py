@@ -62,6 +62,17 @@ class UI:
         directory(self.draft.parent)
         state_store.write_json(self.draft,{'format':1,'directory':str(self.root),'step':self.step,'values':self.model,'backup':self.backup})
 
+    def initialized(self):
+        from configuration import read_private_json
+        path=self.root/'installation.json'
+        return path.exists() and bool(read_private_json(path).get('databases_initialized'))
+
+    def use_active_configuration(self):
+        from configuration import load,backup_profile
+        self.model=load(self.root,complete=False)
+        self.backup=backup_profile(self.root)
+        text('Базы уже инициализированы. Первоначальные настройки повторно не применяются; продолжаем проверку существующей установки.')
+
     def field(self,key):
         if key not in schema.FIELDS:
             text('Неизвестное поле; выберите имя из показанного списка.');return
@@ -183,12 +194,13 @@ class UI:
                 if code:raise RuntimeError('Init не завершён. Настройки draft сохранены; повторите мастер, не удаляйте secrets.')
             metadata=json.loads((self.root/'installation.json').read_text())
             if metadata.get('databases_initialized'):
-                raise RuntimeError('Сервер уже инициализирован. Используйте меню; форму первоначального init применять нельзя.')
+                self.use_active_configuration()
+                return
             write_model(self.root,self.model,self.backup)
             code=self.run('start')
             if code:raise RuntimeError('Запуск не подтверждён. sudo misbot status; исправьте причину и повторите start. Draft сохранён.')
         elif index==8:
-            if self.run('check'):raise RuntimeError('Сервер запущен, но check не прошёл; исправьте конкретную причину и повторите misbot check.')
+            if self.run('check'):raise RuntimeError('Готовность сервера не подтверждена. Выполните sudo misbot status; если запуск не завершён, sudo misbot start, затем sudo misbot check. Повторный init не нужен.')
             if self.backup:
                 key=self.backup['BACKUP_KEY_FILE']
                 if not Path(key).exists() and self.run('backup key create',key=key):raise RuntimeError('Не удалось создать recovery key; сохраните настройки и повторите backup key create.')
@@ -219,20 +231,30 @@ class UI:
 
     def wizard(self):
         names=['Домен и каталог','Система','DNS и порты','Медиа','Авторизация','Внешние копии','Итог','Применение и запуск','Проверка','Завершение']
+        if 8<=self.step<=9 and self.initialized():self.use_active_configuration()
         text('Misbot — мастер SSH. Команды ввода: назад, отмена, сохранить и выйти. Enter сохраняет default/существующий секрет.')
         while self.step<len(names):
+            if self.step<8 and self.initialized():
+                self.use_active_configuration()
+                self.step=8;self.save()
             text('\nЭтап '+str(self.step+1)+'/10: '+names[self.step]+'; установка '+str(self.root))
             try:self.setup_step(self.step)
-            except Back:self.step=max(0,self.step-1);continue
+            except Back:
+                if self.initialized():
+                    text('Первоначальное применение уже выполнено. Возвращаемся в меню управления существующей установкой.')
+                    return self.menu()
+                self.step=max(0,self.step-1);continue
             except (Cancel,KeyboardInterrupt):text('Ввод отменён; действующая конфигурация не изменена. Draft сохранён.');self.save();return 130
             except SaveExit:self.save();text('Сохранено приватно. Продолжение: sudo python3 '+shlex.quote(str(self.source/'misbot.py'))+' ui --directory '+shlex.quote(str(self.root)));return 0
             except (RuntimeError,OSError):
-                text('Этап не завершён. Проверьте misbot config validate/status; данные и ключи сохраняются.')
+                text('Этап не завершён. Выполните sudo misbot config validate и sudo misbot status; данные и ключи сохраняются.')
                 # Show only schema/preflight static safe messages, never SDK bodies.
                 error=sys.exc_info()[1]
                 if type(error) is RuntimeError or isinstance(error,schema.InvalidConfiguration):text(str(error))
                 try:self.ask('Повторить шаг / назад / сохранить и выйти','повторить')
-                except Back:self.step=max(0,self.step-1)
+                except Back:
+                    if self.initialized():return self.menu()
+                    self.step=max(0,self.step-1)
                 except (SaveExit,Cancel,KeyboardInterrupt):self.save();text('Draft сохранён; повторите ui для продолжения.');return 0
                 continue
             self.step+=1;self.save()
@@ -322,7 +344,7 @@ def main():
             if (ui.root/'configuration-transition.json').exists():
                 text('Конфигурация не опубликована полностью. Продолжение: sudo misbot --directory '+shlex.quote(str(ui.root))+' config recover');return 1
             if ui.draft.exists() and 7<=ui.step<=9:
-                ui.step=max(8,ui.step);return ui.wizard()
+                return ui.wizard()
             return ui.menu()
     return ui.wizard()
 

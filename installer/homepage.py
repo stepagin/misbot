@@ -43,7 +43,7 @@ def render(model):
     template=(Path(__file__).parent/'site/index.html').read_text(encoding='utf-8')
     values={'NAME':escape(model['SITE_NAME'] or model['DOMAIN']),'DESCRIPTION':escape(model['SITE_DESCRIPTION']),
             'LOGIN':escape(urls['login']),'REGISTER':registration,'CLIENT':escape(urls['client']),
-            'HOMESERVER':escape(urls['homeserver']),'NOTE':escape(note),'SUPPORT':support}
+            'HOMESERVER':escape(model['DOMAIN']),'NOTE':escape(note),'SUPPORT':support}
     return re.sub(r'@@([A-Z]+)@@',lambda match:values[match[1]],template)
 
 
