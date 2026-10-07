@@ -38,13 +38,14 @@ sudo misbot users invitation status
 
 Версия — `Misbot 1.0.0`. Пароль администратора и первый токен показываются только авторизованному оператору в терминале. Токен позволяет одну обычную регистрацию, default 7 дней; вводится в форме регистрации, никогда в URL. Если выдача ещё не завершена: `sudo misbot users invitation ensure`. Начальная страница основного домена — локальный лендинг с кнопками входа и регистрации. [Сайт и переадресация](installer/homepage.md).
 
-В `status` сначала завершите указанную pending операцию по точной recovery-команде. Неверную конфигурацию исправьте в приватном файле и повторите `sudo misbot config validate`; lock и данные не удаляйте. S3 можно отложить и выбрать локальные медиа; позднее `sudo misbot storage s3 connect --config /root/misbot-s3.env` переносит существующие файлы. [Диагностика S3](installer/cli.md).
+В `status` сначала завершите указанную pending операцию по точной recovery-команде. Неверную конфигурацию исправьте в приватном файле и повторите `sudo misbot config validate`; lock и данные не удаляйте. S3 можно отложить и выбрать локальные медиа; позднее `sudo misbot storage s3 connect --config /root/misbot-s3.env` переносит существующие файлы. [Диагностика S3](installer/cli.md#проверка-s3-без-подключения).
 
 Для эксплуатации и восстановления:
 
 ```bash
 sudo misbot backup create
 sudo misbot backup verify
+sudo misbot backup key create --key /root/misbot-backup.key
 sudo misbot backup external create --config /root/misbot-backup-s3.env --key /root/misbot-backup.key
 sudo misbot update apply --source /root/misbot-setup/matrix-installer
 sudo misbot stop
@@ -54,7 +55,7 @@ sudo misbot remove
 
 Внешняя копия зашифрована; ключ держите вне установки и отдельно от объекта копии. Обновление принимает проверенный совместимый комплект, сохраняет данные и имеет recovery. `remove` удаляет свои контейнеры и системную команду, сохраняя каталог данных и checkpoints. Восстановление возвращает состояние на момент копии; остановите источник перед активацией восстановленного экземпляра.
 
-Подробно: [CLI](installer/cli.md), [UI и конфигурация](installer/configuration.md), [пользователи](installer/users.md), [администратор и приглашения](installer/administration.md), [федерация и оба бота](installer/federation.md), [копии и восстановление](installer/backup.md), [credentials](installer/credentials.md), [обновление и recovery](installer/lifecycle.md). `dist/` создаётся локально и не хранится в Git.
+Подробно: [CLI](installer/cli.md), [UI и конфигурация](installer/configuration.md), [пользователи](installer/users.md), [администратор и первый токен](installer/configuration.md#администратор-и-первый-токен), [ежедневное управление](installer/administration.md), [федерация и оба бота](installer/federation.md), [копии и восстановление](installer/backup.md), [credentials](installer/credentials.md), [обновление и recovery](installer/README.md#10-обновление). `dist/` создаётся локально и не хранится в Git.
 
 ## Структура исходников
 
@@ -88,9 +89,20 @@ bash -n installer/install.sh
 
 Интеграционные тесты установщика требуют отдельной контейнерной среды. Локальные тесты не подтверждают работу реальных DNS, OAuth-входа, федерации и звонков; завершите проверки из инструкции на целевом сервере.
 
-Начните установку через SSH-мастер: в распакованном комплекте `sudo python3 misbot.py ui`, после установки `sudo misbot ui` (или `sudo misbot` в TTY). Проверка настроек: `sudo misbot config validate`. [Конфигурация и первый токен](installer/configuration.md).
+Начните установку через SSH-мастер: в распакованном комплекте `sudo python3 misbot.py ui`, после установки `sudo misbot ui` (или `sudo misbot` в TTY). Проверка настроек: `sudo misbot config validate`. [Конфигурация](installer/configuration.md) и [первый токен](installer/configuration.md#администратор-и-первый-токен).
 
 [Управление федерацией](installer/federation.md): `sudo misbot federation help` или раздел SSH UI «федерация/бот/заявки».
 Административный бот: `помощь`, `серверы`, `пригласить сервер example.org`, `заявки`.
 Реферальный бот: `пригласить`, `токены`, `отозвать`, `помощь`.
 HTTPS discovery `/.well-known/misbot`, [протокол API](installer/misbot-api.openapi.json) на основном домене; заявки требуют независимого местного одобрения обеих сторон.
+
+## Условия распространения и границы проверки
+
+Лицензия исходников пока не выбрана владельцем. До публикации необходимо добавить
+лицензию и определить условия распространения; доступность исходников сама по себе
+не предоставляет разрешения на их использование и распространение.
+
+Локальная сборка и изолированные проверки не завершают приёмку: остаются открытыми
+полный проход установки с публичным HTTPS, браузерный вход и регистрация,
+восстановление зашифрованной внешней копии и полный сценарий обновления с recovery.
+Публичная межсерверная федерация, внешний OAuth и звонки также не подтверждены.
