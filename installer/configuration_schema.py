@@ -3,7 +3,7 @@ from dataclasses import dataclass
 import ipaddress
 from pathlib import Path
 import re
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit, quote
 import s3_config
 
 
@@ -27,6 +27,11 @@ class Field:
 
 
 FIELDS={
+ 'HOMEPAGE_MODE':Field('site','Главная: landing, element или external','landing','homepage',example='landing',impact='Только главная страница и Caddy; identity и службы Matrix сохраняются.'),
+ 'HOMEPAGE_URL':Field('site','Цель external: полный HTTPS URL без credentials',kind='https',example='https://community.example.net/',required='external'),
+ 'SITE_NAME':Field('site','Название сервера; пусто — домен',kind='short_text',example='Наш сервер'),
+ 'SITE_DESCRIPTION':Field('site','Краткое описание сервера','Общайтесь в своём пространстве Matrix.','description',example='Общение нашей команды'),
+ 'SITE_SUPPORT_URL':Field('site','Необязательная HTTPS ссылка поддержки',kind='https',example='https://support.example.net/'),
  'DOMAIN':Field('server','Основной домен, без https:// и пути',kind='domain',required='всегда',example='example.org',impact='Matrix identity: после init изменять нельзя.'),
  'PUBLIC_IP':Field('server','Публичный IPv4 из панели VPS; пусто — единственный A домена',kind='ip',example='203.0.113.20'),
  'ACME_EMAIL':Field('server','Email оператора для сертификатов',kind='email',example='operator@example.org'),
@@ -78,17 +83,26 @@ def domain(value):
 def field_value(key,value,file='форма',schema=FIELDS):
     if key not in schema:raise InvalidConfiguration(file,key,'unknown_field','неизвестное поле; значение сохраните приватно, не отбрасывайте')
     item=schema[key]
-    if not isinstance(value,str) or any(ord(c)<32 for c in value):raise InvalidConfiguration(file,key,'syntax','буквальная строка без управляющих символов')
+    if not isinstance(value,str) or any(ord(c)<32 or ord(c)==127 for c in value):raise InvalidConfiguration(file,key,'syntax','буквальная строка без управляющих символов')
     try:
         if not value:
-            if item.required=='всегда' or item.kind in ('media','database','bool','ssl','port','lifetime','usage','subnet','domains','role'):raise ValueError('обязательное поле')
+            if item.required=='всегда' or item.kind in ('media','database','bool','ssl','port','lifetime','usage','subnet','domains','role','homepage'):raise ValueError('обязательное поле')
             return value
         if item.kind=='domain':return domain(value)
         if item.kind=='domains':
             if any(not p.strip() for p in value.split(',')):raise ValueError('непустой список доменов через запятую')
             return ','.join(dict.fromkeys(domain(p) for p in value.split(',')))
-        enums={'media':('local','s3'),'database':('local','external'),'bool':('true','false'),'ssl':('require','verify-full')}
+        enums={'media':('local','s3'),'database':('local','external'),'bool':('true','false'),'ssl':('require','verify-full'),'homepage':('landing','element','external')}
         if item.kind in enums and value not in enums[item.kind]:raise ValueError(' / '.join(enums[item.kind]))
+        if item.kind in ('short_text','description') and len(value)>(120 if item.kind=='short_text' else 1000):raise ValueError('слишком длинный текст')
+        if item.kind=='https':
+            parsed=urlsplit(value)
+            if parsed.scheme!='https' or not parsed.hostname or parsed.username is not None or parsed.password is not None or parsed.port not in (None,443) or any(c.isspace() or c in '\\"<>`{}' for c in value) or re.search(r'%(?:0[0-9a-f]|1[0-9a-f]|7f)',value,re.I):raise ValueError('HTTPS URL без credentials, управляющих символов и нестандартного порта')
+            try:
+                address=ipaddress.ip_address(parsed.hostname);host=str(address)
+                if address.version==6:host='['+host+']'
+            except ValueError:host=domain(parsed.hostname)
+            return urlunsplit(('https',host,quote(parsed.path,safe='/:%@!$&\'()*+,;=-._~'),quote(parsed.query,safe='/:?%@!$&\'()*+,;=-._~'),quote(parsed.fragment,safe='/:?%@!$&\'()*+,;=-._~')))
         if item.kind=='ip':
             address=ipaddress.ip_address(value)
             if address.version!=4 or not address.is_global:raise ValueError('публичный IPv4')
@@ -123,6 +137,12 @@ def validate(values,origins=None,complete=True,preview=False):
     model={key:item.default for key,item in FIELDS.items()};model.update(normalized)
     def error(key,message,code='field_dependency'):raise InvalidConfiguration(origins.get(key,'settings.env'),key,code,message)
     if not model['DOMAIN']:error('DOMAIN','обязательный hostname без схемы')
+    if model['HOMEPAGE_MODE']=='external':
+        if not model['HOMEPAGE_URL']:error('HOMEPAGE_URL','обязательно при external')
+        target=urlsplit(model['HOMEPAGE_URL']);host=target.hostname.lower().rstrip('.')
+        managed=[model['DOMAIN'],*[p+'.'+model['DOMAIN'] for p in ('matrix','mas','web','admin','rtc','turn')]]
+        if model['PUBLIC_IP']:managed.append(model['PUBLIC_IP'])
+        if host in managed:error('HOMEPAGE_URL','выберите внешний сайт; управляемые домены создают цикл или ведут в служебные endpoints')
     for provider in ('GOOGLE','TELEGRAM'):
         if bool(model[provider+'_CLIENT_ID'])!=bool(model[provider+'_CLIENT_SECRET']):error(provider+'_CLIENT_SECRET',provider+' requires both '+provider+'_CLIENT_ID and '+provider+'_CLIENT_SECRET; заполните оба или очистите оба','oauth_'+provider.lower()+'_pair_incomplete')
     if model['MEDIA_MODE']=='s3':

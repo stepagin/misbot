@@ -31,6 +31,13 @@ tests=[
     ('mas_admin_protected',mas+'/api/admin/v1/users',401),
 ]
 failed=0
+try:
+    import configuration,homepage
+    result=homepage.probe(configuration.load(root,True))
+    print(json.dumps({'check':'homepage_routes','passed':True,**result}),flush=True)
+except Exception as error:
+    print(json.dumps({'check':'homepage_routes','passed':False,'error_type':type(error).__name__}),flush=True)
+    failed+=1
 for name,url,expected in tests:
     try:
         headers={'Authorization':'Bearer invalid'} if name=='mas_admin_protected' else {}

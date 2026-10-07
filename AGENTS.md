@@ -6,6 +6,7 @@
 
 - `deployment/` — универсальные инструкции эксплуатации, сохранения identity и миграции; начните с `deployment/README.md`, `deployment/requirements.md` и `deployment/operations.md`. Инструмент зеркалирования истории и его тесты также находятся здесь.
 - `installer/` — комплект для чистого сервера с произвольным доменом; установка и ограничения описаны в `installer/README.md`. `dist/matrix-installer.tar.gz` — локально собранный архив комплекта.
+- Главная страница: `installer/homepage.py`, локальные assets `installer/site/` и общая схема `configuration_schema.py`; поведение и recovery описаны в `installer/homepage.md`. Изменение сайта не должно перехватывать Matrix/MAS/Misbot API или перезапускать весь стек.
 - `bots/telegram/` — Telegram-бот и общая управляющая служба.
 - `bots/matrix-referral/` — единственные исходники реферального Matrix-бота и общего crypto signing helper. `installer/referral-control/` хранит уникальные файлы управляющей службы; `installer/build.py` добавляет runtime из `bots/` в архив без дублирования в Git.
 - `bots/matrix-federation/` — отдельный административный Matrix-бот; `installer/federation.py` — общий backend CLI/UI/бота, `federation_service.py` — узкие Unix RPC/HTTP интерфейсы. Протокол, ограничения доверия и recovery описаны в `installer/federation.md`; публичная схема — `misbot-api.openapi.json`. SDK pins и crypto signing helper берутся из единственного существующего источника, повторные устройства/ключи не создавайте.

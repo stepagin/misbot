@@ -20,6 +20,7 @@ import postgres_setup
 import configuration
 import configuration_schema
 import preflight
+import homepage
 
 def merge(base, overlay):
     for key, value in overlay.items():
@@ -559,6 +560,8 @@ turn.@DOMAIN@ {
     respond "TURN endpoint" 200
 }
 '''.replace('@DOMAIN@', domain).replace('@SUBNET@', subnet))
+homepage.write_assets(root,settings)
+state_store.write_text(config/'Caddyfile',homepage.replace_route((config/'Caddyfile').read_text(),settings))
 (config / 'haproxy.cfg').write_text('''global
     log stdout format raw local0
     maxconn 256
@@ -682,7 +685,7 @@ if not args.preview:
     for name in ['Caddyfile','haproxy.cfg']:
         (config/name).chmod(0o644)
     for path in public.iterdir():
-        path.chmod(0o644)
+        path.chmod(0o755 if path.is_dir() else 0o644)
     (root/'data/synapse').chmod(0o700)
 # The Caddy validator consumes the same Caddyfile path as the service.
 if acme_email:

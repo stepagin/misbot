@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="misbot-homepage" content="1">
+  <meta name="description" content="@@DESCRIPTION@@">
+  <title>@@NAME@@ — Matrix</title>
+  <link rel="stylesheet" href="/site.css">
+</head>
+<body>
+  <a class="skip" href="#main">Перейти к содержимому</a>
+  <header><span class="mark" aria-hidden="true">m</span><span>Ваше пространство для общения</span></header>
+  <main id="main">
+    <section class="intro" aria-labelledby="title">
+      <p class="eyebrow">На связи · Matrix</p>
+      <h1 id="title">@@NAME@@</h1>
+      <p class="description">@@DESCRIPTION@@</p>
+      <nav class="actions" aria-label="Вход и регистрация">
+        <a class="button" href="@@LOGIN@@">Войти <span aria-hidden="true">↗</span></a>
+        @@REGISTER@@
+      </nav>
+      <p class="note">@@NOTE@@</p>
+    </section>
+    <aside aria-labelledby="connect">
+      <p class="eyebrow">На любом устройстве</p>
+      <h2 id="connect">В браузере или приложении</h2>
+      <p>Откройте <a href="@@CLIENT@@">веб-клиент Element</a> или укажите этот адрес сервера в приложении Matrix:</p>
+      <code>@@HOMESERVER@@</code>
+      <p class="hint">Для входа используйте свою учётную запись этого сервера.</p>
+      @@SUPPORT@@
+    </aside>
+  </main>
+  <footer>Misbot · Общение в Matrix</footer>
+</body>
+</html>

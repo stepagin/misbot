@@ -166,7 +166,9 @@ def inherited_operation_descriptor(root):
         return None
 
 
-def assert_update_allowed(root, allow_restore_generation=False, allow_federation=False, allow_configuration=False):
+def assert_update_allowed(root, allow_restore_generation=False, allow_federation=False, allow_configuration=False, allow_homepage=False):
+    if not allow_homepage and ((Path(root)/'homepage-transition.json').exists() or (Path(root)/'homepage-transition.json').is_symlink()):
+        raise RuntimeError('Главная страница требует восстановления: sudo misbot --directory '+shlex.quote(str(root))+' homepage recover; прежние файлы и checkpoint сохраните')
     if not allow_federation and (Path(root)/"federation-transition.json").exists():
         raise RuntimeError("Federation change needs recovery: sudo misbot --directory "+shlex.quote(str(root))+" federation recover; keep the checkpoint")
     import configuration

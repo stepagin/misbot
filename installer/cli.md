@@ -31,9 +31,9 @@ sudo misbot start
 sudo misbot stop
 ```
 
-Группы: `config`, `users`, `storage`, `backup`, `update`, `credentials`, `federation`.
+Группы: `config`, `users`, `storage`, `backup`, `update`, `credentials`, `federation`, `homepage`.
 `federation help` описывает локальную политику, заявки и комнаты бота;
-`homepage help` объясняет текущую переадресацию. Доступные операции и
+`homepage help` описывает лендинг, два режима переадресации и восстановление. Доступные операции и
 обязательные аргументы показаны в help каждой группы и в `COMMAND --help`.
 Для команды восстановления следуйте выводу `status`, учитывая pending и занятые
 блокировки. Не удаляйте checkpoints, не выполняйте повторный init на рабочей установке.
@@ -256,3 +256,11 @@ JSON предназначен для будущего UI; UI не должен �
 | `misbot credentials vault disconnect` | `vault-disconnect` | нет |
 | `misbot storage s3 check` | `s3-check` | `--config`, `--purpose` |
 | `misbot storage s3 cleanup` | `s3-cleanup` | `--config`, `--catalog` |
+| `misbot homepage show` | `homepage-show` | нет |
+| `misbot homepage check` | `homepage-check` | необязательные `--mode`, `--url`, `--name`, `--description`, `--support-url` |
+| `misbot homepage apply` | `homepage-apply` | те же поля; для external обязателен URL |
+| `misbot homepage recover` | `homepage-recover` | нет |
+| `misbot homepage rollback` | `homepage-rollback` | нет |
+# Главная страница
+
+`misbot homepage help`: `show`, `check`, `apply`, `recover`, `rollback`. По умолчанию локальный лендинг. `sudo misbot homepage apply --mode element` выбирает Element; `sudo misbot homepage apply --mode external --url https://community.example.net/` — внешний сайт; `sudo misbot homepage apply --mode landing` возвращает лендинг. Поддерживаются `--name`, `--description`, `--support-url`; неуказанные поля сохраняются. Предварительно выполните ту же команду с `check` вместо `apply`. Пересоздаётся только Caddy; результат подтверждается по HTTPS, внешний сайт не проверяется. [Настройки и recovery](homepage.md).

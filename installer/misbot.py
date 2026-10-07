@@ -32,6 +32,10 @@ def operation_help(command):
         print('S3 defaults: --purpose обязателен; режим с записью; catalog /root/.local/state/misbot/s3-probes. --read-only не проверяет GET/PUT/DELETE. --json: schema=1 и безопасные stages; exit 0/1/130.')
     elif command.backend=='s3-cleanup':
         print('S3 cleanup: --catalog обязателен; удаляется только доказанный собственный объект/VersionId. --json: schema=1; exit 0/1/130.')
+    elif command.backend in ('homepage-check','homepage-apply'):
+        print('Аргументы необязательны: --mode landing|element|external (default landing), --url HTTPS_URL (обязателен для external), --name TEXT, --description TEXT, --support-url HTTPS_URL. Неуказанные поля сохраняются. Пустой --support-url удаляет блок поддержки.')
+        print('Пример: sudo misbot homepage check --mode external --url https://community.example.net/')
+        print('Затем: sudo misbot homepage apply --mode external --url https://community.example.net/ . URL чужого сайта проверяется синтаксически; доступность и содержимое не подтверждаются.')
     print('Root: да; используйте sudo. В non-TTY: sudo -n (без запроса пароля).')
     print('Остановка служб: '+command.stops+'\nВлияние на данные: '+command.data)
     sample={'domain':'example.org','config':'/root/misbot-s3.env','purpose':'media',
@@ -56,8 +60,6 @@ def operation_help(command):
 def help_text(topic=''):
     if topic in vocabulary.BY_PATH:
         operation_help(vocabulary.BY_PATH[topic]);return
-    if topic in ('homepage',):
-        print(vocabulary.TOPICS[topic]);return
     if not topic:
         print('Misbot — команды управления Matrix\n\nСостояние и службы: status, check, start, stop, remove\nВерсия: version\n')
         for name,title in vocabulary.TOPICS.items():print('  '+name+' — '+title)
@@ -98,6 +100,8 @@ def parse(argv):
     if command.backend=='s3-check':
         parser.add_argument('--read-only',action='store_true')
         parser.add_argument('--catalog-directory')
+    if command.backend in ('homepage-check','homepage-apply'):
+        for name in ('mode','url','name','description','support-url'):parser.add_argument('--'+name)
     args=parser.parse_args(remaining[len(words):])
     if defaults.source and command.backend not in ('update','update-recover'):
         raise InputError('--source применяется только к update apply/recover.')
@@ -163,6 +167,11 @@ def plan(command,options,values,source=None):
         return ['/usr/bin/python3',str(root/'command_wrapper.py'),command.backend[8:],'--directory',str(root)]
     if command.backend.startswith('configuration-'):
         return ['/usr/bin/python3',str(backend/'configuration.py'),'--directory',str(root),command.backend[14:]]
+    if command.backend.startswith('homepage-'):
+        args=['/usr/bin/python3',str(backend/'homepage.py'),'--directory',str(root),command.backend[9:]]
+        for name in ('mode','url','name','description','support_url'):
+            if values.get(name) is not None:args+=['--'+name.replace('_','-'),values[name]]
+        return args
     if command.backend.startswith('federation-'):
         action=command.backend[11:];argument=[values[name] for name in command.arguments]
         if action=='room-invite':argument=[json.dumps({'server':values['server'],'room':values['room']})]

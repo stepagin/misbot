@@ -13,6 +13,7 @@ parser.add_argument('--output', type=Path, default=root.parent / 'dist/matrix-in
 parser.add_argument('--check', action='store_true', help='verify that SHA256SUMS matches the current source files')
 args = parser.parse_args()
 names = [
+    'homepage.py','homepage.md','site/index.html','site/site.css','configuration-examples/site.env.example',
     'federation.py','federation_runtime.py','federation_protocol.py','federation_service.py',
     'federation_admin_api.py','federation_matrix_api.py','federation.md','misbot-api.openapi.json',
     'configuration-examples/server.env.example','configuration-examples/policy.env.example',
@@ -62,4 +63,6 @@ with args.output.open('wb') as output:
                 member.mtime = 0
                 archive.addfile(member, io.BytesIO(data))
 print(args.output)
-print('SHA256 ' + hashlib.sha256(args.output.read_bytes()).hexdigest())
+digest=hashlib.sha256(args.output.read_bytes()).hexdigest()
+args.output.with_name(args.output.name+'.sha256').write_text(digest+'  '+args.output.name+'\n',encoding='ascii')
+print('SHA256 ' + digest)

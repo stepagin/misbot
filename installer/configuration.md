@@ -36,6 +36,7 @@ DNS не считается готовым по подтверждению по�
 | `settings/auth.env` | Google/Telegram OIDC и Telegram egress | Выбран соответствующий провайдер |
 | `settings/database.env` | Существующий внешний connector PostgreSQL | Используется дополнительная внешняя БД |
 | `settings/backup.env` | Отдельный S3 профиль, recovery key и расписание | Настроены внешние копии |
+| `settings/site.env` | Режим главной страницы, название, описание и поддержка | Если defaults изменены |
 | `secrets/` | Автоматически созданные внутренние пароли и токены | Backend; вручную не редактировать |
 | `config/`, `compose.yaml`, `mas-proxy.env` | Generated runtime | Не являются пользовательскими шаблонами |
 
@@ -195,3 +196,6 @@ POST. Прерванную явную замену продолжайте чер
 | settings/backup.env / `S3_SECRET_ACCESS_KEY` | Secret access key провайдера | s3, кроме необязательного endpoint | буквальная строка без control characters; пусто | FICTIONAL_SECRET | Назначение/credentials меняются отдельными storage/credentials операциями. |
 | settings/backup.env / `BACKUP_KEY_FILE` | Приватный recovery key вне установки | backup включён | абсолютный путь без symlink/..; пусто | /root/misbot-backup.key | Применяется при generate/start; работающий сервер требует копии. |
 | settings/backup.env / `BACKUP_CALENDAR` | Расписание systemd, необязательно | необязательно | буквальная строка без control characters; пусто | *-*-* 03:00:00 UTC | Применяется при generate/start; работающий сервер требует копии. |
+# Настройки сайта
+
+Необязательный `settings/site.env` использует тот же загрузчик и схему. Его отсутствие означает локальный лендинг. `HOMEPAGE_MODE`, `HOMEPAGE_URL`, `SITE_NAME`, `SITE_DESCRIPTION`, `SITE_SUPPORT_URL` редактируются через раздел SSH UI «главная страница» либо `misbot homepage apply`. [Поля, defaults и безопасное применение](homepage.md). Generated `public/site/` и Caddyfile вручную не редактируют.

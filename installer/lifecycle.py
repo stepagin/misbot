@@ -497,6 +497,7 @@ def status():
             ('update_recovery_pending','update-journal.json'),
             ('configuration_recovery_pending','configuration-transition.json'),
             ('federation_recovery_pending','federation-transition.json'),
+            ('homepage_recovery_pending','homepage-transition.json'),
             ('user_password_recovery_pending','secrets/user-password-pending.json')):
         marker=ROOT/relative
         pending[name]=marker.exists() or marker.is_symlink()
@@ -506,6 +507,8 @@ def status():
         actions.append('sudo misbot --directory '+shlex.quote(str(ROOT))+' config recover')
     if pending['federation_recovery_pending']:
         actions.append('sudo misbot --directory '+shlex.quote(str(ROOT))+' federation recover')
+    if pending['homepage_recovery_pending']:
+        actions.append('sudo misbot --directory '+shlex.quote(str(ROOT))+' homepage recover')
     for flag,operation in (
             ('backup_recovery_pending','backup-recover'),
             ('database_recovery_pending','database-recover'),
@@ -702,6 +705,7 @@ def backup(leave_stopped=False):
             for name in ['config','public','secrets','settings','settings.env','installation.json','compose.yaml','images.lock.json',
                          'referral-images.lock.json',
                          'federation-images.lock.json','data/federation','data/federation-bot','federation-transition.json','stages/federation',
+                         'homepage-transition.json','stages/homepage',
                          'data/referral-bot','data/referral-control',
                          'data/synapse','data/caddy','data/caddy-config','mas-proxy.env',
                          'synapse-s3-image.lock.json']:

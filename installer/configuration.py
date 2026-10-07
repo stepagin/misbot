@@ -41,7 +41,7 @@ def parse(text,path,allowed):
     return result
 
 
-AREAS=('server','policy','media-s3','auth','database')
+AREAS=('server','policy','media-s3','auth','database','site')
 AREA={}
 
 

@@ -105,13 +105,14 @@ ACME account/validation требуют отдельного согласован
 
 Если используете исходники этого репозитория, сначала соберите архив из его корня командой `python3 installer/build.py`. Архив создаётся как `dist/matrix-installer.tar.gz` и не хранится в Git. Сборка берёт код ботов непосредственно из `bots/telegram/` и `bots/matrix-referral/`; в архиве создаются нужные каталоги, а копии исходников в Git не хранятся.
 
-Загрузите `matrix-installer.tar.gz` на сервер, например через SCP, затем:
+Передайте `matrix-installer.tar.gz` и созданный рядом `matrix-installer.tar.gz.sha256` на сервер через SCP. Сверьте checksum с доверенным значением владельца; затем из каталога с файлами:
 
 ```bash
-tar -xzf matrix-installer.tar.gz
-cd matrix-installer
-sha256sum -c SHA256SUMS
-sudo python3 misbot.py ui
+sha256sum -c matrix-installer.tar.gz.sha256
+sudo install -d -m 700 /root/misbot-setup
+sudo tar -xzf matrix-installer.tar.gz -C /root/misbot-setup
+sudo sh -c 'cd /root/misbot-setup/matrix-installer && sha256sum -c SHA256SUMS'
+sudo python3 /root/misbot-setup/matrix-installer/misbot.py ui
 ```
 
 Выполняйте команду в SSH-терминале Linux. До установки используется `python3 misbot.py ui` из распакованного комплекта; после init системная команда `misbot` доступна из любого каталога. Если отсутствуют зависимости DNS: `sudo apt-get update`, затем `sudo apt-get install -y python3 python3-yaml dnsutils iproute2`. Мастер проверяет систему, DNS/CAA и порты, предлагает локальные медиа или проверку S3, необязательные способы входа и внешние копии. Enter сохраняет default или существующий секрет. Команды ввода: `назад`, `отмена`, `сохранить и выйти`.
@@ -121,6 +122,8 @@ sudo python3 misbot.py ui
 В конце мастер показывает `@matrix-admin:example.org`, адрес входа и отдельный токен на одну обычную регистрацию, default 7 дней. Токен вводят в форме регистрации, не в URL. Просмотр только в терминале root: `sudo misbot credentials admin show` и `sudo misbot users invitation show`. Статус без токена: `sudo misbot users invitation status`. Если MAS ещё не готов: `sudo misbot users invitation ensure`; переустановка не нужна.
 
 Ручной путь и полная таблица полей: [конфигурация](configuration.md). Основной файл `settings/server.env` содержит домен, публичный IP, email и режимы хранения. Условные файлы создаются только для выбранных ресурсов. `settings/policy.env` содержит параметры регистрации и федерации; отсутствующий файл использует документированные defaults. Существующий `settings.env` поддерживается до явной команды `sudo misbot config migrate`.
+
+Основной домен показывает локальный [лендинг](homepage.md). «Войти» и «Зарегистрироваться» открывают штатный клиент/MAS; приглашение вводится в форме, не в URL. Настройки сайта — необязательный `settings/site.env`, раздел UI «главная страница» и `sudo misbot homepage help`. `sudo misbot homepage apply --mode element` выбирает Element; `--mode external --url https://community.example.net/` — временную внешнюю переадресацию, `--mode landing` возвращает страницу. Проверка маршрутов не заменяет настоящий браузерный вход.
 
 После ручного редактирования: `sudo misbot config validate`, затем `sudo misbot config apply` и `sudo misbot check`. `config apply` создаёт и проверяет согласованную копию перед применением. Не редактируйте внутренние generated configs, пароли, DOMAIN/server_name или credentials действующего ресурса: используйте его отдельную backend-операцию. Env читается буквально, никогда не выполняется через `source`.
 

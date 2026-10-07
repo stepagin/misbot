@@ -9,6 +9,19 @@ import configuration_schema as schema
 
 
 class UITests(unittest.TestCase):
+    def test_site_form_uses_common_schema_and_confirmation_preserves_on_cancel(self):
+        import configuration,homepage,state_store
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);root.chmod(0o700)
+            state_store.write_json(root/'installation.json',{'domain':'fictional.example.org','config_format_version':2})
+            configuration.write_model(root,{'DOMAIN':'fictional.example.org'})
+            before=configuration.load(root,True)
+            entries=iter(['SITE_NAME','Fictional new name','применить','нет'])
+            interface=ui.UI(root,draft=root/'draft.json',reader=lambda *args:next(entries))
+            with patch('sys.stdout',new=io.StringIO()),patch.object(homepage.Backend,'apply',side_effect=AssertionError('must not apply')):interface.homepage_menu()
+            self.assertEqual(configuration.load(root,True),before)
+            self.assertEqual(json.loads((root/'draft.json').read_text())['values']['SITE_NAME'],'Fictional new name')
+
     def test_field_error_and_secret_empty_input_keep_existing(self):
         with tempfile.TemporaryDirectory() as folder:
             values=iter(['wrong://domain','example.org',''])

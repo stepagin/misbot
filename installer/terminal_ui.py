@@ -242,7 +242,7 @@ class UI:
         text('Misbot — '+str(self.root)+'; Enter не изменяет секреты. Отмена возвращает меню.')
         self.run('status')
         while True:
-            text('\n1 статус; 2 проверка; 3 запуск; 4 остановка; 5 настройки; 6 медиа/S3; 7 копии; 8 пользователи/credentials; 9 обновление; 10 федерация/бот/заявки; 0 выход')
+            text('\n1 статус; 2 проверка; 3 запуск; 4 остановка; 5 настройки; 6 медиа/S3; 7 копии; 8 пользователи/credentials; 9 обновление; 10 федерация/бот/заявки; 11 главная страница; 0 выход')
             try:
                 choice=self.ask('Выбор','0')
                 if choice=='0':return 0
@@ -251,6 +251,7 @@ class UI:
                     if command=='stop' and self.ask('Остановка служб; данные сохраняются. Выполнить? да/нет','нет')!='да':continue
                     code=self.run(command);text('Код завершения '+str(code)+'. Состояние/продолжение: misbot status.');continue
                 if choice=='5':self.settings_menu();continue
+                if choice=='11':self.homepage_menu();continue
                 group={'6':'storage','7':'backup','8':'users','9':'update','10':'federation'}.get(choice)
                 if not group:continue
                 commands=[c for c in cli_commands.COMMANDS if c.path.startswith(group+' ')]
@@ -269,6 +270,26 @@ class UI:
                 text('Операция не завершена; данные и checkpoints сохранены.')
                 if type(error) is RuntimeError or isinstance(error,schema.InvalidConfiguration):text(str(error))
                 text('Проверьте sudo misbot --directory '+shlex.quote(str(self.root))+' status; продолжение указано в результате проверки.')
+
+    def homepage_menu(self):
+        import homepage
+        from configuration import load
+        self.model=load(self.root,True);before={key:self.model[key] for key in homepage.KEYS}
+        text('Главная страница: '+self.model['HOMEPAGE_MODE']+'. Только Caddy, короткий перерыв HTTPS; Matrix identity сохраняется.')
+        for key in homepage.KEYS:text(key+' — '+schema.FIELDS[key].label+'; '+self.model[key])
+        while True:
+            key=self.ask('Поле / применить / назад','назад')
+            if key=='применить':break
+            if key not in homepage.KEYS:continue
+            # UI.field writes only a private draft; no active settings are changed.
+            self.field(key)
+        changes={key:self.model[key] for key in homepage.KEYS if self.model[key]!=before[key]}
+        schema.validate(self.model)
+        for key in changes:text(key+': '+before[key]+' → '+changes[key])
+        if self.ask('Проверить и применить эти изменения? да/нет','нет')!='да':return
+        with state_store.operation_guard(self.root):
+            result=homepage.Backend(self.root).apply(changes)
+        text('Результат: '+result['status']+'. Просмотр: sudo misbot homepage show')
 
     def settings_menu(self):
         from configuration import load,apply_settings

@@ -14,6 +14,11 @@ class Command:
 
 
 COMMANDS = [
+    Command('homepage show','homepage-show',purpose='Показать режим, тексты и публичные ссылки сайта.'),
+    Command('homepage check','homepage-check',purpose='Проверить предложенные поля и Caddy без применения; внешний сайт не проверяется.'),
+    Command('homepage apply','homepage-apply',purpose='Применить только настройки сайта после проверки, с checkpoint и rollback.',stops='Пересоздаётся только Caddy; короткий перерыв HTTPS.'),
+    Command('homepage recover','homepage-recover',purpose='Завершить прерванное применение и проверить служебные маршруты.',stops='Только Caddy.'),
+    Command('homepage rollback','homepage-rollback',purpose='Вернуть прежнюю конфигурацию сайта из checkpoint.',stops='Только Caddy.'),
     Command('federation servers','federation-servers',purpose='Показать действующий локальный allowlist.'),
     Command('federation check','federation-check',('server',),'Проверить Misbot discovery/TLS; факт федеративных комнат отдельно.'),
     Command('federation add','federation-add',('server',),'Добавить Matrix server_name только в локальный allowlist.',stops='Копия, Synapse/Web перезапускаются.'),
@@ -105,7 +110,7 @@ TOPICS={
     'storage':'Медиа, S3 и БД', 'backup':'Копии, восстановление и перенос',
     'update':'Обновление', 'credentials':'Credentials и Vault',
     'federation':'Федерация: локальная политика, подписанные заявки Misbot и комнаты административного бота.',
-    'homepage':'Главная страница перенаправляет на Element Web. Команды выбора другого URL нет.',
+    'homepage':'Главная страница: локальный лендинг, Element Web или внешний HTTPS URL.',
 }
 
 

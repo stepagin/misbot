@@ -32,7 +32,8 @@ class CommandTests(unittest.TestCase):
     def test_help_version_without_root_docker_or_secrets(self):
         for argv in ([],['help'],['storage','help'],['storage','s3','check','--help'],['version'],
                 ['ui','--help'],['config','validate','--help'],['users','invitation','show','--help'],
-                ['federation','help'],['federation','requests','approve','--help'],['federation','operations','--help']):
+                ['federation','help'],['federation','requests','approve','--help'],['federation','operations','--help'],
+                ['homepage','help'],['homepage','apply','--help']):
             output=io.StringIO()
             with patch.object(os,'geteuid',return_value=1000),patch.object(wrapper,'default_directory',side_effect=AssertionError('secret read')),contextlib.redirect_stdout(output):
                 self.assertEqual(misbot.main(argv),0)
@@ -60,6 +61,16 @@ class CommandTests(unittest.TestCase):
             for args in (['version'],['storage','s3','check','--config','/does/not/exist','--help']):
                 result=subprocess.run([sys.executable,str(BUNDLE/'misbot.py'),*args],cwd=folder,capture_output=True,text=True,env={'PATH':'/nonexistent'})
                 self.assertEqual(result.returncode,0,result.stderr)
+
+    def test_homepage_opaque_arguments_spaces_and_metacharacters(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=self.installation(Path(folder)/'Matrix Test')
+            description='Fictional description;$(touch /tmp/SHOULD_NOT_EXIST)'
+            cmd,opts,values=misbot.parse(['homepage','apply','--directory',str(root),'--mode','landing',
+                '--name','Team with spaces','--description',description,'--support-url',''])
+            args=misbot.plan(cmd,opts,values,source=BUNDLE)
+            self.assertEqual(args[:5],['/usr/bin/python3',str(root/'homepage.py'),'--directory',str(root),'apply'])
+            self.assertIn(description,args);self.assertIn('Team with spaces',args);self.assertEqual(args[-1],'')
 
     def test_federation_uses_shared_backend_and_preserves_opaque_room_argument(self):
         with tempfile.TemporaryDirectory() as folder:

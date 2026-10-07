@@ -10,7 +10,51 @@
 python3 installer/build.py
 ```
 
-Команда создаст `dist/matrix-installer.tar.gz`. Передайте архив на новый сервер и следуйте [инструкции установки](installer/README.md). В ней описаны DNS, порты, внешние OAuth-настройки, запуск, проверки, резервное копирование и восстановление. `dist/` создаётся локально и не хранится в Git.
+Команда создаст `dist/matrix-installer.tar.gz` и `dist/matrix-installer.tar.gz.sha256`. Публичный релиз ещё не опубликован: используйте этот реально собранный комплект, а не вымышленную ссылку скачивания. Передайте оба файла на новый сервер по защищённому каналу. Сверьте checksum также с полученным от владельца значением: файл checksum, полученный вместе с архивом, сам по себе не подтверждает подлинность.
+
+Нужны Linux VPS (Debian/Ubuntu), права root/sudo, SSH, публичный IPv4, домен с DNS для основного адреса и поддоменов. Основная конфигурация — локальная PostgreSQL, локальные медиа либо S3, защищённые внешние копии. Основной маршрут не требует Vault, Google, Telegram или внешнюю БД. Требования ресурсов, DNS и портов: [установка](installer/README.md).
+
+В каталоге с полученными файлами:
+
+```bash
+sha256sum -c matrix-installer.tar.gz.sha256
+sudo install -d -m 700 /root/misbot-setup
+sudo tar -xzf matrix-installer.tar.gz -C /root/misbot-setup
+sudo sh -c 'cd /root/misbot-setup/matrix-installer && sha256sum -c SHA256SUMS'
+sudo python3 /root/misbot-setup/matrix-installer/misbot.py ui
+```
+
+Ожидается `OK` для архива и каждого payload, затем русский SSH-мастер: домен, система/DNS, выбор медиа, необязательная авторизация/копии, итог, запуск и проверка. До установки команда запускается из комплекта; после init `misbot` доступен из любого каталога. Не выполняйте `init` заново ради исправления ошибки действующего сервера.
+
+```bash
+misbot version
+sudo misbot status
+sudo misbot check
+sudo misbot ui
+sudo misbot credentials admin show
+sudo misbot users invitation show
+sudo misbot users invitation status
+```
+
+Версия — `Misbot 1.0.0`. Пароль администратора и первый токен показываются только авторизованному оператору в терминале. Токен позволяет одну обычную регистрацию, default 7 дней; вводится в форме регистрации, никогда в URL. Если выдача ещё не завершена: `sudo misbot users invitation ensure`. Начальная страница основного домена — локальный лендинг с кнопками входа и регистрации. [Сайт и переадресация](installer/homepage.md).
+
+В `status` сначала завершите указанную pending операцию по точной recovery-команде. Неверную конфигурацию исправьте в приватном файле и повторите `sudo misbot config validate`; lock и данные не удаляйте. S3 можно отложить и выбрать локальные медиа; позднее `sudo misbot storage s3 connect --config /root/misbot-s3.env` переносит существующие файлы. [Диагностика S3](installer/cli.md).
+
+Для эксплуатации и восстановления:
+
+```bash
+sudo misbot backup create
+sudo misbot backup verify
+sudo misbot backup external create --config /root/misbot-backup-s3.env --key /root/misbot-backup.key
+sudo misbot update apply --source /root/misbot-setup/matrix-installer
+sudo misbot stop
+sudo misbot start
+sudo misbot remove
+```
+
+Внешняя копия зашифрована; ключ держите вне установки и отдельно от объекта копии. Обновление принимает проверенный совместимый комплект, сохраняет данные и имеет recovery. `remove` удаляет свои контейнеры и системную команду, сохраняя каталог данных и checkpoints. Восстановление возвращает состояние на момент копии; остановите источник перед активацией восстановленного экземпляра.
+
+Подробно: [CLI](installer/cli.md), [UI и конфигурация](installer/configuration.md), [пользователи](installer/users.md), [администратор и приглашения](installer/administration.md), [федерация и оба бота](installer/federation.md), [копии и восстановление](installer/backup.md), [credentials](installer/credentials.md), [обновление и recovery](installer/lifecycle.md). `dist/` создаётся локально и не хранится в Git.
 
 ## Структура исходников
 
