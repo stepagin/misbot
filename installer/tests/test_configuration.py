@@ -106,4 +106,25 @@ class ConfigurationTests(unittest.TestCase):
         self.assertFalse((self.root/'settings.env').exists());self.assertEqual(json.loads((self.root/'installation.json').read_text())['config_format_version'],2)
 
 
+    def test_legacy_custom_mas_issuer_is_preserved_through_config_migration(self):
+        state_store.write_text(self.root/'settings.env','DOMAIN=fictional.example.org\nMAS_DOMAIN=auth.example.net\n')
+        (self.root/'config').mkdir()
+        state_store.write_text(self.root/'config/mas.yaml','http:\n  issuer: https://auth.example.net/\n')
+        state_store.write_json(self.root/'installation.json',{'domain':'fictional.example.org','databases_initialized':True})
+        config.migrate(self.root)
+        self.assertEqual(config.load(self.root,True)['MAS_DOMAIN'],'auth.example.net')
+        original=(self.root/'settings/server.env').read_bytes()
+        with self.assertRaisesRegex(RuntimeError,'MAS issuer is immutable'):
+            config.patch(self.root,{'MAS_DOMAIN':'different.example.net'})
+        self.assertEqual((self.root/'settings/server.env').read_bytes(),original)
+        self.assertFalse((self.root/'configuration-transition.json').exists())
+
+    def test_custom_auth_domain_cannot_be_homepage_redirect_or_other_service(self):
+        with self.assertRaises(schema.InvalidConfiguration):
+            schema.validate({'DOMAIN':'fictional.example.org','MAS_DOMAIN':'auth.example.net',
+                'HOMEPAGE_MODE':'external','HOMEPAGE_URL':'https://auth.example.net/'})
+        with self.assertRaises(schema.InvalidConfiguration):
+            schema.validate({'DOMAIN':'fictional.example.org','MAS_DOMAIN':'web.fictional.example.org'})
+
+
 if __name__=='__main__':unittest.main()

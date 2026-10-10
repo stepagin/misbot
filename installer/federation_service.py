@@ -43,7 +43,7 @@ def bot_call(backend, request, uid):
         raise protocol.ProtocolError('local_authorization_required')
     action=request.get('action')
     if action in ('notifications','auto-invitation','authorize'):
-        with state_store.operation_guard(backend.root):
+        with backend.guard():
             backend.ready(action in ('notifications','authorize'));data=backend.load()
             if action=='authorize':
                 actor=request.get('actor')
@@ -52,12 +52,12 @@ def bot_call(backend, request, uid):
             if action=='notifications':return {'requests':[backend.view(backend.request(data,k)) for k in data['requests'] if data['requests'][k]['direction']=='incoming'],
                 'operations':[{'id':k,'state':v['state'],'result':v.get('result',{})} for k,v in data.get('jobs',{}).items() if v['state'] in ('complete','failed','interrupted')]}
             claim=json.loads(request.get('argument','{}'));mxid=claim.get('sender');room=claim.get('room');peers=data['peers']
-            enabled=configuration.load(backend.root).get('FEDERATION_AUTO_ACCEPT','false')=='true'
+            enabled=backend.auto_accept()
             approved=any(p.get('approved') and p['document']['bot_mxid']==mxid and s in backend.servers()
                 and data['requests'].get(p['request_id'],{}).get('state')=='connected' for s,p in peers.items())
             if enabled and approved:
                 from federation_runtime import matrix_operation
-                current=matrix_operation(backend.root,'room-invitations',None)['invitations']
+                current=backend.matrix_operation('room-invitations',None)['invitations']
                 approved=any(item['room']==room and item['sender']==mxid for item in current)
             return {'allowed':bool(enabled and approved)}
     if action not in BOT_ACTIONS or request.get('actor')=='root' or not isinstance(request.get('actor'),str):
@@ -67,23 +67,32 @@ def bot_call(backend, request, uid):
     if action in MUTATIONS:
         # The checked backup must stop this bot. A durable asynchronous job keeps
         # the accepted command alive and delivers the result after its restart.
-        with state_store.operation_guard(backend.root):
-            backend.ready(action in ('recover','rollback'));backend.authorize(request['actor']);data=backend.load()
-            plan=backend.policy_plan(request.get('argument'),action=='add') if action in ('add','remove') else 'Проверка текущих прав; для политики — копия и перезапуск Synapse/Web.'
-            jid='FO-'+hashlib.sha256(request['event_id'].encode()).hexdigest()[:32]
-            jobs=data.setdefault('jobs',{})
-            if jid not in jobs:
-                if len(jobs)>=1000:raise protocol.ProtocolError('operation_capacity')
-                jobs[jid]={'state':'queued','action':action,'argument':request.get('argument'),
-                           'actor':request['actor'],'event_id':request['event_id']}
-                backend.save(data)
-            return {'operation_id':jid,'status':jobs[jid]['state'],'plan':plan,
-                    'next_action':'Итог придёт после перезапуска бота; операции показывает сохранённое состояние.'}
+        return queue_job(backend,request)
     return backend.operate(action,request.get('argument'),request['actor'],request['event_id'])
 
 
+def queue_job(backend, request):
+    """Internal root callers must supply an independently confirmed MAS actor."""
+    action=request.get('action');actor=request.get('actor');event=request.get('event_id')
+    if action not in MUTATIONS or not isinstance(actor,str) or actor=='root':
+        raise protocol.ProtocolError('local_authorization_required')
+    if not isinstance(event,str) or not 1<=len(event)<=255:raise protocol.ProtocolError('invalid_event')
+    with backend.guard():
+        backend.ready(action in ('recover','rollback'));backend.authorize(actor);data=backend.load()
+        plan=backend.policy_plan(request.get('argument'),action=='add') if action in ('add','remove') else 'Проверка текущих прав; для политики — копия и перезапуск '+backend.restart_scope()+'.'
+        jid='FO-'+hashlib.sha256(event.encode()).hexdigest()[:32]
+        jobs=data.setdefault('jobs',{})
+        expected={'action':action,'argument':request.get('argument'),'actor':actor,'event_id':event}
+        if jid not in jobs:
+            if len(jobs)>=1000:raise protocol.ProtocolError('operation_capacity')
+            jobs[jid]=dict(expected,state='queued');backend.save(data)
+        elif any(jobs[jid].get(k)!=v for k,v in expected.items()):raise protocol.ProtocolError('event_mismatch')
+        return {'operation_id':jid,'status':jobs[jid]['state'],'plan':plan,
+            'next_action':'Итог доступен через misbot federation operations и административного Matrix-бота.'}
+
+
 def job_step(backend):
-    with state_store.operation_guard(backend.root):
+    with backend.guard():
         data=backend.load();jobs=data.get('jobs',{})
         selected=next(((key,value) for key,value in jobs.items() if value['state']=='queued'),None)
         if not selected:return
@@ -96,12 +105,14 @@ def job_step(backend):
         result={'code':'operation_unconfirmed','next_action':cli_commands.recovery_command('federation-recover',backend.root)};status='failed'
         if isinstance(job.get('argument'),str) and federation.REQUEST.fullmatch(job['argument']):
             result['retry']=cli_commands.recovery_command('federation-retry',backend.root)+' --request '+job['argument']
-    with state_store.operation_guard(backend.root):
+    with backend.guard():
         data=backend.load();data['jobs'][jid].update(state=status,result=result);backend.save(data)
 
 
 def serve(root):
-    root=Path(root);backend=federation.Backend(root);lifecycle.configure(root,'federation-service')
+    root=Path(root);backend=federation.backend(root)
+    if not (root/'installation.json').exists() or configuration.read_private_json(root/'installation.json').get('backend')!='existing-compose':
+        lifecycle.configure(root,'federation-service')
     # Keep local status/recovery available after an interrupted policy publish.
     # Each normal RPC/exchange still uses its own strict admission gate.
     backend.ready(True);federation_runtime=__import__('federation_runtime')
@@ -115,7 +126,7 @@ def serve(root):
             if not stat.S_ISSOCK(info.st_mode) or info.st_uid!=0:raise RuntimeError('Foreign controller socket')
             path.unlink()
     rate=Rate();work=threading.Lock();public_document=backend.doc()
-    with state_store.operation_guard(root):
+    with backend.guard():
         data=backend.load()
         for job in data.get('jobs',{}).values():
             if job['state']=='running':job.update(state='interrupted',result={'code':'interrupted','next_action':'sudo misbot federation recover; проверьте federation requests'})
@@ -176,9 +187,21 @@ def serve(root):
             self.wfile.write(protocol.canonical(value)+b'\n')
     # Serial HTTP requests bound memory/concurrency; independent RPC listener.
     class Web(socketserver.UnixStreamServer):allow_reuse_address=True
-    web=Web(str(run/'http.sock'),HTTP);web.server_name='misbot';web.server_port=0
+    public=run
+    metadata=configuration.read_private_json(root/'installation.json')
+    if metadata.get('backend')=='existing-compose':
+        public=Path('/run/misbot-federation-'+hashlib.sha256(metadata['domain'].encode()).hexdigest()[:16])
+        public.mkdir(mode=0o755,exist_ok=True)
+        if public.is_symlink() or public.stat().st_uid!=0:raise RuntimeError('Unsafe public socket directory')
+        public.chmod(0o755)
+        path=public/'http.sock'
+        if path.exists():
+            info=path.lstat()
+            if not stat.S_ISSOCK(info.st_mode) or info.st_uid!=0:raise RuntimeError('Foreign public socket')
+            path.unlink()
+    web=Web(str(public/'http.sock'),HTTP);web.server_name='misbot';web.server_port=0
     rpc=socketserver.UnixStreamServer(str(run/'control.sock'),RPC)
-    os.chmod(run/'http.sock',0o666)  # public HTTP only; no admin routes
+    os.chmod(public/'http.sock',0o666)  # public HTTP only; no admin routes
     os.chown(run/'control.sock',0,10003);os.chmod(run/'control.sock',0o660)
     thread=threading.Thread(target=web.serve_forever,daemon=True);thread.start()
     try:rpc.serve_forever()

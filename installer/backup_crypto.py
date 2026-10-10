@@ -57,54 +57,69 @@ def cipher(key, salt):
     return AESGCM(archive_key)
 
 
-def encrypt(source, destination, key):
+def encrypt_stream(incoming, output, key):
+    """Write authenticated frames to a bounded sink (file or multipart writer)."""
     if len(key) != 32:
         raise RuntimeError('Invalid backup key length')
     header = MAGIC + os.urandom(16)
     aes = cipher(key, header[len(MAGIC):])
+    output.write(header)
+    counter = 0
+    while True:
+        block = incoming.read(CHUNK)
+        length = struct.pack('>I', len(block))
+        context = header + struct.pack('>Q', counter) + length
+        output.write(length)
+        output.write(aes.encrypt(counter.to_bytes(12, 'big'), block, context))
+        counter += 1
+        if not block:
+            break
+
+
+def encrypt(source, destination, key):
     def write(output):
-        output.write(header)
         with Path(source).open('rb') as incoming:
-            counter = 0
-            while True:
-                block = incoming.read(CHUNK)
-                length = struct.pack('>I', len(block))
-                context = header + struct.pack('>Q', counter) + length
-                output.write(length)
-                output.write(aes.encrypt(counter.to_bytes(12, 'big'), block, context))
-                counter += 1
-                # Authenticated empty final frame makes truncation detectable.
-                if not block:
-                    break
+            encrypt_stream(incoming, output, key)
     publish(destination, write)
 
 
-def decrypt(source, destination, key):
+def decrypted_blocks(source, key):
+    """Yield authenticated frames without writing a plaintext archive to disk."""
+    with Path(source).open('rb') as incoming:
+        yield from decrypted_stream(incoming, key)
+
+
+def decrypted_stream(incoming, key):
+    """Authenticate the same archive format from a file or S3 response body."""
     if len(key) != 32:
         raise RuntimeError('Invalid backup key length')
+    header = incoming.read(len(MAGIC) + 16)
+    if len(header) != len(MAGIC) + 16 or not header.startswith(MAGIC):
+        raise RuntimeError('Unsupported or truncated encrypted backup')
+    aes = cipher(key, header[len(MAGIC):])
+    counter = 0
+    while True:
+        length = incoming.read(4)
+        if len(length) != 4:
+            raise RuntimeError('Encrypted backup lacks its authenticated final frame')
+        size = struct.unpack('>I', length)[0]
+        if size > CHUNK:
+            raise RuntimeError('Invalid encrypted backup frame size')
+        block = incoming.read(size + 16)
+        if len(block) != size + 16:
+            raise RuntimeError('Truncated encrypted backup frame')
+        context = header + struct.pack('>Q', counter) + length
+        plaintext = aes.decrypt(counter.to_bytes(12, 'big'), block, context)
+        counter += 1
+        if not size:
+            if incoming.read(1):
+                raise RuntimeError('Unexpected data after encrypted backup final frame')
+            break
+        yield plaintext
+
+
+def decrypt(source, destination, key):
     def write(output):
-        with Path(source).open('rb') as incoming:
-            header = incoming.read(len(MAGIC) + 16)
-            if len(header) != len(MAGIC) + 16 or not header.startswith(MAGIC):
-                raise RuntimeError('Unsupported or truncated encrypted backup')
-            aes = cipher(key, header[len(MAGIC):])
-            counter = 0
-            while True:
-                length = incoming.read(4)
-                if len(length) != 4:
-                    raise RuntimeError('Encrypted backup lacks its authenticated final frame')
-                size = struct.unpack('>I', length)[0]
-                if size > CHUNK:
-                    raise RuntimeError('Invalid encrypted backup frame size')
-                block = incoming.read(size + 16)
-                if len(block) != size + 16:
-                    raise RuntimeError('Truncated encrypted backup frame')
-                context = header + struct.pack('>Q', counter) + length
-                plaintext = aes.decrypt(counter.to_bytes(12, 'big'), block, context)
-                counter += 1
-                if not size:
-                    if incoming.read(1):
-                        raise RuntimeError('Unexpected data after encrypted backup final frame')
-                    break
-                output.write(plaintext)
+        for plaintext in decrypted_blocks(source, key):
+            output.write(plaintext)
     publish(destination, write)

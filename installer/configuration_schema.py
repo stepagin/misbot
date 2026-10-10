@@ -33,6 +33,7 @@ FIELDS={
  'SITE_DESCRIPTION':Field('site','Краткое описание сервера','Общайтесь в своём пространстве Matrix.','description',example='Общение нашей команды'),
  'SITE_SUPPORT_URL':Field('site','Необязательная HTTPS ссылка поддержки',kind='https',example='https://support.example.net/'),
  'DOMAIN':Field('server','Основной домен, без https:// и пути',kind='domain',required='всегда',example='example.org',impact='Matrix identity: после init изменять нельзя.'),
+ 'MAS_DOMAIN':Field('server','Домен MAS; пусто — mas.<DOMAIN>',kind='domain',example='auth.example.net',impact='OAuth issuer: после запуска баз изменять нельзя.'),
  'PUBLIC_IP':Field('server','Публичный IPv4 из панели VPS; пусто — единственный A домена',kind='ip',example='203.0.113.20'),
  'ACME_EMAIL':Field('server','Email оператора для сертификатов',kind='email',example='operator@example.org'),
  'MEDIA_MODE':Field('server','Медиа: local или s3','local','media',example='local',impact='Действующее хранилище меняется только storage operation.'),
@@ -125,6 +126,16 @@ def field_value(key,value,file='форма',schema=FIELDS):
     return value
 
 
+def mas_host(values):
+    return values.get('MAS_DOMAIN') or 'mas.'+values['DOMAIN']
+
+
+def public_hosts(values):
+    domain=values['DOMAIN']
+    return list(dict.fromkeys([domain,'matrix.'+domain,mas_host(values),
+        *[prefix+'.'+domain for prefix in ('admin','web','rtc','turn')]]))
+
+
 def validate(values,origins=None,complete=True,preview=False):
     origins=origins or {};normalized={}
     for key,value in values.items():
@@ -137,10 +148,12 @@ def validate(values,origins=None,complete=True,preview=False):
     model={key:item.default for key,item in FIELDS.items()};model.update(normalized)
     def error(key,message,code='field_dependency'):raise InvalidConfiguration(origins.get(key,'settings.env'),key,code,message)
     if not model['DOMAIN']:error('DOMAIN','обязательный hostname без схемы')
+    if mas_host(model) in [prefix+'.'+model['DOMAIN'] for prefix in ('web','admin','rtc','turn')]:
+        error('MAS_DOMAIN','домен занят другой службой; используйте отдельный домен, DOMAIN или matrix.<DOMAIN>')
     if model['HOMEPAGE_MODE']=='external':
         if not model['HOMEPAGE_URL']:error('HOMEPAGE_URL','обязательно при external')
         target=urlsplit(model['HOMEPAGE_URL']);host=target.hostname.lower().rstrip('.')
-        managed=[model['DOMAIN'],*[p+'.'+model['DOMAIN'] for p in ('matrix','mas','web','admin','rtc','turn')]]
+        managed=public_hosts(model)
         if model['PUBLIC_IP']:managed.append(model['PUBLIC_IP'])
         if host in managed:error('HOMEPAGE_URL','выберите внешний сайт; управляемые домены создают цикл или ведут в служебные endpoints')
     for provider in ('GOOGLE','TELEGRAM'):

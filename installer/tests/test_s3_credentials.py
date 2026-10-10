@@ -44,7 +44,7 @@ class S3CredentialTests(unittest.TestCase):
             'S3_ENDPOINT_URL':'https://s3.fictional.invalid', 'S3_PREFIX':'fictional/media/',
             'S3_ACCESS_KEY_ID':'FICTIONAL_OLD_ACCESS', 'S3_SECRET_ACCESS_KEY':'FICTIONAL_OLD_SECRET'}
         state_store.write_text(root / 'settings.env', ''.join(k+'='+v+'\n' for k,v in values.items())+'ACME_EMAIL=fictional@example.org\nDOMAIN=fictional.invalid\nMEDIA_MODE=s3\n')
-        metadata = {'domain':'fictional.invalid', 'databases_initialized':True,
+        metadata = {'domain':'fictional.invalid', 'databases_initialized':True,'mas_issuer':'https://mas.fictional.invalid/',
             'storage_committed':True, 'network_committed':True, 'media_mode':'s3',
             's3_identity':media_transfer.identity(values)}
         state_store.write_json(root / 'installation.json', metadata)

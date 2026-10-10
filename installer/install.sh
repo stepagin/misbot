@@ -145,6 +145,18 @@ elif [[ "$task_action" == backup-fetch ]]; then
   task_backup_destination="$6"
 fi
 [[ "$task_root" =~ ^/[a-zA-Z0-9.\ _/-]+$ && "$task_root" != / && "$task_root" != *'/../'* && "$task_root" != */.. && ! -L "$task_root" ]] || die 'Use an absolute installation path with letters, digits, spaces, dot, dash or underscore, without traversal or symlinks.'
+if [[ -f "$task_root/installation.json" ]]; then
+  task_backend="$(python3 -B -c 'import json,sys; print(json.load(open(sys.argv[1]+"/installation.json")).get("backend","portable"))' "$task_root" 2>/dev/null)" || die 'Invalid installation state; preserve data and inspect it privately.'
+  if [[ "$task_backend" == existing-compose ]]; then
+    task_existing_args=()
+    case "$task_action" in
+      media-s3) task_existing_args=(--config "$task_s3_file") ;;
+      backup-external) task_existing_args=(--config "$task_backup_env" --key "$task_backup_key") ;;
+    esac
+    exec python3 -B "$task_root/existing_compose.py" --directory "$task_root" "$task_action" "${task_existing_args[@]}"
+  fi
+  [[ "$task_backend" == portable ]] || die 'Unsupported installation backend; no changes performed.'
+fi
 
 host_dependencies() {
   command -v apt-get >/dev/null || die 'Supported hosts: Ubuntu 24.04/26.04 or Debian 12/13.'

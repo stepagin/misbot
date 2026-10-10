@@ -15,6 +15,7 @@ import socketserver
 import sqlite3
 import subprocess
 import struct
+import sys
 import threading
 import time
 
@@ -22,6 +23,7 @@ import requests
 import yaml
 
 from common import BotError, domain, private_json, read_json, receive
+from control import COMMANDS, WRITES, run_control
 from mas import MAS
 
 LOG = logging.getLogger('bridge')
@@ -61,7 +63,11 @@ class Bridge:
             server TEXT, uid INTEGER, user_id TEXT, expires INTEGER, PRIMARY KEY(server,uid));
         CREATE TABLE IF NOT EXISTS confirmations (
             id TEXT PRIMARY KEY, server TEXT, uid INTEGER, action TEXT, domain TEXT, expires INTEGER);
+        CREATE TABLE IF NOT EXISTS management_jobs (
+            id TEXT PRIMARY KEY, server TEXT, uid INTEGER, operation TEXT, state TEXT, result TEXT);
         ''')
+        # Never repeat an operation after the control service has restarted.
+        self.db.execute("UPDATE management_jobs SET state='interrupted' WHERE state='running'")
         columns = {row['name'] for row in self.db.execute('PRAGMA table_info(auth_requests)')}
         for name in ('user_code', 'verification_uri'):
             if name not in columns:
@@ -94,7 +100,7 @@ class Bridge:
         user = self.member(name, uid)
         attr = user['attributes']
         if not attr.get('admin', attr.get('can_request_admin', False)):
-            raise BotError('Управлять федерацией может только администратор сервера.')
+            raise BotError('Управлять сервером может только администратор MAS.')
         return user
 
     def poll_auths(self):
@@ -131,6 +137,67 @@ class Bridge:
             except Exception as error:
                 LOG.error('authorization loop failed type=%s', type(error).__name__)
             time.sleep(2)
+
+    def management_job(self, key, config, operation):
+        try:
+            result = run_control(config, operation)
+        except Exception as error:
+            LOG.error('management operation failed type=%s', type(error).__name__)
+            result = {'operation': operation, 'ok': False, 'recovery_required': True}
+        with self.lock:
+            self.db.execute("UPDATE management_jobs SET state='finished',result=? WHERE id=?",
+                            (json.dumps(result), key))
+            self.db.commit()
+
+    def management(self, request, name, uid):
+        self.admin(name, uid)
+        config = self.config['servers'][name]
+        enabled = config.get('management_actions', [])
+        if not enabled:
+            raise BotError('Управление службами этого сервера не подключено.')
+        action = request['action']
+        if action == 'manage_job':
+            row = self.db.execute('SELECT * FROM management_jobs WHERE id=? AND server=? AND uid=?',
+                                  (request.get('job'), name, uid)).fetchone()
+            if not row:
+                raise BotError('Операция не найдена или принадлежит другому пользователю.')
+            return {'job': row['id'], 'operation': row['operation'], 'state': row['state'],
+                    'result': json.loads(row['result']) if row['result'] else None}
+        operation = request.get('operation')
+        if action != 'manage_apply' and (operation not in COMMANDS or operation not in enabled):
+            raise BotError('Эта команда управления не подключена.')
+        if action == 'manage_read':
+            if operation in WRITES:
+                raise BotError('Эта операция требует подтверждения.')
+            return run_control(config, operation)
+        if action == 'manage_prepare':
+            if operation not in WRITES:
+                raise BotError('Эта операция не требует подтверждения.')
+            key = secrets.token_urlsafe(16)
+            self.db.execute('DELETE FROM confirmations WHERE expires<?', (int(time.time()),))
+            self.db.execute('INSERT INTO confirmations VALUES (?,?,?,?,?,?)',
+                            (key, name, uid, 'manage:' + operation, '', int(time.time()) + 300))
+            self.db.commit()
+            return {'confirmation': key, 'operation': operation}
+        if action == 'manage_apply':
+            row = self.db.execute('SELECT * FROM confirmations WHERE id=? AND uid=? AND server=?',
+                                  (request.get('confirmation'), uid, name)).fetchone()
+            if not row or row['expires'] <= time.time() or not row['action'].startswith('manage:'):
+                raise BotError('Подтверждение истекло или уже использовано.')
+            operation = row['action'].removeprefix('manage:')
+            if operation not in WRITES or operation not in enabled:
+                raise BotError('Эта команда управления не подключена.')
+            if self.db.execute("SELECT 1 FROM management_jobs WHERE state='running'").fetchone():
+                raise BotError('Дождись завершения текущей операции.')
+            key = secrets.token_urlsafe(16)
+            self.db.execute('DELETE FROM confirmations WHERE id=?', (row['id'],))
+            self.db.execute('INSERT INTO management_jobs VALUES (?,?,?,?,?,NULL)',
+                            (key, name, uid, operation, 'running'))
+            self.db.commit()
+            threading.Thread(target=self.management_job, args=(key, config, operation), daemon=True).start()
+            LOG.info('management operation started operation=%s server=%s', operation, name)
+            return {'job': key, 'operation': operation, 'state': 'running', 'result': None}
+        raise BotError('Неизвестная операция.')
 
     def invite(self, name, api, policy, uid, request_id, inviter_name=None):
         if not isinstance(request_id, str) or not 1 <= len(request_id) <= 90:
@@ -198,6 +265,21 @@ class Bridge:
             raise BotError('Не удалось применить список. Предыдущая конфигурация восстановлена; обратись к администратору.')
         LOG.info('federation configuration applied server=%s count=%s', name, len(domains))
 
+    def federation_backend(self, name):
+        root=Path(self.config['servers'][name]['stack_root'])
+        if not root.is_absolute() or root.resolve()!=root or root.stat().st_uid!=0 or root.stat().st_mode&0o022:
+            raise BotError('Проверь доверенный каталог Misbot через SSH.')
+        source=root/'command_wrapper.py'
+        if source.is_symlink() or source.stat().st_uid!=0 or source.stat().st_mode&0o022:
+            raise BotError('Проверь публичный runtime Misbot через SSH.')
+        if str(root) not in sys.path:sys.path.insert(0,str(root))
+        import command_wrapper
+        command_wrapper.trusted_installation(root)
+        if json.loads((root/'installation.json').read_text()).get('backend')!='existing-compose':
+            raise BotError('Общий backend Misbot не подключён.')
+        import federation
+        return federation.backend(root)
+
     @staticmethod
     def restart_healthy(command, url):
         subprocess.run(command + ['restart', 'synapse'], check=True, capture_output=True, timeout=50)
@@ -216,13 +298,17 @@ class Bridge:
             action = request.get('action')
             if action == 'servers':
                 return {name: {'lifetime_seconds': p['invitation_lifetime_seconds'],
-                    'usage_limit': p['invitation_usage_limit'], 'registration_required': p['registration_required']}
+                    'usage_limit': p['invitation_usage_limit'], 'registration_required': p['registration_required'],
+                    'federation_enabled': self.config['servers'][name].get('federation_enabled', True),
+                    'management_actions': self.config['servers'][name].get('management_actions', [])}
                     for name, p in self.policies().items()}
             uid = request.get('uid')
             matrix_action = action in ('matrix_identity', 'matrix_invite', 'matrix_tokens', 'matrix_revoke')
             if not matrix_action and (not isinstance(uid, int) or isinstance(uid, bool) or uid <= 0):
                 raise BotError('Недопустимый пользователь Telegram.')
             name, api, policy = self.server(request)
+            if action in ('manage_read', 'manage_prepare', 'manage_apply', 'manage_job'):
+                return self.management(request, name, uid)
             if matrix_action:
                 uid = request.get('mxid')
                 user = api.matrix_user(uid, name)
@@ -308,9 +394,14 @@ class Bridge:
                 self.db.commit()
                 return True
             if action in ('federation', 'fed_prepare', 'fed_apply'):
-                self.admin(name, uid)  # Never trust a cached role or a role sent by the container.
+                user=self.admin(name, uid)  # Never trust a cached role or a role sent by the container.
+                if not self.config['servers'][name].get('federation_enabled', True):
+                    raise BotError('Изменение федерации через этого бота не подключено.')
+                adopted=self.config['servers'][name].get('federation_backend')=='misbot'
+                actor='@'+user['attributes']['username']+':'+name if adopted else None
+                current=self.federation_backend(name).operate('servers',actor=actor)['servers'] if adopted else policy['federation_servers']
                 if action == 'federation':
-                    return policy['federation_servers']
+                    return current
                 if action == 'fed_prepare':
                     operation = request.get('operation')
                     if operation not in ('add', 'remove'):
@@ -323,12 +414,19 @@ class Bridge:
                     self.db.execute('INSERT INTO confirmations VALUES (?,?,?,?,?,?)',
                         (key, name, uid, operation, target, int(time.time()) + 300))
                     self.db.commit()
-                    return {'confirmation': key, 'domain': target, 'operation': operation, 'currently_open': policy['federation_servers'] is None}
+                    return {'confirmation': key, 'domain': target, 'operation': operation, 'currently_open': current is None}
                 row = self.db.execute('SELECT * FROM confirmations WHERE id=? AND uid=? AND server=?',
                     (request.get('confirmation'), uid, name)).fetchone()
-                if not row or row['expires'] <= time.time():
+                if not row or row['expires'] <= time.time() or row['action'] not in ('add', 'remove'):
                     raise BotError('Подтверждение истекло или уже использовано.')
-                domains = list(policy['federation_servers'] or [name])
+                if adopted:
+                    import federation_service
+                    result=federation_service.queue_job(self.federation_backend(name),{
+                        'action':row['action'],'argument':row['domain'],'actor':actor,
+                        'event_id':'telegram-confirmation:'+row['id']})
+                    self.db.execute('DELETE FROM confirmations WHERE id=?',(row['id'],));self.db.commit()
+                    return result
+                domains = list(current or [name])
                 if row['action'] == 'add' and row['domain'] not in domains:
                     domains.append(row['domain'])
                 if row['action'] == 'remove' and row['domain'] in domains:
@@ -362,11 +460,12 @@ class Handler(socketserver.StreamRequestHandler):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True)
+    parser.add_argument('--socket-directory', type=Path)
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
     bridge = Bridge(args.config)
     threading.Thread(target=bridge.auth_loop, daemon=True).start()
-    run = bridge.root / 'bot-run'
+    run = args.socket_directory or bridge.root / 'bot-run'
     run.mkdir(mode=0o750, exist_ok=True)
     # UMask=0077 removes group bits during mkdir; set them explicitly afterwards.
     os.chown(run, 0, 10001)

@@ -14,6 +14,7 @@ from unittest.mock import patch
 import yaml
 
 BUNDLE=Path(__file__).resolve().parents[1]
+sys.path.insert(0,str(BUNDLE))
 
 
 class GeneratorTests(unittest.TestCase):
@@ -128,6 +129,45 @@ class GeneratorTests(unittest.TestCase):
                         "SET log_error_verbosity='terse';","SET log_min_error_statement='panic';"):
             self.assertLess(sql.index(control),password)
         self.assertEqual((self.root/'secrets').stat().st_mode&0o777,0o700)
+
+    def test_custom_mas_domain_keeps_credentials_and_routes_shared_matrix_host(self):
+        import configuration,state_store
+        self.invoke('--domain','chat.example.org','--initialize-env','--preview')
+        state_store.write_text(self.root/'config/mas-signing.pem','FICTIONAL_SIGNING_KEY')
+        before=self.fingerprints()
+        for host in ('auth.example.net','matrix.chat.example.org','chat.example.org'):
+            with self.subTest(host=host):
+                configuration.patch(self.root,{'MAS_DOMAIN':host})
+                self.invoke('--preview')
+                mas=yaml.safe_load((self.root/'config/mas.yaml').read_text())
+                discovery=json.loads((self.root/'public/well-known-client.json').read_text())
+                self.assertEqual(mas['http']['issuer'],'https://'+host+'/')
+                self.assertEqual(discovery['org.matrix.msc2965.authentication']['issuer'],mas['http']['issuer'])
+                caddy=(self.root/'config/Caddyfile').read_text()
+                self.assertEqual(caddy.count('\n'+host+' {'),1)
+                self.assertNotIn('\nmas.chat.example.org {',caddy)
+                self.assertIn('reverse_proxy mas:8080',caddy)
+                self.assertIn('reverse_proxy synapse:8008',caddy)
+                if host=='matrix.chat.example.org':self.assertIn('@matrix_api path /_matrix/* /_synapse/*',caddy)
+                self.assertEqual(self.fingerprints(),before)
+
+    def test_initialized_mas_issuer_change_fails_before_runtime_or_secrets_written(self):
+        import configuration,state_store
+        self.invoke('--domain','chat.example.org','--initialize-env','--preview')
+        state_store.write_text(self.root/'config/mas-signing.pem','FICTIONAL_SIGNING_KEY')
+        configuration.patch(self.root,{'MAS_DOMAIN':'auth.example.net'})
+        self.invoke('--preview')
+        metadata=json.loads((self.root/'installation.json').read_text())
+        metadata['databases_initialized']=True
+        state_store.write_json(self.root/'installation.json',metadata)
+        paths=('config/mas.yaml','config/homeserver.yaml','compose.yaml','installation.json')
+        saved={name:(self.root/name).read_bytes() for name in paths};keys=self.fingerprints()
+        env=self.root/'settings.env'
+        state_store.write_text(env,env.read_text().replace('MAS_DOMAIN=auth.example.net','MAS_DOMAIN=other.example.net'))
+        result=self.invoke('--preview',ok=False)
+        self.assertIn('MAS issuer is immutable',result.stderr)
+        self.assertEqual({name:(self.root/name).read_bytes() for name in paths},saved)
+        self.assertEqual(self.fingerprints(),keys)
 
     def test_first_source_seed_preserves_initialized_secrets(self):
         self.initialize()

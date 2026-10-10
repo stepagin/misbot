@@ -14,6 +14,9 @@ class Command:
 
 
 COMMANDS = [
+    Command('features status','features-status',purpose='Показать дополнительные компоненты подключённой существующей установки.'),
+    Command('features enable','features-enable',('config',),'Подключить применимые компоненты Misbot по проверенному feature plan; только adopted backend.'),
+    Command('features recover','features-recover',purpose='Вернуть публичные маршруты, сохраняя новые bot accounts, sessions и crypto.'),
     Command('homepage show','homepage-show',purpose='Показать режим, тексты и публичные ссылки сайта.'),
     Command('homepage check','homepage-check',purpose='Проверить предложенные поля и Caddy без применения; внешний сайт не проверяется.'),
     Command('homepage apply','homepage-apply',purpose='Применить только настройки сайта после проверки, с checkpoint и rollback.',stops='Пересоздаётся только Caddy; короткий перерыв HTTPS.'),
@@ -52,6 +55,7 @@ COMMANDS = [
     Command('config command install','wrapper-install',purpose='Установить или обновить системную команду.'),
     Command('config command remove','wrapper-remove',purpose='Удалить только принадлежащую установке системную команду.'),
     Command('status','status',purpose='Показать службы, pending состояния и дальнейшие действия.'),
+    Command('storage status','storage-status',purpose='Показать подключение S3 и результаты копирования существующего стека.'),
     Command('check','check',purpose='Проверить DNS, HTTPS, discovery, RTC и состояние служб.'),
     Command('start','up',purpose='Проверить конфигурацию и запустить службы.',stops='Возможен перезапуск изменённых служб.'),
     Command('stop','stop',purpose='Остановить службы, сохранив контейнеры и данные.',stops='Да.'),
@@ -105,7 +109,15 @@ COMMANDS = [
 ]
 BY_PATH={c.path:c for c in COMMANDS}
 BY_BACKEND={c.backend:c.path for c in COMMANDS}
+EXISTING_BACKENDS=frozenset(('ui','status','check','up','stop','configuration-validate',
+    'backup','backup-recover','restore-check','wrapper-install','wrapper-remove',
+    'backup-external','s3-check','s3-cleanup','media-s3','media-recover','storage-status','update','update-recover'))
+EXISTING_BACKENDS=EXISTING_BACKENDS | frozenset(c.backend for c in COMMANDS if c.backend.startswith('federation-'))
+EXISTING_BACKENDS=EXISTING_BACKENDS | frozenset(('features-status','features-enable','features-recover'))
+EXISTING_BACKENDS=EXISTING_BACKENDS | frozenset(c.backend for c in COMMANDS if c.backend.startswith('homepage-'))
+EXISTING_BACKENDS=EXISTING_BACKENDS | frozenset(('backup-schedule','backup-schedule-local','backup-schedule-status','backup-schedule-disable'))
 TOPICS={
+    'features':'Дополнительные компоненты существующей установки',
     'config':'Установка и конфигурация', 'users':'Пользователи и регистрация',
     'storage':'Медиа, S3 и БД', 'backup':'Копии, восстановление и перенос',
     'update':'Обновление', 'credentials':'Credentials и Vault',

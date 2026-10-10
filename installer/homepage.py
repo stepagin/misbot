@@ -30,8 +30,12 @@ def links(model):
             'homeserver':'https://matrix.'+model['DOMAIN']}
 
 
-def render(model):
-    model=schema.validate(model,preview=True);urls=links(model);escape=lambda value:html.escape(value,quote=True)
+def render(model, public_links=None):
+    model=schema.validate(model,preview=True);urls=public_links or links(model);escape=lambda value:html.escape(value,quote=True)
+    if public_links is not None:
+        if set(public_links)!=set(links(model)):
+            raise RuntimeError('Публичные ссылки сайта неполны.')
+        for value in public_links.values():schema.field_value('HOMEPAGE_URL',value)
     registration=''
     if model['OPEN_REGISTRATION']=='true':
         registration='<a class="button secondary" href="'+escape(urls['register'])+'">Зарегистрироваться</a>'
@@ -65,7 +69,8 @@ def route(model):
         target=redirect_target(model)
         action='        redir '+json.dumps(target,ensure_ascii=True)+' 302\n'
     # Only root is the homepage. Never forward source URI/query to another site.
-    return BEGIN+'    handle / {\n'+headers+action+'    }\n    handle /site.css {\n        root * /srv/discovery/site\n        file_server\n    }\n    handle {\n        respond "Not found" 404\n    }\n'+END
+    fallback=('        reverse_proxy mas:8080\n' if schema.mas_host(model)==model['DOMAIN'] else '        respond "Not found" 404\n')
+    return BEGIN+'    handle / {\n'+headers+action+'    }\n    handle /site.css {\n        root * /srv/discovery/site\n        file_server\n    }\n    handle {\n'+fallback+'    }\n'+END
 
 
 def replace_route(text,model):

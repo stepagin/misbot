@@ -125,6 +125,16 @@ class FederationTests(unittest.TestCase):
         federation_service.job_step(self.a);self.assertNotIn('d.example',self.a.servers())
         self.assertEqual(self.a.load()['jobs'][ack['operation_id']]['result']['code'],'admin_unconfirmed')
 
+    def test_queued_event_cannot_change_actor_or_action(self):
+        request={'action':'add','argument':'c.example','actor':'@admin:a.example','event_id':'$fixture-event'}
+        accepted=federation_service.queue_job(self.a,request)
+        with self.assertRaisesRegex(protocol.ProtocolError,'event_mismatch'):
+            federation_service.queue_job(self.a,dict(request,argument='d.example'))
+        with self.assertRaisesRegex(protocol.ProtocolError,'local_authorization_required'):
+            federation_service.queue_job(self.a,dict(request,actor='root'))
+        self.assertEqual(self.a.load()['jobs'][accepted['operation_id']]['argument'],'c.example')
+        self.assertNotIn('c.example',self.a.servers())
+
     def test_policy_plan_is_shown_before_actual_change(self):
         emitted=[]
         self.a.admission=True

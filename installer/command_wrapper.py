@@ -40,8 +40,14 @@ def trusted_installation(root):
     try:
         release=json.loads((root/'release.json').read_text())
         state=json.loads((root/'installation.json').read_text())
-        if release.get('family')!=FAMILY or not state.get('domain') or state.get('config_format_version',1) not in (1,2):
+        if (release.get('family')!=FAMILY or not state.get('domain')
+                or state.get('config_format_version',1) not in (1,2)
+                or state.get('backend','portable') not in ('portable','existing-compose')):
             raise ValueError()
+        if state.get('backend')=='existing-compose':
+            backend=regular(root/'existing_compose.py')
+            if backend.st_uid!=os.geteuid() or backend.st_mode & 0o022:
+                raise ValueError()
     except (ValueError,TypeError):
         raise RuntimeError('This directory is not a compatible Misbot installation') from None
     return root
@@ -120,6 +126,8 @@ def install(root,source=None,system=Path('/')):
     payload['launcher']=('#!/usr/bin/python3\n# misbot-owned-command-v1\nimport os,sys\nos.execv("/usr/bin/python3", ["/usr/bin/python3", "-B", '+repr(str(lib/'misbot.py'))+', *sys.argv[1:]])\n').encode()
     value={'format':1,'family':FAMILY,'directory':str(root),
            'hashes':{name:hashlib.sha256(data).hexdigest() for name,data in payload.items()}}
+    if json.loads((root/'installation.json').read_text()).get('backend')=='existing-compose':
+        value['backend']='existing-compose'
     payload['command.json']=(json.dumps(value,indent=2)+'\n').encode()
     originals={}
     for name in payload:
@@ -165,6 +173,18 @@ def default_directory():
             raise RuntimeError('Invalid default command record; specify --directory')
         return Path(value['directory'])
     return None
+
+
+def default_backend():
+    """Read only the public command record; help must not read private settings."""
+    path=Path(__file__).resolve().parent/'command.json'
+    if not path.is_file() or path.is_symlink():return 'portable'
+    info=path.stat()
+    if info.st_uid!=0 or info.st_mode & 0o022:raise RuntimeError('Unsafe public command record')
+    value=json.loads(path.read_text())
+    if value.get('format')!=1 or value.get('family')!=FAMILY:
+        raise RuntimeError('Invalid public command record')
+    return value.get('backend','portable')
 
 
 def main():

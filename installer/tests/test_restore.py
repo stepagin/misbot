@@ -43,7 +43,7 @@ class RestoreResumeTests(unittest.TestCase):
             parent=Path(folder);root=parent/'target';fixture=parent/'source';fixture.mkdir()
             bundle=Path(__file__).resolve().parents[1]
             (fixture/'installation.json').write_text(json.dumps({'domain':'restore.example.org',
-                'database_mode':'external','databases_initialized':True,'storage_committed':True}))
+                'database_mode':'external','databases_initialized':True,'storage_committed':True,'mas_issuer':'https://mas.restore.example.org/'}))
             (fixture/'settings.env').write_text('DOMAIN=restore.example.org\nPOSTGRES_MODE=external\nPOSTGRES_HOST=external.example.invalid\n')
             (fixture/'versions.json').write_bytes((bundle/'versions.json').read_bytes())
             (fixture/'config').mkdir()

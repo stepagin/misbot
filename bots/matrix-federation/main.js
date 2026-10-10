@@ -19,6 +19,9 @@ function control(request) {
 }
 async function main() {
     const config=JSON.parse(fs.readFileSync("/config/federation.json","utf8"));
+    const administrators=config.administrator_mxids||["@matrix-admin:"+config.server_name];
+    if(!Array.isArray(administrators)||!administrators.length||administrators.some(mxid=>
+        typeof mxid!=="string"||!mxid.startsWith("@")||!mxid.endsWith(":"+config.server_name)))throw new Error("administrators");
     const store=new SimpleFsStorageProvider("/data/state.json");
     const crypto=new RustSdkCryptoStorageProvider("/data/crypto",StoreType.Sqlite);
     const client=new MatrixClient(config.homeserver_url,config.access_token,store,crypto);
@@ -41,11 +44,11 @@ async function main() {
         for(const room of await client.getJoinedRooms()) {
             const state=await client.getRoomState(room);
             const members=state.filter(e=>e.type==="m.room.member"&&["join","invite"].includes(e.content?.membership)).map(e=>e.state_key);
-            if(members.length===2&&members.includes(config.user_id)&&members.includes("@matrix-admin:"+config.server_name)
+            if(members.length===administrators.length+1&&members.includes(config.user_id)&&administrators.every(mxid=>members.includes(mxid))
                 &&state.some(e=>e.type==="m.room.encryption"&&e.content?.algorithm==="m.megolm.v1.aes-sha2")){found=room;break;}
         }
         const room=found||await client.createRoom({preset:"private_chat",visibility:"private",is_direct:true,
-            invite:["@matrix-admin:"+config.server_name],name:"Misbot — управление федерацией",
+            invite:administrators,name:"Misbot — управление федерацией",
             initial_state:[{type:"m.room.encryption",state_key:"",content:{algorithm:"m.megolm.v1.aes-sha2"}}]});
         store.storeValue("admin-room",typeof room==="string"?room:room.room_id);
     }

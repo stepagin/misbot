@@ -47,6 +47,18 @@ class PreflightTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'unsupported critical'):
                 preflight.caa_check('example.org')
 
+    def test_custom_mas_domain_is_checked_instead_of_default_in_dns_and_caa(self):
+        dns=[];caa=[]
+        def resolve(host,family):
+            dns.append(host)
+            return {'203.0.113.10'} if family==socket.AF_INET else set()
+        with patch.object(preflight,'resolve',side_effect=resolve), \
+                patch.object(preflight,'caa_query',side_effect=lambda host:caa.append(host) or [(0,'issue','letsencrypt.org')]):
+            preflight.dns_check('chat.example.org','203.0.113.10','auth.example.net')
+            preflight.caa_check('chat.example.org','auth.example.net')
+        self.assertIn('auth.example.net',dns);self.assertIn('auth.example.net',caa)
+        self.assertNotIn('mas.chat.example.org',dns);self.assertNotIn('mas.chat.example.org',caa)
+
     def test_caa_restrictive_policy_refuses_without_echoing_parameters(self):
         for value in (';', 'other.example', 'letsencrypt.org;accounturi=EXAMPLE_PRIVATE_PARAMETER'):
             with patch.object(preflight, 'caa_query', return_value=[(0, 'issue', value)]):

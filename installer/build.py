@@ -13,6 +13,7 @@ parser.add_argument('--output', type=Path, default=root.parent / 'dist/matrix-in
 parser.add_argument('--check', action='store_true', help='verify that SHA256SUMS matches the current source files')
 args = parser.parse_args()
 names = [
+    'existing_compose.py','existing_s3.py','existing_update.py','existing_features.py','existing_schedule.py','misbot_s3_provider.py','existing-compose.md','telegram_backup.py',
     'homepage.py','homepage.md','site/index.html','site/site.css','configuration-examples/site.env.example',
     'federation.py','federation_runtime.py','federation_protocol.py','federation_service.py',
     'federation_admin_api.py','federation_matrix_api.py','federation.md','misbot-api.openapi.json',
@@ -31,7 +32,8 @@ sources = {name: root / name for name in names}
 # has referral-bot/ and referral-control/, without duplicate files in Git.
 source_names = {
     'referral-bot': ['Dockerfile','package.json','package-lock.json','main.js','logic.js','signing.js'],
-    'referral-control': ['bridge.py','common.py','mas.py'],
+    'referral-control': ['bridge.py','common.py','mas.py','control.py'],
+    'telegram-bot': ['worker.py','common.py','README.md'],
 }
 for destination,files in source_names.items():
     source = root.parent / 'bots' / ('matrix-referral' if destination == 'referral-bot' else 'telegram')

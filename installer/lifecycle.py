@@ -31,6 +31,7 @@ def emit(check,**values):
 
 
 GENERATION_ERRORS = {
+    'mas_identity_changed': 'MAS issuer is immutable after database initialization. Restore the original MAS_DOMAIN and the saved MAS configuration, then retry generate; existing identities and keys were not changed',
     'oauth_google_pair_incomplete': 'GOOGLE requires both GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET. Edit {SETTINGS} privately; fill both or clear both to disable Google. Then run: {GENERATE}. Existing data and keys were not changed',
     'oauth_telegram_pair_incomplete': 'TELEGRAM requires both TELEGRAM_CLIENT_ID and TELEGRAM_CLIENT_SECRET. Edit {SETTINGS} privately; fill both or clear both to disable Telegram. Then run: {GENERATE}. Existing data and keys were not changed',
     'postgres_identity_mismatch': 'External PostgreSQL identity checkpoint does not match this server; restore the original checkpoint from backup',

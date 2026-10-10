@@ -65,6 +65,14 @@ class Backend:
             raise protocol.ProtocolError('identity_mismatch')
         return data
     def save(self, data): state_store.write_json(self.path,data)
+    def guard(self): return state_store.operation_guard(self.root)
+    def auto_accept(self): return config.load(self.root).get('FEDERATION_AUTO_ACCEPT','false')=='true'
+    def set_auto_accept(self, value):
+        model=config.load(self.root,True);model['FEDERATION_AUTO_ACCEPT']=value;config.write_model(self.root,model)
+    def matrix_operation(self, action, argument):
+        from federation_runtime import matrix_operation
+        return matrix_operation(self.root,action,argument)
+    def restart_scope(self):return 'synapse and web'
     def doc(self, data=None):
         data=data or self.load();return protocol.document(data['server_name'],data['instance_id'],self.key)
 
@@ -106,7 +114,7 @@ class Backend:
         after=list(dict.fromkeys([*before,server])) if add else [x for x in before if x!=server]
         after=after or [own]  # never replace a restrictive policy by no whitelist
         return {'before':before,'after':after,'backup':'checked consistent copy',
-                'restart':'synapse and web' if before!=after else 'none','data':'identity, databases, media and keys preserved'}
+                'restart':self.restart_scope() if before!=after else 'none','data':'identity, databases, media and keys preserved'}
 
     def change(self, server, add, actor):
         self.authorize(actor);plan=self.policy_plan(server,add);before=plan['before'];after=plan['after']
@@ -114,7 +122,7 @@ class Backend:
         if self.admission:lifecycle.emit('federation_policy_plan',**plan)
         if self.applier==self.apply_policy:self.applier(after,actor=actor)
         else:self.applier(after)
-        return {'status':'applied','servers':after,'plan':plan,'restart':'synapse and web','federation_exchange':'not_verified'}
+        return {'status':'applied','servers':after,'plan':plan,'restart':self.restart_scope(),'federation_exchange':'not_verified'}
 
     def apply_policy(self, servers, actor='root'):
         import yaml
@@ -245,7 +253,7 @@ class Backend:
         return self.view(item)
 
     def receive(self, message):
-        with state_store.operation_guard(self.root):
+        with self.guard():
             self.ready();data=self.load();own=self.doc(data)
             try:
                 sender=message['payload']['sender']
@@ -292,7 +300,7 @@ class Backend:
             return protocol.envelope(own,self.key,remote,reply)
 
     def operate(self, action, argument=None, actor='root', event_id=None):
-        with state_store.operation_guard(self.root):
+        with self.guard():
             self.ready(action in ('recover','rollback','operations','requests','request-status','peers','servers'));self.authorize(actor);data=self.load()
             if event_id:
                 if not isinstance(event_id,str) or len(event_id)>255: raise protocol.ProtocolError('invalid_event')
@@ -335,7 +343,7 @@ class Backend:
                 return self.retry(data,argument)
             if action=='auto-accept':
                 value=schema.field_value('FEDERATION_AUTO_ACCEPT',argument)
-                model=config.load(self.root,True);model['FEDERATION_AUTO_ACCEPT']=value;config.write_model(self.root,model)
+                self.set_auto_accept(value)
                 return {'auto_accept':value=='true'}
             if action in ('room-invitations','room-accept','room-reject','room-leave','room-invite'):
                 from federation_runtime import matrix_operation
@@ -345,8 +353,15 @@ class Backend:
                     if not peer or not peer.get('approved') or data['requests'][peer['request_id']]['state']!='connected':
                         raise protocol.ProtocolError('peer_not_connected')
                     argument=json.dumps({'room':argument['room'],'mxid':peer['document']['bot_mxid']})
-                return matrix_operation(self.root,action,argument)
+                return self.matrix_operation(action,argument)
             raise protocol.ProtocolError('unknown_operation')
+
+
+def backend(root, **kwargs):
+    if json.loads((Path(root)/'installation.json').read_text()).get('backend')=='existing-compose':
+        from existing_features import Federation
+        return Federation(root, **kwargs)
+    return Backend(root, **kwargs)
 
 
 def main():
@@ -354,7 +369,7 @@ def main():
     parser.add_argument('action');parser.add_argument('argument',nargs='?');args=parser.parse_args()
     try:
         state_store.require_root();__import__('command_wrapper').trusted_installation(args.directory)
-        result=Backend(args.directory).operate(args.action,args.argument)
+        result=backend(args.directory).operate(args.action,args.argument)
         print(json.dumps(result,ensure_ascii=False));return 1 if result.get('code') else 0
     except protocol.ProtocolError as error: print(json.dumps(failure(error.code,args.directory,args.action),ensure_ascii=False));return 1
     except RuntimeError as error: print(str(error),file=sys.stderr);return 1
