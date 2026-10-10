@@ -17,21 +17,46 @@ IMAGE='matrix-stack/federation-bot:1.0.0'
 DEVICE='MATRIX-FEDERATION-01'
 
 
+def identity(root, metadata):
+    root=Path(root);path=root/'config/admin-panel-identity.json'
+    if path.exists():
+        saved=configuration.read_private_json(path)
+    else:
+        cfg=root/'config/federation-bot.json'
+        session=root/'data/referral-control/federation-session.json'
+        configured=json.loads(cfg.read_text()) if cfg.exists() else {}
+        existing=json.loads(session.read_text())['config'] if session.exists() else configured
+        admins=configured.get('administrator_mxids') or existing.get('administrator_mxids') or ['@matrix-admin:'+metadata['domain']]
+        saved={'user_id':existing.get('user_id','@admin-panel:'+metadata['domain']), 'administrator_mxid':admins[0]}
+        state_store.write_json(path,saved)
+    for name in ('user_id','administrator_mxid'):
+        if not re.fullmatch(r'@[a-z0-9][a-z0-9._=-]{0,63}:'+re.escape(metadata['domain']),saved[name]):
+            raise RuntimeError('Invalid local admin panel identity')
+    return saved
+
+
 def configure(root, metadata, preview=False):
     root=Path(root);federation.setup(root,metadata,preview)
     folder=root/'data/federation-bot';folder.mkdir(mode=0o700,exist_ok=True)
     path=root/'config/federation-bot.json'
-    if not path.exists():state_store.write_json(path,{'pending_provisioning':True,'user_id':'@federation-bot:'+metadata['domain']})
+    saved=identity(root,metadata)
+    if not path.exists():state_store.write_json(path,{'pending_provisioning':True,'user_id':saved['user_id']})
+    welcome=root/'config/welcome-bot.json'
+    if not welcome.exists():
+        if metadata.get('welcome_provisioned'):raise RuntimeError('Welcome session missing; restore saved identity')
+        state_store.write_json(welcome,{'pending_provisioning':True,'user_id':'@server-guide:'+metadata['domain']})
+    __import__('admin_panel').Panel(root)
     if not preview and os.geteuid()==0:
-        os.chown(folder,10003,10003);os.chown(path,10003,10003)
+        os.chown(folder,10003,10003);os.chown(path,10003,10003);os.chown(welcome,10003,10003)
 
 
 def service():
     return {'image':IMAGE,'user':'10003:10003','restart':'unless-stopped','read_only':True,
         'cap_drop':['ALL'],'security_opt':['no-new-privileges:true'],'pids_limit':64,
-        'mem_limit':'160m','memswap_limit':'320m','tmpfs':['/tmp:size=8m'],
-        'environment':{'NODE_OPTIONS':'--max-old-space-size=96'},
+        'mem_limit':'320m','memswap_limit':'640m','tmpfs':['/tmp:size=8m'],
+        'environment':{'NODE_OPTIONS':'--max-old-space-size=192'},
         'volumes':['./config/federation-bot.json:/config/federation.json:ro',
+                   './config/welcome-bot.json:/config/welcome.json:ro',
                    './run/federation:/run/control:ro','./data/federation-bot:/data'],
         'logging':{'driver':'json-file','options':{'max-size':'3m','max-file':'2'}},
         'healthcheck':{'test':['CMD','node','-e',"fetch('http://127.0.0.1:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"],
@@ -57,17 +82,30 @@ def prepare_image(root, run):
 
 
 def provision(root, dc, metadata):
-    root=Path(root)
+    root=Path(root);saved=identity(root,metadata)
     if metadata.get('federation_provisioned'):
-        validate(root,metadata);return
-    result=json.loads(dc('exec','-T','referral-control','python','provision.py','--federation'))
-    cfg=result['config']
-    if cfg['user_id']!='@federation-bot:'+metadata['domain'] or cfg['device_id']!=DEVICE:
-        raise RuntimeError('Federation bot identity mismatch; keep saved session')
-    state_store.write_json(root/'config/federation-bot.json',cfg)
-    os.chown(root/'config/federation-bot.json',10003,10003)
-    state_store.write_json(root/'secrets/federation-session.json',result['metadata'])
-    metadata['federation_provisioned']=True
+        validate(root,metadata)
+        cfg=json.loads((root/'config/federation-bot.json').read_text())
+        cfg['administrator_mxids']=[saved['administrator_mxid']]
+        state_store.write_json(root/'config/federation-bot.json',cfg)
+    else:
+        result=json.loads(dc('exec','-T','referral-control','python','provision.py','--federation','--username',saved['user_id'][1:].split(':')[0]))
+        cfg=result['config']
+        if cfg['user_id']!=saved['user_id'] or cfg['device_id']!=DEVICE:
+            raise RuntimeError('Federation bot identity mismatch; keep saved session')
+        cfg['administrator_mxids']=[saved['administrator_mxid']]
+        state_store.write_json(root/'config/federation-bot.json',cfg)
+        os.chown(root/'config/federation-bot.json',10003,10003)
+        state_store.write_json(root/'secrets/federation-session.json',result['metadata'])
+        metadata['federation_provisioned']=True
+    if not metadata.get('welcome_provisioned'):
+        result=json.loads(dc('exec','-T','referral-control','python','provision.py','--welcome'))
+        if result['config']['user_id']!='@server-guide:'+metadata['domain'] or result['config']['device_id']!='MATRIX-WELCOME-01':
+            raise RuntimeError('Welcome bot identity mismatch; keep saved session')
+        state_store.write_json(root/'config/welcome-bot.json',result['config'])
+        os.chown(root/'config/welcome-bot.json',10003,10003)
+        state_store.write_json(root/'secrets/welcome-session.json',result['metadata'])
+        metadata['welcome_provisioned']=True
 
 
 def validate(root, metadata):
@@ -81,7 +119,17 @@ def validate(root, metadata):
         cfg=json.loads((root/'config/federation-bot.json').read_text())
         journal=configuration.read_private_json(root/'data/referral-control/federation-session.json')['config']
         if any(cfg.get(k)!=journal.get(k) for k in ('user_id','device_id','access_token')):raise RuntimeError('Federation bot session differs; restore checkpoint')
-        if cfg['device_id']!=DEVICE or cfg['user_id']!='@federation-bot:'+metadata['domain']:raise RuntimeError('Foreign federation bot')
+        if cfg['device_id']!=DEVICE or cfg['user_id']!=identity(root,metadata)['user_id']:raise RuntimeError('Foreign federation bot')
+    if metadata.get('welcome_provisioned'):
+        cfg=json.loads((root/'config/welcome-bot.json').read_text())
+        saved=configuration.read_private_json(root/'data/referral-control/welcome-session.json')['config']
+        if any(cfg.get(k)!=saved.get(k) for k in ('user_id','device_id','access_token')) or cfg['user_id']!='@server-guide:'+metadata['domain']:
+            raise RuntimeError('Welcome bot session differs; restore checkpoint')
+    if metadata.get('welcome_crypto_initialized'):
+        for name in ('state.json','cross-signing.json'):
+            if not (root/'data/federation-bot/welcome'/name).is_file():raise RuntimeError('Welcome crypto missing; restore checkpoint')
+        if not any(p.is_file() and p.open('rb').read(16)==b'SQLite format 3\x00' for p in (root/'data/federation-bot/welcome/crypto').rglob('*') if not p.name.endswith(('-wal','-shm'))):
+            raise RuntimeError('Welcome crypto database missing; restore checkpoint')
     if metadata.get('federation_crypto_initialized'):
         for name in ('state.json','cross-signing.json'):
             if not (root/'data/federation-bot'/name).is_file():raise RuntimeError('Federation crypto state missing; restore backup')
@@ -99,6 +147,8 @@ def verify_archive(archive):
         required=['data/federation/identity.pem','data/federation/state.json']
         if metadata.get('federation_provisioned'):required+=['config/federation-bot.json','secrets/federation-session.json','data/referral-control/federation-session.json']
         if metadata.get('federation_crypto_initialized'):required+=['data/federation-bot/state.json','data/federation-bot/cross-signing.json']
+        if metadata.get('welcome_provisioned'):required+=['config/welcome-bot.json','secrets/welcome-session.json','data/referral-control/welcome-session.json']
+        if metadata.get('welcome_crypto_initialized'):required+=['data/federation-bot/welcome/state.json','data/federation-bot/welcome/cross-signing.json']
         for name in required:
             if not tar.getmember(name).isfile():raise RuntimeError('Federation backup is incomplete')
         state=json.load(tar.extractfile('data/federation/state.json'))
@@ -106,6 +156,9 @@ def verify_archive(archive):
         if metadata.get('federation_provisioned'):
             cfg=json.load(tar.extractfile('config/federation-bot.json'));saved=json.load(tar.extractfile('data/referral-control/federation-session.json'))['config']
             if any(cfg[k]!=saved[k] for k in ('user_id','device_id','access_token')):raise RuntimeError('Federation backup session mismatch')
+        if metadata.get('welcome_provisioned'):
+            cfg=json.load(tar.extractfile('config/welcome-bot.json'));saved=json.load(tar.extractfile('data/referral-control/welcome-session.json'))['config']
+            if any(cfg[k]!=saved[k] for k in ('user_id','device_id','access_token')) or cfg['device_id']!='MATRIX-WELCOME-01':raise RuntimeError('Welcome archive session mismatch')
         if metadata.get('federation_crypto_initialized'):
             count=0
             with tempfile.TemporaryDirectory(prefix='misbot-federation-crypto-restore-') as folder:
@@ -122,6 +175,22 @@ def verify_archive(archive):
                         if database.execute('PRAGMA integrity_check').fetchone()[0]!='ok':raise RuntimeError('Federation restored crypto database integrity failed')
                     count+=1
             if not count:raise RuntimeError('Federation backup crypto missing')
+
+    if metadata.get('welcome_crypto_initialized'):
+        with tarfile.open(archive,'r:gz') as tar, tempfile.TemporaryDirectory(prefix='misbot-welcome-crypto-restore-') as folder:
+            count=0
+            for member in tar.getmembers():
+                if not member.name.startswith('data/federation-bot/welcome/crypto/'):continue
+                relative=Path(member.name).relative_to('data/federation-bot/welcome/crypto')
+                if '..' in relative.parts or relative.is_absolute() or member.issym() or member.islnk():raise RuntimeError('Unsafe welcome crypto archive')
+                if not member.isfile():continue
+                path=Path(folder)/relative;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(tar.extractfile(member).read())
+            for path in Path(folder).rglob('*'):
+                if not path.is_file() or path.name.endswith(('-wal','-shm')) or path.open('rb').read(16)!=b'SQLite format 3\x00':continue
+                with sqlite3.connect(path) as database:
+                    if database.execute('PRAGMA integrity_check').fetchone()[0]!='ok':raise RuntimeError('Welcome restored crypto integrity failed')
+                count+=1
+            if not count:raise RuntimeError('Welcome crypto archive incomplete')
 
 
 def unit_name(root):

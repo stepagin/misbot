@@ -69,7 +69,14 @@ state_path = root / 'installation.json'
 if not input_domain and not state_path.exists():
     parser.error('--domain is required for the first initialization; use init example.org')
 if root.exists() and any(root.iterdir()) and not state_path.exists():
-    parser.error('Refusing to overwrite an unrelated nonempty directory')
+    try:
+        __import__('command_wrapper').trusted_runtime(root)
+        import update
+        source_entries,_=update.validate_manifest(root)
+        allowed={Path(name).parts[0] for name in source_entries}|{'SHA256SUMS','.misbot-empty.json','__pycache__'}
+        if any(path.name not in allowed for path in root.iterdir()):raise RuntimeError('Unexpected retained data')
+    except (OSError,ValueError,RuntimeError):
+        parser.error('Refusing to overwrite an unrelated nonempty directory')
 os.umask(0o077)
 root.mkdir(parents=True, exist_ok=True)
 operation_guard = state_store.operation_guard(root)
@@ -98,6 +105,7 @@ if state.get('config_format_version', 1) not in (1,2):
 
 def save_state():
     state_store.write_json(state_path,state)
+    (root/'.misbot-empty.json').unlink(missing_ok=True)
 
 selected_domain = input_domain or state.get('domain')
 if not selected_domain:

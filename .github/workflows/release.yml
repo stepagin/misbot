@@ -1,0 +1,81 @@
+name: Build Misbot release
+on:
+  push:
+    tags: ['v[0-9]*', '[0-9]*']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install test dependencies
+        run: python -m pip install PyYAML requests cryptography boto3
+      - name: Validate release version
+        env:
+          RELEASE_REF: ${{ github.ref_name }}
+          RELEASE_REF_TYPE: ${{ github.ref_type }}
+        run: |
+          python - <<'PY'
+          import json, os, re
+          version = json.load(open('installer/release.json'))['version']
+          assert re.fullmatch(r'\d+\.\d+\.\d+', version)
+          if os.environ['RELEASE_REF_TYPE'] == 'tag':
+              assert os.environ['RELEASE_REF'].removeprefix('v') == version, 'Tag and release.json differ'
+          PY
+      - name: Build and validate archive
+        run: |
+          python installer/build.py --check
+          python installer/build.py
+          cd dist
+          sha256sum -c matrix-installer.tar.gz.sha256
+          tar -xzf matrix-installer.tar.gz
+          cd matrix-installer
+          sha256sum -c SHA256SUMS
+      - name: Run tests
+        run: |
+          python -m unittest discover -s installer/tests -p 'test_*.py'
+          python -m unittest discover -s bots/telegram/tests -p 'test_*.py'
+          python -m unittest discover -s deployment/tests -p 'test_*.py'
+          node --test bots/matrix-referral/tests/*.test.js
+          node --test bots/matrix-federation/tests/*.test.js
+          bash -n installer/install.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: misbot-installer
+          path: |
+            dist/matrix-installer.tar.gz
+            dist/matrix-installer.tar.gz.sha256
+          if-no-files-found: error
+  draft-release:
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: misbot-installer
+          path: dist
+      - name: Attach installer to draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --verify-tag --draft --title "Misbot $RELEASE_TAG" --generate-notes
+          fi
+          test "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" = true
+          gh release upload "$RELEASE_TAG" dist/matrix-installer.tar.gz dist/matrix-installer.tar.gz.sha256 --clobber

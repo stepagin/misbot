@@ -332,7 +332,8 @@ def update_resource_check(root, entries):
     # below but not assumed to compress for this admission check.
     payload = sum(path.stat().st_size for path in entries.values())
     data = sum(path.stat().st_size for name in SNAPSHOT_DIRS + (
-        'data/synapse', 'data/referral-bot', 'data/referral-control')
+        'data/synapse', 'data/referral-bot', 'data/referral-control',
+        'data/federation-bot', 'data/federation', 'data/admin-panel')
         for path in (root / name).rglob('*') if path.is_file() and not path.is_symlink())
     import lifecycle
     lifecycle.configure(root, 'update-resources')

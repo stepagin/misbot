@@ -1,4 +1,4 @@
-# Команда Misbot 1.0.0
+# Команда Misbot 1.1.0
 
 Для индивидуально подключённой существующей установки действует ограниченный
 [режим Compose](existing-compose.md): `misbot help` показывает доступные команды;
@@ -62,12 +62,10 @@ sudo misbot remove
 Успешный start, update и update-recover обновляют wrapper. `config command install`
 повторно регистрирует существующую установку; для старой установки, где команды
 ещё нет: `sudo python3 /opt/matrix-stack/command_wrapper.py install --directory /opt/matrix-stack`.
-`config command remove` удаляет только wrapper. `remove` удаляет принадлежащие
-установке контейнеры, сеть и wrapper, сохраняя данные, ключи и checkpoints.
-Технический `install.sh down` сохраняется для прежних сценариев и оставляет wrapper.
-Все прежние технические entry points `install.sh` доступны; основной интерфейс — misbot.
-При смене default сначала явно удалите wrapper прежней установки, затем
-зарегистрируйте нужную из её каталога. Каталоги данных автоматически не удаляются.
+`config command remove` удаляет только wrapper. `remove` открывает интерактивный
+мастер необратимого удаления выбранных данных и внешних ресурсов. Утилита остаётся;
+нет флага `--yes`, требуется итоговое подтверждение доменом. Работает после init.
+Подробно: [удаление](README.md#11-панель-приветствия-и-полное-удаление).
 
 На новом сервере restore/fetch выполняйте через `sudo python3 misbot.py` из
 распакованного комплекта. До регистрации команды так же выполняйте verify/status/
@@ -275,3 +273,14 @@ JSON предназначен для будущего UI; UI не должен �
 # Главная страница
 
 `misbot homepage help`: `show`, `check`, `apply`, `recover`, `rollback`. По умолчанию локальный лендинг. `sudo misbot homepage apply --mode element` выбирает Element; `sudo misbot homepage apply --mode external --url https://community.example.net/` — внешний сайт; `sudo misbot homepage apply --mode landing` возвращает лендинг. Поддерживаются `--name`, `--description`, `--support-url`; неуказанные поля сохраняются. Предварительно выполните ту же команду с `check` вместо `apply`. Пересоздаётся только Caddy; результат подтверждается по HTTPS, внешний сайт не проверяется. [Настройки и recovery](homepage.md).
+
+
+## Панель и GitHub Releases
+
+`misbot admin bot show`; до создания `misbot admin bot set --tag admin-panel`.
+Существующий тег неизменяем. Root может выбрать владельца через `--administrator`
+и затем `misbot start` применяет конфигурацию. [Панель](admin-panel.md).
+`misbot update check` сравнивает версии; `misbot update latest` скачивает готовые
+release assets, проверяет checksum, manifest, версию и диск и запускает update backend.
+`misbot remove --backup-config PATH` добавляет известный профиль внешних копий
+к интерактивному выбору удаления. Все эти операции требуют root.

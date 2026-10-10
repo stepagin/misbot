@@ -1,5 +1,6 @@
 """Private provisioning response consumed by lifecycle.py, never logged."""
 import json
+import re
 from pathlib import Path
 import sys
 
@@ -12,16 +13,19 @@ DEVICE = 'MATRIX-REFERRAL-01'
 SCOPE = 'urn:matrix:client:api:* urn:matrix:client:device:' + DEVICE
 
 
-def provision(root, api, federation=False):
+def provision(root, api, federation=False, welcome=False, username=None):
     root = Path(root)
     domain = next(iter(json.loads((root / 'bot-config.json').read_text())['servers']))
     cfg = json.loads((root / 'bot-config.json').read_text())['servers'][domain]
-    username='federation-bot' if federation else 'referral-bot'
-    display='Бот управления федерацией' if federation else 'Реферальный бот'
-    device='MATRIX-FEDERATION-01' if federation else DEVICE
+    journal = root / ('welcome-session.json' if welcome else 'federation-session.json' if federation else 'session.json')
+    saved_name = json.loads(journal.read_text())['config']['user_id'][1:].split(':')[0] if journal.exists() else None
+    username = username or saved_name or ('server-guide' if welcome else 'admin-panel' if federation else 'referral-bot')
+    if not re.fullmatch(r'[a-z0-9][a-z0-9._=-]{0,63}', username) or (saved_name and saved_name != username):
+        raise RuntimeError('Bot tag is immutable after creation')
+    display='Серверный помощник' if welcome else 'Панель администратора Misbot' if federation else 'Реферальный бот'
+    device='MATRIX-WELCOME-01' if welcome else 'MATRIX-FEDERATION-01' if federation else DEVICE
     scope='urn:matrix:client:api:* urn:matrix:client:device:'+device
-    journal = root / ('federation-session.json' if federation else 'session.json')
-    marker = root / ('managed-federation-user.json' if federation else 'managed-user.json')
+    marker = root / ('managed-welcome-user.json' if welcome else 'managed-federation-user.json' if federation else 'managed-user.json')
     if journal.exists():
         result = json.loads(journal.read_text())
         user = api.active_user(result['metadata']['mas_user_id'])
@@ -65,9 +69,14 @@ def provision(root, api, federation=False):
 def main():
     configs = json.loads((ROOT / 'bot-config.json').read_text())['servers']
     api = MAS(next(iter(configs.values())))
-    federation=sys.argv[1:]==['--federation']
-    if sys.argv[1:] and not federation:raise ValueError('Unknown provisioning mode')
-    result = provision(ROOT, api,federation)
+    import argparse
+    parser=argparse.ArgumentParser()
+    group=parser.add_mutually_exclusive_group()
+    group.add_argument('--federation',action='store_true')
+    group.add_argument('--welcome',action='store_true')
+    parser.add_argument('--username')
+    args=parser.parse_args()
+    result = provision(ROOT, api,args.federation,args.welcome,args.username)
     config = result['config']
     r = requests.get(config['homeserver_url'] + '/_matrix/client/v3/account/whoami',
         headers={'Authorization': 'Bearer ' + config['access_token']}, timeout=15)

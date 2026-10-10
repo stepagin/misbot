@@ -150,8 +150,8 @@ def system_check(root):
         raise RuntimeError('This installer requires a Linux amd64 VPS; use a compatible test machine')
     memory = int(next(line.split()[1] for line in Path('/proc/meminfo').read_text().splitlines()
                       if line.startswith('MemTotal:')))
-    if memory < 900000:
-        raise RuntimeError('Less than about 1 GiB RAM; choose a larger VPS before continuing')
+    if memory < 1800000:
+        raise RuntimeError('Less than about 2 GiB RAM; choose a larger VPS before continuing')
     disk_target=Path(root)
     while not disk_target.exists():disk_target=disk_target.parent
     free = shutil.disk_usage(disk_target).free

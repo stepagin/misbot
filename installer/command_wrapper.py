@@ -53,6 +53,28 @@ def trusted_installation(root):
     return root
 
 
+def trusted_runtime(root):
+    root=Path(root)
+    if (root/'installation.json').exists():return trusted_installation(root)
+    if not root.is_absolute() or root.resolve()!=root or root==Path('/'):
+        raise RuntimeError('Unsafe empty runtime directory')
+    info=root.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid!=os.geteuid() or info.st_mode&0o022:
+        raise RuntimeError('Untrusted runtime directory')
+    marker=root/'.misbot-empty.json'
+    info=regular(marker)
+    if info.st_uid!=os.geteuid() or info.st_mode&0o022:
+        raise RuntimeError('Untrusted empty runtime marker permissions')
+    if json.loads(marker.read_text())!={'family':FAMILY,'format':1}:
+        raise RuntimeError('Untrusted empty runtime marker')
+    for path in root.glob('*.py'):
+        info=regular(path)
+        if info.st_uid!=os.geteuid() or info.st_mode&0o022:raise RuntimeError('Untrusted runtime source')
+    if json.loads((root/'release.json').read_text()).get('family')!=FAMILY:
+        raise RuntimeError('Foreign runtime release')
+    return root
+
+
 def record(system=Path('/')):
     launcher,lib=paths(system)
     for directory in (launcher.parent,lib,*lib.parents):

@@ -13,6 +13,7 @@ parser.add_argument('--output', type=Path, default=root.parent / 'dist/matrix-in
 parser.add_argument('--check', action='store_true', help='verify that SHA256SUMS matches the current source files')
 args = parser.parse_args()
 names = [
+    'admin_panel.py','releases.py','release_update.py','remove_server.py','admin_identity.py','admin-panel.md',
     'existing_compose.py','existing_s3.py','existing_update.py','existing_features.py','existing_schedule.py','misbot_s3_provider.py','existing-compose.md','telegram_backup.py',
     'homepage.py','homepage.md','site/index.html','site/site.css','configuration-examples/site.env.example',
     'federation.py','federation_runtime.py','federation_protocol.py','federation_service.py',
@@ -41,9 +42,9 @@ for destination,files in source_names.items():
         target = destination + '/' + name
         names.append(target)
         sources[target] = source / name
-for name in ('Dockerfile','main.js','logic.js','package.json','package-lock.json','signing.js'):
+for name in ('Dockerfile','main.js','logic.js','welcome.js','package.json','package-lock.json','signing.js'):
     target='federation-bot/'+name;names.append(target)
-    sources[target]=root.parent/'bots'/('matrix-federation' if name in ('Dockerfile','main.js','logic.js') else 'matrix-referral')/name
+    sources[target]=root.parent/'bots'/('matrix-federation' if name in ('Dockerfile','main.js','logic.js','welcome.js') else 'matrix-referral')/name
 payloads = {name: sources[name].read_bytes() for name in names}
 manifest = ''.join(hashlib.sha256(payloads[name]).hexdigest() + '  ' + name + '\n'
                    for name in names).encode()

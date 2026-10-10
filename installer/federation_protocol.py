@@ -67,17 +67,17 @@ def verify(pem, payload, signature):
     except (ValueError, OSError, TypeError, subprocess.SubprocessError): return False
 
 
-def document(server, identity, key):
+def document(server, identity, key, bot_mxid=None):
     pem = public_key(key)
     return {'protocol': VERSION, 'instance_id': identity, 'server_name': server,
-            'bot_mxid': '@federation-bot:'+server, 'api_path': API,
+            'bot_mxid': bot_mxid or '@admin-panel:'+server, 'api_path': API,
             'algorithm': 'RSA-3072-SHA256', 'public_key': pem, 'key_id': fingerprint(pem)}
 
 
 def validate_document(value, server):
     import re
     if not isinstance(value,dict) or type(value.get('protocol')) is not int or value.get('protocol') != VERSION: raise ProtocolError('unsupported_version')
-    if (value.get('server_name') != server or value.get('bot_mxid') != '@federation-bot:'+server
+    if (value.get('server_name') != server or not re.fullmatch(r'@[a-z0-9][a-z0-9._=-]{0,63}:'+re.escape(server),str(value.get('bot_mxid','')))
             or value.get('api_path') != API or value.get('algorithm') != 'RSA-3072-SHA256'
             or not re.fullmatch('[0-9a-f]{32}',str(value.get('instance_id','')))
             or value.get('key_id') != fingerprint(value.get('public_key',''))): raise ProtocolError('discovery_identity')

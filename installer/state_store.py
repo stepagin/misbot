@@ -168,6 +168,11 @@ def inherited_operation_descriptor(root):
 
 def assert_update_allowed(root, allow_restore_generation=False, allow_federation=False, allow_configuration=False, allow_homepage=False):
     reject_existing_backend(root)
+    if (Path(root)/'remove-journal.json').exists():
+        raise RuntimeError('Удаление сервера прервано: sudo misbot remove; запуск и другие изменения запрещены.')
+    state_path=Path(root)/'installation.json'
+    if state_path.exists() and json.loads(state_path.read_text()).get('decommissioned'):
+        raise RuntimeError('Сервер удалён частично. Для полного удаления повторите sudo misbot remove.')
     if not allow_homepage and ((Path(root)/'homepage-transition.json').exists() or (Path(root)/'homepage-transition.json').is_symlink()):
         raise RuntimeError('Главная страница требует восстановления: sudo misbot --directory '+shlex.quote(str(root))+' homepage recover; прежние файлы и checkpoint сохраните')
     if not allow_federation and (Path(root)/"federation-transition.json").exists():

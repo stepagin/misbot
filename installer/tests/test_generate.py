@@ -22,7 +22,7 @@ class GeneratorTests(unittest.TestCase):
         for action in ('version','--version'):
             result=subprocess.run(['bash',str(BUNDLE/'install.sh'),action],capture_output=True,text=True)
             self.assertEqual(result.returncode,0,result.stderr)
-            self.assertEqual(result.stdout.strip(),'Misbot 1.0.0')
+            self.assertEqual(result.stdout.strip(),'Misbot 1.1.0')
 
     def test_known_provider_pair_code_translates_to_safe_full_path_continuation(self):
         import lifecycle
@@ -52,7 +52,7 @@ class GeneratorTests(unittest.TestCase):
             self.assertFalse(any('.server-access' in p or p.endswith('.env') or
                 '/tests/' in p or '/verification/' in p or '/evidence/' in p or
                 'SYNAPSE_INSTALLER_' in p or p.endswith('live-test.js') for p in names))
-            self.assertEqual(json.loads(archive.extractfile('matrix-installer/release.json').read())['version'], '1.0.0')
+            self.assertEqual(json.loads(archive.extractfile('matrix-installer/release.json').read())['version'], '1.1.0')
             manifest=archive.extractfile('matrix-installer/SHA256SUMS').read().decode()
             self.assertEqual({'matrix-installer/'+line.split('  ',1)[1] for line in manifest.splitlines()},
                              names-{'matrix-installer/SHA256SUMS'})
@@ -88,6 +88,27 @@ class GeneratorTests(unittest.TestCase):
 
     def initialize(self):
         self.invoke('--domain','chat.example.org','--initialize-env')
+
+    def test_full_removal_preserves_bundle_and_can_initialize_a_new_domain(self):
+        import remove_server
+        import state_store
+        self.initialize()
+        package=Path(self.temp.name)/'installer.tar.gz'
+        subprocess.run([sys.executable,str(BUNDLE/'build.py'),'--output',str(package)],check=True,stdout=subprocess.DEVNULL)
+        with tarfile.open(package) as archive:
+            for member in archive.getmembers():
+                relative=Path(member.name).relative_to('matrix-installer')
+                target=self.root/relative;target.parent.mkdir(parents=True,exist_ok=True)
+                target.write_bytes(archive.extractfile(member).read());target.chmod(0o600)
+        record={'format':1,'domain':'chat.example.org','directory':str(self.root),
+                'local':dict.fromkeys(remove_server.LOCAL,True),'s3':[],
+                'external_database':False,'vault':False,'completed':[]}
+        with patch.object(remove_server,'remove_containers'),patch.object(remove_server,'host_cleanup'):
+            remove_server.execute(self.root,record,[],stop=lambda:None)
+        self.invoke('--domain','new.example.org','--initialize-env')
+        self.assertEqual(json.loads((self.root/'installation.json').read_text())['domain'],'new.example.org')
+        self.assertFalse((self.root/'.misbot-empty.json').exists())
+        self.assertTrue((self.root/'remove_server.py').exists())
 
     def test_initial_domain_typo_or_missing_domain_does_not_poison_retry_directory(self):
         for domain in ('https://fictional.invalid','127.0.0.1',None):

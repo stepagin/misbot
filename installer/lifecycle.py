@@ -244,7 +244,7 @@ def yaml_media_s3():
 
 def prepare_host():
     memory=int(next(line.split()[1] for line in Path('/proc/meminfo').read_text().splitlines() if line.startswith('MemTotal:')))
-    if memory<900000:raise RuntimeError('At least about 1 GiB RAM is required')
+    if memory<1800000:raise RuntimeError('At least about 2 GiB RAM is required for Misbot 1.1')
     if shutil.disk_usage(ROOT).free<3*1024**3:raise RuntimeError('At least 3 GiB free after pulling images is required')
     swap=int(next(line.split()[1] for line in Path('/proc/meminfo').read_text().splitlines() if line.startswith('SwapTotal:')))
     if memory<2000000 and swap<1000000:
@@ -455,7 +455,7 @@ def up():
     dc('up','-d','federation-bot')
     wait(lambda:dc('exec','-T','federation-bot','node','-e',
         "fetch('http://127.0.0.1:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))") is not None,service='federation-bot')
-    metadata=state();metadata['federation_crypto_initialized']=True
+    metadata=state();metadata['federation_crypto_initialized']=True;metadata['welcome_crypto_initialized']=True
     federation_runtime.validate(ROOT,metadata);state_store.write_json(ROOT/'installation.json',metadata)
     dc('up','-d','jwt','web','admin','caddy','tls-router')
     cert,key=certificate_paths()
@@ -707,7 +707,7 @@ def backup(leave_stopped=False):
                          'referral-images.lock.json',
                          'federation-images.lock.json','data/federation','data/federation-bot','federation-transition.json','stages/federation',
                          'homepage-transition.json','stages/homepage',
-                         'data/referral-bot','data/referral-control',
+                         'data/referral-bot','data/referral-control','data/admin-panel',
                          'data/synapse','data/caddy','data/caddy-config','mas-proxy.env',
                          'synapse-s3-image.lock.json']:
                 if (ROOT/name).exists() or (ROOT/name).is_symlink():backup_archive.add_tree(tar,ROOT/name,name)

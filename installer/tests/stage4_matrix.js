@@ -26,15 +26,15 @@ async function main(){
   const restored=process.argv[2]==="restored";
   const resume=process.argv[2]==="resume";
   const rooms=(await client.doRequest("GET","/_matrix/client/v3/sync",{timeout:0})).rooms?.invite||{};
-  const room=(restored||resume)?JSON.parse(fs.readFileSync('/test/admin-room.json','utf8')).room:Object.keys(rooms).find(r=>rooms[r].invite_state.events.some(e=>e.sender==="@federation-bot:"+cfg.server_name));
+  const room=(restored||resume)?JSON.parse(fs.readFileSync('/test/admin-room.json','utf8')).room:Object.keys(rooms).find(r=>rooms[r].invite_state.events.some(e=>e.sender==="@admin-panel:"+cfg.server_name));
   if(!room)throw new Error("Admin notification room absent");
   await client.joinRoom(room);await sleep(4000);
-  async function request(command,predicate,bot="@federation-bot:"+cfg.server_name,target=room){
+  async function request(command,predicate,bot="@admin-panel:"+cfg.server_name,target=room){
    const start=replies.length;await client.sendText(target,command);
    for(let i=0;i<70;i++){const item=replies.slice(start).find(x=>x.room===target&&x.event.sender===bot&&predicate(x.event.content.body));if(item)return item.event;await sleep(1000);}
    throw new Error("Encrypted result not received");
   }
-  const help=await request("помощь",body=>body.includes("Бот федерации"));
+  const help=await request("помощь",body=>body.includes("Панель администратора"));
   const raw=await client.doRequest("GET","/_matrix/client/v3/rooms/"+encodeURIComponent(room)+"/event/"+encodeURIComponent(help.event_id));
   if(raw.type!=="m.room.encrypted"||raw.content.body)throw new Error("Plaintext admin reply");
   await request("серверы",body=>body.includes('"servers"'));
@@ -42,26 +42,17 @@ async function main(){
   console.log("PASS admin encrypted help/status; server stores encrypted event; ordinary bot identity");
   if(restored){console.log("PASS restored federation crypto/session receives and encrypts replies in original room");return;}
   if(!resume){
-  stage="manual-invitation";
-  let manual=await client.createRoom({preset:"private_chat",visibility:"private",invite:["@federation-bot:"+cfg.server_name],
+  stage="owner-invitation";
+  let manual=await client.createRoom({preset:"private_chat",visibility:"private",invite:["@admin-panel:"+cfg.server_name],
    initial_state:[{type:"m.room.encryption",state_key:"",content:{algorithm:"m.megolm.v1.aes-sha2"}}]});
   if(typeof manual!=="string")manual=manual.room_id;
-  await sleep(3000);
-  if((await client.getRoomStateEvent(manual,"m.room.member","@federation-bot:"+cfg.server_name)).membership!=="invite")throw new Error("Default accepted invitation automatically");
-  await request("принять комнату "+manual,body=>body.includes('"operation_id"'));
-  for(let i=0;i<60;i++){if((await client.getRoomStateEvent(manual,"m.room.member","@federation-bot:"+cfg.server_name)).membership==="join")break;if(i===59)throw new Error("Manual room acceptance failed");await sleep(1000);}
+  for(let i=0;i<60;i++){if((await client.getRoomStateEvent(manual,"m.room.member","@admin-panel:"+cfg.server_name)).membership==="join")break;if(i===59)throw new Error("Owner invitation was not accepted");await sleep(1000);}
   stage="joined-room-encryption";
-  await request("помощь",body=>body.includes("Бот федерации"),"@federation-bot:"+cfg.server_name,manual);
+  await request("помощь",body=>body.includes("Панель администратора"),"@admin-panel:"+cfg.server_name,manual);
   stage="room-leave";
   await request("покинуть комнату "+manual,body=>body.includes('"operation_id"'));
-  for(let i=0;i<60;i++){if((await client.getRoomStateEvent(manual,"m.room.member","@federation-bot:"+cfg.server_name)).membership==="leave")break;if(i===59)throw new Error("Room leave failed");await sleep(1000);}
-  stage="room-reject";
-  let declined=await client.createRoom({preset:"private_chat",visibility:"private",invite:["@federation-bot:"+cfg.server_name],
-   initial_state:[{type:"m.room.encryption",state_key:"",content:{algorithm:"m.megolm.v1.aes-sha2"}}]});if(typeof declined!=="string")declined=declined.room_id;
-  await sleep(3000);
-  await request("отклонить комнату "+declined,body=>body.includes('"operation_id"'));
-  for(let i=0;i<60;i++){if((await client.getRoomStateEvent(declined,"m.room.member","@federation-bot:"+cfg.server_name)).membership==="leave")break;if(i===59)throw new Error("Room rejection failed");await sleep(1000);}
-  console.log("PASS real manual invitation acceptance/rejection/leave, default manual, encrypted joined-room command");
+  for(let i=0;i<60;i++){if((await client.getRoomStateEvent(manual,"m.room.member","@admin-panel:"+cfg.server_name)).membership==="leave")break;if(i===59)throw new Error("Room leave failed");await sleep(1000);}
+  console.log("PASS owner invitation acceptance/leave and encrypted private-room commands");
   stage="referral";
   const referral="@referral-bot:"+cfg.server_name;
   let direct=await client.createRoom({preset:"private_chat",visibility:"private",invite:[referral],is_direct:true,
@@ -85,7 +76,7 @@ async function main(){
   const ack=await request("добавить сервер "+(resume?"resumed-peer.invalid":"fixture-peer.invalid"),body=>body.includes('"operation_id"'));
   const id=JSON.parse(ack.content.body).operation_id;
   for(let i=0;i<900;i++){
-   if(replies.some(x=>x.room===room&&x.event.sender==="@federation-bot:"+cfg.server_name&&x.event.content.body.includes(id)&&x.event.content.body.includes('complete'))){
+   if(replies.some(x=>x.room===room&&x.event.sender==="@admin-panel:"+cfg.server_name&&x.event.content.body.includes(id)&&x.event.content.body.includes('complete'))){
     console.log("PASS asynchronous bot policy change survives its own checked-backup stop/restart and delivers encrypted result");return;
    }
    await sleep(1000);

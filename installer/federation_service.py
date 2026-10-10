@@ -18,6 +18,7 @@ import time
 import hashlib
 
 import configuration
+import admin_panel
 import federation
 import federation_protocol as protocol
 import lifecycle
@@ -42,13 +43,23 @@ def bot_call(backend, request, uid):
     if uid!=10003 or not isinstance(request,dict) or set(request)-{'action','argument','actor','event_id'}:
         raise protocol.ProtocolError('local_authorization_required')
     action=request.get('action')
+    if action in admin_panel.ACTIONS:
+        with backend.guard():
+            admin_panel.authorize(backend, request.get('actor'))
+            if action not in ('panel-outbox','panel-ack'):
+                if not isinstance(request.get('event_id'),str) or not 1 <= len(request['event_id']) <= 255:
+                    raise protocol.ProtocolError('event_required')
+            if action in ('panel-update','panel-broadcast'):
+                backend.ready()
+            return admin_panel.Panel(backend.root).handle(action,request.get('argument'),request.get('event_id'))
     if action in ('notifications','auto-invitation','authorize'):
         with backend.guard():
-            backend.ready(action in ('notifications','authorize'));data=backend.load()
+            if not (backend.root/'update-journal.json').exists():backend.ready(action in ('notifications','authorize'))
+            data=backend.load()
             if action=='authorize':
                 actor=request.get('actor')
                 if actor=='root':raise protocol.ProtocolError('admin_unconfirmed')
-                backend.authorize(actor);return {'authorized':True}
+                admin_panel.authorize(backend,actor);return {'authorized':True}
             if action=='notifications':return {'requests':[backend.view(backend.request(data,k)) for k in data['requests'] if data['requests'][k]['direction']=='incoming'],
                 'operations':[{'id':k,'state':v['state'],'result':v.get('result',{})} for k,v in data.get('jobs',{}).items() if v['state'] in ('complete','failed','interrupted')]}
             claim=json.loads(request.get('argument','{}'));mxid=claim.get('sender');room=claim.get('room');peers=data['peers']
@@ -67,7 +78,9 @@ def bot_call(backend, request, uid):
     if action in MUTATIONS:
         # The checked backup must stop this bot. A durable asynchronous job keeps
         # the accepted command alive and delivers the result after its restart.
+        admin_panel.authorize(backend,request['actor'])
         return queue_job(backend,request)
+    admin_panel.authorize(backend,request['actor'])
     return backend.operate(action,request.get('argument'),request['actor'],request['event_id'])
 
 
@@ -79,7 +92,7 @@ def queue_job(backend, request):
     if not isinstance(event,str) or not 1<=len(event)<=255:raise protocol.ProtocolError('invalid_event')
     with backend.guard():
         backend.ready(action in ('recover','rollback'));backend.authorize(actor);data=backend.load()
-        plan=backend.policy_plan(request.get('argument'),action=='add') if action in ('add','remove') else 'Проверка текущих прав; для политики — копия и перезапуск '+backend.restart_scope()+'.'
+        plan=backend.policy_plan(request.get('argument'),action=='add') if action in ('add','remove') else 'Проверка текущих прав; для политики — перезапуск '+backend.restart_scope()+'.'
         jid='FO-'+hashlib.sha256(event.encode()).hexdigest()[:32]
         jobs=data.setdefault('jobs',{})
         expected={'action':action,'argument':request.get('argument'),'actor':actor,'event_id':event}
@@ -115,7 +128,8 @@ def serve(root):
         lifecycle.configure(root,'federation-service')
     # Keep local status/recovery available after an interrupted policy publish.
     # Each normal RPC/exchange still uses its own strict admission gate.
-    backend.ready(True);federation_runtime=__import__('federation_runtime')
+    if not (root/'update-journal.json').exists():backend.ready(True)
+    federation_runtime=__import__('federation_runtime')
     federation_runtime.validate(root,configuration.read_private_json(root/'installation.json'))
     run=root/'run/federation';run.mkdir(mode=0o755,parents=True,exist_ok=True);run.chmod(0o755)
     # Persistent state is excluded from the socket mount. Never replace unknown entries.
@@ -132,10 +146,22 @@ def serve(root):
             if job['state']=='running':job.update(state='interrupted',result={'code':'interrupted','next_action':'sudo misbot federation recover; проверьте federation requests'})
         backend.save(data)
     def jobs():
+        last_panel=0
         while True:
             time.sleep(1)
             if not work.acquire(blocking=False):continue
-            try:job_step(backend)
+            try:
+                job_step(backend)
+                if time.monotonic()-last_panel>=60:
+                    last_panel=time.monotonic()
+                    metadata=configuration.read_private_json(root/'installation.json')
+                    if metadata.get('federation_provisioned'):
+                        with backend.guard():
+                            panel=admin_panel.Panel(root)
+                            __import__('release_update').recover_job(root)
+                            __import__('release_update').result_notice(panel)
+                            if not (root/'update-journal.json').exists():
+                                backend.ready();panel.maintenance()
             except Exception:pass # busy external operation; retain queued checkpoint
             finally:work.release()
     threading.Thread(target=jobs,daemon=True).start()
@@ -184,7 +210,7 @@ def serve(root):
                 value={'ok':True,'result':result}
             except protocol.ProtocolError as error:value={'ok':False,'code':error.code}
             except Exception:value={'ok':False,'code':'busy_pending_or_operation_failed'}
-            self.wfile.write(protocol.canonical(value)+b'\n')
+            self.wfile.write(json.dumps(value,ensure_ascii=False,separators=(',',':')).encode()+b'\n')
     # Serial HTTP requests bound memory/concurrency; independent RPC listener.
     class Web(socketserver.UnixStreamServer):allow_reuse_address=True
     public=run

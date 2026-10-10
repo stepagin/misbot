@@ -310,6 +310,7 @@ class Features:
                 entry['volumes'] = [str(self.root / 'config' / (role+'.json'))+':/config/'+('referral' if role=='referral-bot' else 'federation')+'.json:ro',
                     str(control if role=='referral-bot' else self.root/'run/federation')+':/run/control:ro',
                     str(self.root/'data'/role)+':/data']
+            if role=='federation-bot':entry['volumes'].append(str(self.root/'config/welcome-bot.json')+':/config/welcome.json:ro')
             installation.model['images'][name] = {'id': images[role]['id'], 'digest': images[role]['id']}
         project = {'name': 'misbot-addons', 'directory': 'addons', 'services': {role:'misbot-'+role for role in services}}
         directory = private_directory(self.root / 'addons')
@@ -332,6 +333,8 @@ class Features:
         for role, uid in (('referral-bot',10002),('federation-bot',10003)):
             if not (self.root/'data'/role/'cross-signing.json').is_file():raise Error('Bot crypto ещё не подтверждено; сохраните checkpoint.')
             metadata[role.replace('-','_').replace('_bot','')+'_crypto_initialized'] = True
+        if not (self.root/'data/federation-bot/welcome/cross-signing.json').is_file():raise Error('Welcome crypto ещё не подтверждено.')
+        metadata['welcome_crypto_initialized']=True
         save(self.root / 'installation.json', metadata)
         self.installation = Installation(self.root)
         emit('existing_features_stage',stage='bots_crypto_verified')
@@ -450,8 +453,12 @@ class Features:
         admins = ['@'+user['attributes']['username']+':'+installation.state['domain'] for user in api.items('users')
             if user['attributes'].get('admin', user['attributes'].get('can_request_admin',False)) and not user['attributes'].get('locked_at') and not user['attributes'].get('deactivated_at')]
         if not admins:raise Error('Не подтверждён действующий местный MAS admin.')
-        for role, uid, gid in (('referral-bot',10002,10001),('federation-bot',10003,10003)):
-            result = module.provision(control, api, federation=role=='federation-bot')
+        for role, uid, gid in (('referral-bot',10002,10001),('federation-bot',10003,10003),('welcome-bot',10003,10003)):
+            username=None
+            if role=='federation-bot' and (self.root/'config/admin-panel-identity.json').exists():
+                import federation_runtime
+                username=federation_runtime.identity(self.root,installation.state)['user_id'][1:].split(':')[0]
+            result = module.provision(control, api, federation=role=='federation-bot',welcome=role=='welcome-bot',username=username)
             config = result['config']
             # Provisioning is performed on the host; the bot uses the public TLS URL.
             config['homeserver_url'] = 'https://'+installation.state['domain']
@@ -460,7 +467,17 @@ class Features:
                 headers={'Authorization':'Bearer '+config['access_token']},timeout=15,allow_redirects=False)
             if response.status_code!=200 or response.json().get('user_id')!=config['user_id'] or response.json().get('device_id')!=config['device_id']:
                 raise Error('Сохранённая bot session не подтверждена; не заменяйте устройство или ключи.')
-            if role=='federation-bot':config['administrator_mxids'] = admins
+            if role=='federation-bot':
+                command_wrapper.public_directory(self.root/'config')
+                import federation_runtime
+                identity_path=self.root/'config/admin-panel-identity.json'
+                if not identity_path.exists():
+                    prior=self.root/'config/federation-bot.json'
+                    previous=json.loads(prior.read_text()) if prior.exists() else {}
+                    save(identity_path,{'user_id':config['user_id'],'administrator_mxid':(previous.get('administrator_mxids') or admins)[0]})
+                identity=federation_runtime.identity(self.root,installation.state)
+                if identity['user_id']!=config['user_id']:raise Error('Сохранённый тег бота не совпадает с session.')
+                config['administrator_mxids']=[identity['administrator_mxid']]
             command_wrapper.public_directory(self.root/'config')
             command_wrapper.public_directory(self.root/'secrets')
             (self.root/'secrets').chmod(0o700)
@@ -470,8 +487,8 @@ class Features:
                 if target.is_symlink() or info.st_uid not in (0,uid) or info.st_mode & 0o077:raise Error('Небезопасный bot config.')
             command_wrapper.atomic(target,(json.dumps(config,indent=2)+'\n').encode(),0o600)
             os.chown(self.root/'config'/(role+'.json'),uid,gid)
-            save(self.root/'secrets'/('federation-session.json' if role=='federation-bot' else 'referral-session.json'),result['metadata'])
-            folder = self.root/'data'/role;folder.mkdir(mode=0o700,parents=True,exist_ok=True);folder.chmod(0o700);os.chown(folder,uid,gid)
+            save(self.root/'secrets'/('welcome-session.json' if role=='welcome-bot' else 'federation-session.json' if role=='federation-bot' else 'referral-session.json'),result['metadata'])
+            folder = self.root/'data'/('federation-bot/welcome' if role=='welcome-bot' else role);folder.mkdir(mode=0o700,parents=True,exist_ok=True);folder.chmod(0o700);os.chown(folder,uid,gid)
             installation.state[role.replace('-bot','')+'_provisioned'] = True
 
     def install_proxy(self, plan):

@@ -355,10 +355,12 @@ case "$task_action" in
     fi
     exec python3 "$task_root/user_credentials.py" --directory "$task_root" recover
     ;;
-  check|backup|backup-recover|restore-check|move-export|status|stop|down|remove)
+  remove)
+    exec python3 "$task_root/remove_server.py" --directory "$task_root"
+    ;;
+  check|backup|backup-recover|restore-check|move-export|status|stop|down)
     [[ -f "$task_root/installation.json" ]] || die 'Run init DOMAIN first.'
     task_command_args=()
-    if [[ "$task_action" == remove ]]; then task_action=down; task_command_args=(--remove-command); fi
     exec python3 "$task_root/lifecycle.py" --directory "$task_root" "$task_action" "${task_command_args[@]}"
     ;;
   *) die 'Unknown command. Run install.sh help.';;

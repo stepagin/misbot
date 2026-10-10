@@ -26,7 +26,10 @@ class FederationTests(unittest.TestCase):
         self.backends={};self.allowed={'root','@admin:a.example','@admin:b.example'};self.fail_apply=False
         for server in ('a.example','b.example'):
             root=self.root/server;root.mkdir(mode=0o700);(root/'data').mkdir(mode=0o700)
+            (root/'config').mkdir(mode=0o700)
             state_store.write_json(root/'installation.json',{'domain':server})
+            state_store.write_json(root/'config/admin-panel-identity.json',{
+                'user_id':'@admin-panel:'+server,'administrator_mxid':'@admin:'+server})
             state_store.write_text(root/'settings.env','DOMAIN='+server+'\nPUBLIC_IP=8.8.8.8\nACME_EMAIL=operator@example.org\nFEDERATION_SERVERS='+server+'\n')
             federation.setup(root,{'domain':server})
             def apply(servers,r=root):
@@ -195,10 +198,10 @@ class FederationTests(unittest.TestCase):
             with self.assertRaises(ValueError):self.a.operate('add',value)
         self.assertEqual(self.a.operate('add','a.example')['status'],'unchanged')
         self.assertEqual(self.a.operate('remove','absent.example')['status'],'unchanged')
-        claim=json.dumps({'sender':'@federation-bot:b.example','room':'!fixture:b.example'})
+        claim=json.dumps({'sender':'@admin-panel:b.example','room':'!fixture:b.example'})
         self.assertFalse(federation_service.bot_call(self.a,{'action':'auto-invitation','argument':claim},10003)['allowed'])
         rid=self.invite();self.b.operate('approve',rid);self.a.operate('auto-accept','true')
-        with patch('federation_runtime.matrix_operation',return_value={'invitations':[{'room':'!fixture:b.example','sender':'@federation-bot:b.example'}]}):
+        with patch('federation_runtime.matrix_operation',return_value={'invitations':[{'room':'!fixture:b.example','sender':'@admin-panel:b.example'}]}):
             self.assertTrue(federation_service.bot_call(self.a,{'action':'auto-invitation','argument':claim},10003)['allowed'])
         with patch('federation_runtime.matrix_operation',return_value={'invitations':[]}):
             self.assertFalse(federation_service.bot_call(self.a,{'action':'auto-invitation','argument':claim},10003)['allowed'])
@@ -230,7 +233,7 @@ class FederationTests(unittest.TestCase):
         self.assertEqual((restored/'data/federation/identity.pem').stat().st_mode&0o777,0o600)
 
     def test_interrupted_policy_apply_recover_and_rollback(self):
-        root=self.a.root;(root/'config').mkdir(mode=0o700);(root/'public').mkdir(mode=0o700)
+        root=self.a.root;(root/'config').mkdir(mode=0o700,exist_ok=True);(root/'public').mkdir(mode=0o700)
         state_store.write_text(root/'config/homeserver.yaml','server_name: a.example\nfederation_domain_whitelist: [a.example]\n')
         state_store.write_json(root/'public/web-config.json',{'room_directory':{'servers':['a.example'],'custom_policy':'retained'},'brand':'retained'})
         key=self.a.key.read_bytes()

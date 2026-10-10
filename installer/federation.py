@@ -74,7 +74,10 @@ class Backend:
         return matrix_operation(self.root,action,argument)
     def restart_scope(self):return 'synapse and web'
     def doc(self, data=None):
-        data=data or self.load();return protocol.document(data['server_name'],data['instance_id'],self.key)
+        data=data or self.load()
+        cfg=self.root/'config/federation-bot.json'
+        mxid=json.loads(cfg.read_text()).get('user_id') if cfg.exists() else None
+        return protocol.document(data['server_name'],data['instance_id'],self.key,mxid)
 
     def ready(self, recovery=False):
         if not self.admission: return
