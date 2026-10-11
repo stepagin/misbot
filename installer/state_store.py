@@ -16,7 +16,7 @@ import subprocess
 import tempfile
 import cli_commands
 from typing import cast
-from operation_models import BackupPauseRecord
+from operation_models import BACKUP_WRITERS, BackupPauseRecord
 
 
 class OperationInterrupted(Exception):
@@ -335,10 +335,7 @@ def database_transition_record(root):
         or not isinstance(record.get('target'), str)
         or not isinstance(writers, list)
         or len(set(writers)) != len(writers)
-        or any(
-            n not in ('federation-bot', 'referral-bot', 'referral-control', 'synapse', 'mas', 'jwt')
-            for n in writers
-        )
+        or any(n not in BACKUP_WRITERS for n in writers)
         or not isinstance(imported, list)
         or len(set(imported)) != len(imported)
         or any(n not in ('synapse', 'mas') for n in imported)
@@ -468,11 +465,7 @@ def backup_pause_record(root: str | Path) -> BackupPauseRecord | None:
         or not isinstance(writers, list)
         or any(not isinstance(name, str) for name in writers)
         or len(writers) != len(set(writers))
-        or any(
-            name
-            not in ('federation-bot', 'referral-bot', 'referral-control', 'synapse', 'mas', 'jwt')
-            for name in writers
-        )
+        or any(name not in BACKUP_WRITERS for name in writers)
         or type(record.get('pid')) is not int
         or record['pid'] <= 0
         or not isinstance(record.get('started'), str)

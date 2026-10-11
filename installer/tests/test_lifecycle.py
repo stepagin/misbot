@@ -649,7 +649,7 @@ class LifecycleTests(unittest.TestCase):
                     with lifecycle.paused_writers():
                         pass
                 self.assertTrue((root / 'backup-writers.json').is_file())
-                self.assertIsNone(lifecycle._writer_pause_root)
+                self.assertIsNone(lifecycle._backup_writers)
 
     def test_recovery_never_unfreezes_migration_and_refuses_live_owner(self):
         with tempfile.TemporaryDirectory() as folder:

@@ -86,6 +86,7 @@ names = [
     'preflight.py',
     'state_store.py',
     'backup_archive.py',
+    'backup_writers.py',
     'backup_crypto.py',
     'external_backup.py',
     'backup_schedule.py',

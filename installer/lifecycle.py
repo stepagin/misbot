@@ -21,6 +21,7 @@ import referral
 import preflight
 import state_store
 import backup_archive
+import backup_writers
 import media_transfer
 import media_snapshot
 import vault_cache
@@ -948,94 +949,34 @@ def wait_writers(writers):
         wait(ready, service=' '.join(writers))
 
 
-_writer_pause_root = None
+_backup_writers = None
+
+
+def writer_runtime():
+    return backup_writers.WriterRuntime(ROOT, state, service_rows, dc, wait_writers, emit)
 
 
 @contextmanager
 def paused_writers(leave_stopped=False):
-    """Persist restart intent before stopping; share one pause with nested backups."""
-    global _writer_pause_root
-    if _writer_pause_root is not None:
-        if _writer_pause_root != ROOT:
+    """Compatibility boundary for callers that still configure lifecycle globally."""
+    global _backup_writers
+    if _backup_writers is not None:
+        if _backup_writers.root != ROOT:
             raise RuntimeError('Nested backup belongs to another installation')
-        yield
+        with _backup_writers.pause(leave_stopped):
+            yield
         return
-    state_store.assert_backup_allowed(ROOT)
-    running = {
-        row['Service'] for row in service_rows() if row['State'] in ('running', 'restarting')
-    }
-    writers = [
-        name
-        for name in ('federation-bot', 'referral-bot', 'referral-control', 'synapse', 'mas', 'jwt')
-        if name in running
-    ]
-    record = {
-        'format': 1,
-        'server_name': state()['domain'],
-        'writers': writers,
-        'keep_stopped': bool(leave_stopped or state().get('migration_frozen')),
-        'pid': os.getpid(),
-        'started': state_store.process_identity(os.getpid())[1],
-    }
-    state_store.write_json(ROOT / 'backup-writers.json', record)
-    _writer_pause_root = ROOT
+    coordinator = backup_writers.BackupWriters(writer_runtime())
+    _backup_writers = coordinator
     try:
-        if writers:
-            dc('stop', '-t', '30', *writers)
-        yield
+        with coordinator.pause(leave_stopped):
+            yield
     finally:
-        try:
-            if writers and not record['keep_stopped'] and not state().get('migration_frozen'):
-                dc('up', '-d', *writers)
-                wait_writers(writers)
-            (ROOT / 'backup-writers.json').unlink()
-        except BaseException:
-            emit(
-                'backup_recovery_pending',
-                command='sudo bash ' + str(ROOT / 'install.sh') + ' backup-recover',
-            )
-            raise
-        finally:
-            _writer_pause_root = None
+        _backup_writers = None
 
 
 def backup_recover():
-    state_store.assert_database_allowed(ROOT)
-    record = state_store.backup_pause_record(ROOT)
-    if record is None:
-        emit('backup_recovery', pending=False, changed=False)
-        return
-    if record.get('server_name') != state()['domain']:
-        raise RuntimeError('Backup recovery journal belongs to another Matrix identity')
-    try:
-        alive = state_store.process_identity(record['pid'])[1] == record['started']
-    except OSError:
-        alive = False
-    if alive:
-        raise RuntimeError(
-            'The backup process still exists; wait for it to finish before backup-recover'
-        )
-    writers = record['writers']
-    keep_stopped = record['keep_stopped'] or bool(
-        state().get('migration_frozen') or state().get('restore_pending')
-    )
-    if writers:
-        if keep_stopped:
-            dc('stop', '-t', '30', *writers)
-        else:
-            dc('up', '-d', *writers)
-            wait_writers(writers)
-    (ROOT / 'backup-writers.json').unlink()
-    emit(
-        'backup_recovery',
-        pending=False,
-        changed=True,
-        writers=writers,
-        kept_stopped=keep_stopped,
-        next_action='Use move-abort only if cancelling migration'
-        if keep_stopped
-        else 'Run install.sh check, then retry the backup',
-    )
+    backup_writers.BackupWriters(writer_runtime()).recover()
 
 
 def check():

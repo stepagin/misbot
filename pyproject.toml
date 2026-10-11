@@ -14,7 +14,7 @@ select = ["E9", "F63", "F7", "F82"]
 [tool.mypy]
 python_version = "3.11"
 mypy_path = "installer"
-files = ["installer/cli_commands.py", "installer/configuration_schema.py", "installer/s3_config.py", "installer/operation_models.py"]
+files = ["installer/cli_commands.py", "installer/configuration_schema.py", "installer/s3_config.py", "installer/operation_models.py", "installer/backup_writers.py"]
 strict = true
 follow_imports = "silent"
 
