@@ -235,18 +235,10 @@ def parse(argv):
             required=True,
             choices=('media', 'backup') if name == 'purpose' else None,
         )
-    if command.backend in ('s3-check', 's3-cleanup'):
-        parser.add_argument('--json', action='store_true')
-    if command.backend == 's3-check':
-        parser.add_argument('--read-only', action='store_true')
-        parser.add_argument('--catalog-directory')
-    if command.backend == 'remove':
-        parser.add_argument('--backup-config')
-    if command.backend == 'admin-bot-set':
-        parser.add_argument('--administrator')
-    if command.backend in ('homepage-check', 'homepage-apply'):
-        for name in ('mode', 'url', 'name', 'description', 'support-url'):
-            parser.add_argument('--' + name)
+    for name in command.optional_arguments:
+        parser.add_argument('--' + name.replace('_', '-'))
+    for name in command.switches:
+        parser.add_argument('--' + name.replace('_', '-'), action='store_true')
     args = parser.parse_args(remaining[len(words) :])
     if defaults.source and command.backend not in ('update', 'update-recover'):
         raise InputError('--source применяется только к update apply/recover.')
@@ -273,80 +265,6 @@ def plan(command, options, values, source=None):
                 raise InputError(
                     'Команда не поддерживается для существующего Compose-стека. Настройки и данные сохранены; выполните misbot help.'
                 )
-            if command.backend == 'release-check':
-                return ['/usr/bin/python3', str(root / 'releases.py'), '--directory', str(root)]
-            if command.backend.startswith('admin-bot-'):
-                args = [
-                    '/usr/bin/python3',
-                    str(root / 'admin_identity.py'),
-                    command.backend[10:],
-                    '--directory',
-                    str(root),
-                ]
-                for name in ('tag', 'administrator'):
-                    if values.get(name):
-                        args += ['--' + name, values[name]]
-                return args
-            if command.backend.startswith('wrapper-'):
-                return [
-                    '/usr/bin/python3',
-                    str(root / 'command_wrapper.py'),
-                    command.backend[8:],
-                    '--directory',
-                    str(root),
-                ]
-            if command.backend.startswith('federation-'):
-                action = command.backend[11:]
-                arguments = [values[name] for name in command.arguments]
-                return [
-                    '/usr/bin/python3',
-                    str(root / 'federation.py'),
-                    '--directory',
-                    str(root),
-                    action,
-                    *arguments,
-                ]
-            if command.backend.startswith('features-'):
-                return [
-                    '/usr/bin/python3',
-                    str(root / 'existing_features.py'),
-                    '--directory',
-                    str(root),
-                    command.backend,
-                    *(
-                        ['--config', values['config']]
-                        if command.backend == 'features-enable'
-                        else []
-                    ),
-                ]
-            if command.backend.startswith('homepage-'):
-                args = [
-                    '/usr/bin/python3',
-                    str(root / 'existing_features.py'),
-                    '--directory',
-                    str(root),
-                    command.backend,
-                ]
-                for name in ('mode', 'url', 'name', 'description', 'support_url'):
-                    if values.get(name) is not None:
-                        args += ['--' + name.replace('_', '-'), values[name]]
-                return args
-            if command.backend in (
-                'backup-schedule',
-                'backup-schedule-local',
-                'backup-schedule-status',
-                'backup-schedule-disable',
-            ):
-                args = [
-                    '/usr/bin/python3',
-                    str(root / 'existing_schedule.py'),
-                    '--directory',
-                    str(root),
-                    command.backend,
-                ]
-                for name in command.arguments:
-                    args += ['--' + name, values[name]]
-                return args
             if command.backend in ('update', 'update-recover'):
                 if not options.source:
                     raise InputError(
@@ -358,30 +276,10 @@ def plan(command, options, values, source=None):
                 info = command_wrapper.regular(candidate / 'existing_update.py')
                 if info.st_uid != 0 or info.st_mode & 0o022:
                     raise InputError('Source updater должен принадлежать root без чужой записи.')
-                return [
-                    '/usr/bin/python3',
-                    str(candidate / 'existing_update.py'),
-                    '--directory',
-                    str(root),
-                    '--source',
-                    str(candidate),
-                    command.backend,
-                ]
-            args = [
-                '/usr/bin/python3',
-                str(root / 'existing_compose.py'),
-                '--directory',
-                str(root),
-                command.backend,
-            ]
-            for name in command.arguments:
-                args += ['--' + name, values[name]]
-            for name in ('json', 'read_only'):
-                if values.get(name):
-                    args += ['--' + name.replace('_', '-')]
-            if values.get('catalog_directory'):
-                args += ['--catalog-directory', values['catalog_directory']]
-            return args
+                backend = candidate
+            else:
+                backend = root
+            return vocabulary.execution_argv(command, values, root, backend, existing=True)
     if command.backend in ('s3-check', 's3-cleanup'):
         if root is not None:
             if not root.is_absolute() or root == Path('/') or root.resolve() != root:
@@ -474,85 +372,7 @@ def plan(command, options, values, source=None):
             != command_wrapper.FAMILY
         ):
             raise InputError('Чужой комплект обновления.')
-    if command.backend == 'remove':
-        args = ['/usr/bin/python3', str(root / 'remove_server.py'), '--directory', str(root)]
-        if values.get('backup_config'):
-            args += ['--backup-config', values['backup_config']]
-        return args
-    if command.backend.startswith('admin-bot-'):
-        args = [
-            '/usr/bin/python3',
-            str(root / 'admin_identity.py'),
-            command.backend[10:],
-            '--directory',
-            str(root),
-        ]
-        for name in ('tag', 'administrator'):
-            if values.get(name):
-                args += ['--' + name, values[name]]
-        return args
-    if command.backend in ('release-check', 'release-update'):
-        return [
-            '/usr/bin/python3',
-            str(
-                root
-                / ('releases.py' if command.backend == 'release-check' else 'release_update.py')
-            ),
-            '--directory',
-            str(root),
-        ]
-    if command.backend.startswith('wrapper-'):
-        return [
-            '/usr/bin/python3',
-            str(root / 'command_wrapper.py'),
-            command.backend[8:],
-            '--directory',
-            str(root),
-        ]
-    if command.backend.startswith('configuration-'):
-        return [
-            '/usr/bin/python3',
-            str(backend / 'configuration.py'),
-            '--directory',
-            str(root),
-            command.backend[14:],
-        ]
-    if command.backend.startswith('homepage-'):
-        args = [
-            '/usr/bin/python3',
-            str(backend / 'homepage.py'),
-            '--directory',
-            str(root),
-            command.backend[9:],
-        ]
-        for name in ('mode', 'url', 'name', 'description', 'support_url'):
-            if values.get(name) is not None:
-                args += ['--' + name.replace('_', '-'), values[name]]
-        return args
-    if command.backend.startswith('federation-'):
-        action = command.backend[11:]
-        argument = [values[name] for name in command.arguments]
-        return [
-            '/usr/bin/python3',
-            str(backend / 'federation.py'),
-            '--directory',
-            str(root),
-            action,
-            *argument,
-        ]
-    if command.backend.startswith('invitation-'):
-        return [
-            '/usr/bin/python3',
-            str(backend / 'registration.py'),
-            '--directory',
-            str(root),
-            command.backend[11:],
-        ]
-    return [
-        '/bin/bash',
-        str(backend / 'install.sh'),
-        *vocabulary.backend_argv(command, values, root),
-    ]
+    return vocabulary.execution_argv(command, values, root, backend)
 
 
 def main(argv=None):

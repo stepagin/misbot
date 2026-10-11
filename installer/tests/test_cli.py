@@ -21,6 +21,59 @@ BUNDLE = Path(__file__).resolve().parents[1]
 
 
 class CommandTests(unittest.TestCase):
+    def test_optional_arguments_keep_their_command_scope(self):
+        for argv in (
+            ['admin', 'bot', 'show', '--administrator', 'FICTIONAL_PRIVATE_VALUE'],
+            ['homepage', 'show', '--name', 'FICTIONAL_PRIVATE_VALUE'],
+            [
+                'storage',
+                's3',
+                'cleanup',
+                '--config',
+                '/root/profile',
+                '--catalog',
+                '/root/probe',
+                '--read-only',
+            ],
+        ):
+            with self.subTest(command=argv[:3]):
+                with self.assertRaises(misbot.InputError) as error:
+                    misbot.parse(argv)
+                self.assertNotIn('FICTIONAL_PRIVATE_VALUE', str(error.exception))
+        command, _, values = misbot.parse(
+            [
+                'homepage',
+                'apply',
+                '--name',
+                'Team with spaces',
+                '--support-url',
+                '',
+            ]
+        )
+        self.assertEqual(command.path, 'homepage apply')
+        self.assertEqual(values['name'], 'Team with spaces')
+        self.assertEqual(values['support_url'], '')
+
+    def test_shared_federation_route_preserves_opaque_request_for_both_backends(self):
+        root = Path('/opt/fictional matrix')
+        request = 'MB-0123456789abcdef0123456789abcdef'
+        command = cli_commands.BY_PATH['federation requests retry']
+        for existing in (False, True):
+            with self.subTest(existing=existing):
+                self.assertEqual(
+                    cli_commands.execution_argv(
+                        command, {'request': request}, root, root, existing=existing
+                    ),
+                    [
+                        '/usr/bin/python3',
+                        str(root / 'federation.py'),
+                        '--directory',
+                        str(root),
+                        'retry',
+                        request,
+                    ],
+                )
+
     def installation(self, root):
         root.mkdir(mode=0o700)
         for name in wrapper.PUBLIC_FILES:
