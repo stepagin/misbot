@@ -200,7 +200,7 @@ async function main() {
     };
     await welcomeClient.setDisplayName("Серверный помощник");
     await welcomeClient.start();
-    await ensureCrossSigning(welcomeClient);
+    await ensureCrossSigning(welcomeClient, "/data/welcome/cross-signing.json");
     const welcome = new WelcomeBot(
         welcomeClient,
         {
