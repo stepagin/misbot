@@ -21,6 +21,22 @@ from test_existing_compose import ExistingTests, BUNDLE
 
 
 class FeatureTests(unittest.TestCase):
+    def test_adopted_homepage_reads_old_mas_invitation_policy_without_changing_it(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);config=root/'mas.yaml'
+            installation=SimpleNamespace(root=root,state={'domain':'fictional.example.org'},
+                model={'identity':{'mas_config':'mas.yaml'}})
+            for account,required in (({'registration_token_required':True},True),
+                    ({'registration_token_required':False},False),
+                    ({'password_registration_token_required':True},True),
+                    ({'registration_token_required':True,'password_registration_token_required':False},False)):
+                contents=json.dumps({'account':{'password_registration_enabled':True,**account}})
+                config.write_text(contents)
+                model=features.site_model(installation)
+                self.assertEqual(model['REGISTRATION_TOKEN_REQUIRED'],'true' if required else 'false')
+                if required:self.assertIn('код приглашения',homepage.render(model))
+                self.assertEqual(config.read_text(),contents)
+
     def test_external_runtime_mount_is_limited_to_registered_readonly_referral_socket(self):
         installation=object.__new__(existing.Installation)
         source='/run/misbot-fictional'

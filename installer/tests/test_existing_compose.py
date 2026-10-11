@@ -214,6 +214,50 @@ class ExistingTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     reader.read()
 
+    def test_backup_keeps_private_theme_source_and_rejects_unsafe_theme(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root,_=self.fixture(Path(folder));installation=self.installation(root)
+            theme=installation.control/'features/site-template';theme.mkdir(mode=0o700,parents=True)
+            for name in ('index.html','site.css'):
+                (theme/name).write_text('fictional theme');(theme/name).chmod(0o600)
+            original=Path.lstat
+            def info(path,*args,**kwargs):
+                value=list(original(path,*args,**kwargs));value[4]=0;return os.stat_result(value)
+            with patch.object(Path,'lstat',info):
+                paths=installation.backup_control_sources()
+                self.assertIn(theme/'index.html',paths);self.assertIn(theme/'site.css',paths)
+                (theme/'site.css').chmod(0o644)
+                with self.assertRaises(existing.Error):installation.backup_control_sources()
+                (theme/'site.css').chmod(0o600)
+                (theme/'index.html').unlink();(theme/'index.html').symlink_to(theme/'site.css')
+                with self.assertRaises(RuntimeError):installation.backup_control_sources()
+
+    def test_verify_accepts_optional_theme_and_rejects_unknown_control_paths(self):
+        for theme_path,accepted in (('features/site-template/index.html',True),
+                                    ('features/site-template/private.json',False)):
+            with self.subTest(path=theme_path), tempfile.TemporaryDirectory() as folder:
+                base=Path(folder);root,model=self.fixture(base);installation=self.installation(root)
+                destination=base/'backups/owned';destination.mkdir(parents=True)
+                theme=b'<h1>@@NAME@@</h1>'
+                member='misbot-control/'+theme_path
+                payload={member:theme, 'database/synapse.dump':b'FICTIONAL_DUMP','database/mas.dump':b'FICTIONAL_DUMP'}
+                manifest={'format':'misbot-existing-compose-backup-v1','server_name':'fictional.example.org',
+                    'database_sha256':{name+'.dump':hashlib.sha256(b'FICTIONAL_DUMP').hexdigest() for name in model['databases']},
+                    'control_sha256':{member:hashlib.sha256(theme).hexdigest()}}
+                payload['manifest.json']=json.dumps(manifest).encode()
+                source=base/'input.tar.gz'
+                with tarfile.open(source,'w:gz') as archive:
+                    for name,value in payload.items():
+                        entry=tarfile.TarInfo(name);entry.size=len(value);archive.addfile(entry,io.BytesIO(value))
+                encrypted=destination/'backup.tar.gz.aesgcm'
+                backup_crypto.encrypt(source,encrypted,backup_crypto.read_key(base/'recovery.key'))
+                selected={'directory':str(destination),'sha256':existing.digest(encrypted)}
+                with patch.object(installation,'validate'),patch.object(installation,'pg',return_value=(0,b'0')) as pg:
+                    if accepted:installation.verify(selected)
+                    else:
+                        with self.assertRaises(existing.Error):installation.verify(selected)
+                        pg.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
