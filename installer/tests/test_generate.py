@@ -81,9 +81,25 @@ class GeneratorTests(unittest.TestCase):
                     or '/tests/' in p
                     or '/verification/' in p
                     or '/evidence/' in p
+                    or '/ci/' in p
+                    or '/.github/' in p
+                    or '/node_modules/' in p
                     or 'SYNAPSE_INSTALLER_' in p
                     or p.endswith('live-test.js')
                     for p in names
+                )
+            )
+            self.assertFalse(
+                names.intersection(
+                    {
+                        'matrix-installer/pyproject.toml',
+                        'matrix-installer/eslint.config.cjs',
+                        'matrix-installer/.prettierrc.json',
+                        'matrix-installer/package.json',
+                        'matrix-installer/package-lock.json',
+                        'matrix-installer/CONTRIBUTING.md',
+                        'matrix-installer/development-licenses.md',
+                    }
                 )
             )
             self.assertEqual(
