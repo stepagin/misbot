@@ -609,15 +609,25 @@ class LifecycleTests(unittest.TestCase):
                 patch.object(lifecycle, 'ROOT', root, create=True),
                 patch.object(lifecycle, 'dc') as dc,
                 patch.object(lifecycle, 'wait_writers') as ready,
-                patch.object(lifecycle, 'emit'),
+                patch.object(lifecycle, 'emit') as output,
             ):
                 lifecycle.backup_recover()
                 self.assertEqual(dc.call_args.args, ('up', '-d', 'synapse'))
                 ready.assert_called_once_with(['synapse'])
                 self.assertFalse((root / 'backup-writers.json').exists())
+                output.assert_called_once_with(
+                    'backup_recovery',
+                    pending=False,
+                    changed=True,
+                    writers=['synapse'],
+                    kept_stopped=False,
+                    next_action='Run install.sh check, then retry the backup',
+                )
                 dc.reset_mock()
+                output.reset_mock()
                 lifecycle.backup_recover()
                 dc.assert_not_called()
+                output.assert_called_once_with('backup_recovery', pending=False, changed=False)
 
     def test_nested_snapshot_failure_restarts_once_and_failed_restart_keeps_journal(self):
         with tempfile.TemporaryDirectory() as folder:

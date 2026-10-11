@@ -22,6 +22,7 @@ import preflight
 import state_store
 import backup_archive
 import backup_writers
+from operation_models import OperationError
 import media_transfer
 import media_snapshot
 import vault_cache
@@ -976,7 +977,13 @@ def paused_writers(leave_stopped=False):
 
 
 def backup_recover():
-    backup_writers.BackupWriters(writer_runtime()).recover()
+    try:
+        result = backup_writers.BackupWriters(writer_runtime()).recover()
+    except OperationError as error:
+        # The lifecycle error adapter already exposes only deliberate RuntimeError
+        # guidance. Preserve that public contract for existing CLI/UI callers.
+        raise RuntimeError(error.result.message) from None
+    emit('backup_recovery', **result.legacy_fields())
 
 
 def check():

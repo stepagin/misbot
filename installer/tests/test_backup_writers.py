@@ -87,8 +87,21 @@ class BackupWriterTests(unittest.TestCase):
         self.wait_ready.side_effect = None
         self.compose.reset_mock()
         with patch.object(state_store, 'process_identity', side_effect=FileNotFoundError):
-            self.writers.recover()
-            self.writers.recover()
+            result = self.writers.recover()
+            repeated = self.writers.recover()
+        self.assertEqual(result.operation.code, 'backup_writers_resumed')
+        self.assertEqual(
+            result.legacy_fields(),
+            {
+                'pending': False,
+                'changed': True,
+                'writers': ['synapse'],
+                'kept_stopped': False,
+                'next_action': 'Run install.sh check, then retry the backup',
+            },
+        )
+        self.assertEqual(repeated.operation.code, 'backup_recovery_not_needed')
+        self.assertEqual(repeated.legacy_fields(), {'pending': False, 'changed': False})
         self.compose.assert_called_once_with('up', '-d', 'synapse')
         self.assertIsNone(state_store.backup_pause_record(self.root))
 
@@ -102,15 +115,32 @@ class BackupWriterTests(unittest.TestCase):
 
     def test_foreign_identity_and_live_owner_are_refused_before_compose(self):
         for changes, process, message in (
-            ({'server_name': 'foreign.example.org'}, None, 'another Matrix identity'),
+            ({'server_name': 'FICTIONAL_SECRET_FOREIGN_VALUE'}, None, 'another Matrix identity'),
             ({}, (123456, 'fictional-dead-process'), 'still exists'),
         ):
             record = self.record(**changes)
             with patch.object(state_store, 'process_identity', return_value=process):
-                with self.assertRaisesRegex(RuntimeError, message):
+                with self.assertRaisesRegex(backup_writers.OperationError, message) as error:
                     self.writers.recover()
+            self.assertEqual(error.exception.result.stage.value, 'backup_recovery')
+            self.assertEqual(error.exception.result.status.value, 'failed')
+            self.assertTrue(error.exception.result.next_actions)
+            self.assertNotIn('FICTIONAL_SECRET_FOREIGN_VALUE', str(error.exception))
             self.compose.assert_not_called()
             self.assertEqual(state_store.backup_pause_record(self.root), record)
+
+    def test_failed_recovery_keeps_the_exact_checkpoint_for_retry(self):
+        original = self.record()
+        self.wait_ready.side_effect = state_store.OperationInterrupted()
+        with patch.object(state_store, 'process_identity', side_effect=FileNotFoundError):
+            with self.assertRaises(state_store.OperationInterrupted):
+                self.writers.recover()
+            self.assertEqual(state_store.backup_pause_record(self.root), original)
+            self.wait_ready.side_effect = None
+            result = self.writers.recover()
+        self.assertTrue(result.changed)
+        self.assertEqual(self.identity.read_text(), 'FICTIONAL_IDENTITY_DO_NOT_REPLACE')
+        self.assertIsNone(state_store.backup_pause_record(self.root))
 
     def test_recovery_keeps_migration_source_and_staged_target_stopped(self):
         for flag in ('migration_frozen', 'restore_pending'):

@@ -8,7 +8,16 @@ from pathlib import Path
 from typing import NotRequired, Protocol, TypedDict
 
 import state_store
-from operation_models import BACKUP_WRITERS, BackupPauseRecord, InstallationState
+from operation_models import (
+    BACKUP_WRITERS,
+    BackupPauseRecord,
+    BackupRecoveryResult,
+    InstallationState,
+    OperationError,
+    OperationResult,
+    OperationStage,
+    OperationStatus,
+)
 
 
 class ServiceRow(TypedDict):
@@ -103,21 +112,40 @@ class BackupWriters:
             finally:
                 self.paused = False
 
-    def recover(self) -> None:
+    def recover(self) -> BackupRecoveryResult:
         state_store.assert_database_allowed(self.root)
         record = state_store.backup_pause_record(self.root)
         if record is None:
-            self.runtime.emit('backup_recovery', pending=False, changed=False)
-            return
+            return BackupRecoveryResult(
+                OperationResult(
+                    'backup_recovery_not_needed',
+                    OperationStage.BACKUP_RECOVERY,
+                    'No interrupted backup needs recovery',
+                )
+            )
         if record.get('server_name') != self.runtime.state()['domain']:
-            raise RuntimeError('Backup recovery journal belongs to another Matrix identity')
+            raise OperationError(
+                OperationResult(
+                    'backup_identity_mismatch',
+                    OperationStage.BACKUP_RECOVERY,
+                    'Backup recovery journal belongs to another Matrix identity',
+                    ('Keep the journal and use the matching installation',),
+                    OperationStatus.FAILED,
+                )
+            )
         try:
             alive = state_store.process_identity(record['pid'])[1] == record['started']
         except OSError:
             alive = False
         if alive:
-            raise RuntimeError(
-                'The backup process still exists; wait for it to finish before backup-recover'
+            raise OperationError(
+                OperationResult(
+                    'backup_owner_active',
+                    OperationStage.BACKUP_RECOVERY,
+                    'The backup process still exists; wait for it to finish before backup-recover',
+                    ('Wait for the backup process to finish before backup-recover',),
+                    OperationStatus.FAILED,
+                )
             )
         writers = record['writers']
         metadata = self.runtime.state()
@@ -131,13 +159,18 @@ class BackupWriters:
                 self.runtime.compose('up', '-d', *writers)
                 self.runtime.wait_ready(writers)
         (self.root / 'backup-writers.json').unlink()
-        self.runtime.emit(
-            'backup_recovery',
-            pending=False,
-            changed=True,
-            writers=writers,
-            kept_stopped=keep_stopped,
-            next_action='Use move-abort only if cancelling migration'
+        operation = OperationResult(
+            'backup_writers_kept_stopped' if keep_stopped else 'backup_writers_resumed',
+            OperationStage.BACKUP_RECOVERY,
+            'Backup writers remain stopped'
             if keep_stopped
-            else 'Run install.sh check, then retry the backup',
+            else 'Previously running backup writers resumed',
+            (
+                'Use move-abort only if cancelling migration'
+                if keep_stopped
+                else 'Run install.sh check, then retry the backup',
+            ),
+        )
+        return BackupRecoveryResult(
+            operation, changed=True, writers=tuple(writers), kept_stopped=keep_stopped
         )

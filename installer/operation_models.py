@@ -44,6 +44,31 @@ class OperationResult:
     status: OperationStatus = OperationStatus.SUCCEEDED
 
 
+class OperationError(RuntimeError):
+    def __init__(self, result: OperationResult) -> None:
+        self.result = result
+        super().__init__(result.message)
+
+
+@dataclass(frozen=True)
+class BackupRecoveryResult:
+    operation: OperationResult
+    changed: bool = False
+    writers: tuple[str, ...] = ()
+    kept_stopped: bool = False
+
+    def legacy_fields(self) -> dict[str, object]:
+        """Keep the existing lifecycle JSON record, including omitted no-op fields."""
+        fields: dict[str, object] = {'pending': False, 'changed': self.changed}
+        if self.changed:
+            fields.update(
+                writers=list(self.writers),
+                kept_stopped=self.kept_stopped,
+                next_action=self.operation.next_actions[0],
+            )
+        return fields
+
+
 class ConfigurationFailure(TypedDict):
     stage: str
     status: str
