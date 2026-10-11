@@ -27,16 +27,19 @@ const MORE = `Федерация: взаимное подключение сер
 
 function parse(text) {
     const single = {"серверы":"servers", "заявки":"requests", "операции":"operations", "приглашения":"room-invitations", "восстановить":"recover", "откатить":"rollback"};
-    if (single[text]) return {action:single[text]};
-    let m=text.match(/^(проверить|добавить|удалить|пригласить) сервер ([^\s]+)$/);
-    if(m)return {action:{"проверить":"check","добавить":"add","удалить":"remove","пригласить":"invite"}[m[1]],argument:m[2]};
-    m=text.match(/^(подтвердить|отклонить|отменить|повторить|статус) (MB-[0-9a-f]{32})$/);
-    if(m)return {action:{"подтвердить":"approve","отклонить":"reject","отменить":"cancel","повторить":"retry","статус":"request-status"}[m[1]],argument:m[2]};
-    m=text.match(/^(принять|отклонить|покинуть) комнату (![^\s]+)$/);
-    if(m)return {action:{"принять":"room-accept","отклонить":"room-reject","покинуть":"room-leave"}[m[1]],argument:m[2]};
-    m=text.match(/^пригласить бота ([^\s]+) (![^\s]+)$/);
+    const command=text.toLowerCase();
+    if (Object.hasOwn(single,command)) return {action:single[command]};
+    // Fold command words only. Matrix room IDs and request IDs are opaque.
+    let m=text.match(/^(проверить|добавить|удалить|пригласить) сервер ([^\s]+)$/i);
+    if(m)return {action:{"проверить":"check","добавить":"add","удалить":"remove","пригласить":"invite"}[m[1].toLowerCase()],argument:m[2]};
+    const requests={"подтвердить":"approve","отклонить":"reject","отменить":"cancel","повторить":"retry","статус":"request-status"};
+    m=text.match(/^([^\s]+) (MB-[0-9a-f]{32})$/);
+    if(m && Object.hasOwn(requests,m[1].toLowerCase()))return {action:requests[m[1].toLowerCase()],argument:m[2]};
+    m=text.match(/^(принять|отклонить|покинуть) комнату (![^\s]+)$/i);
+    if(m)return {action:{"принять":"room-accept","отклонить":"room-reject","покинуть":"room-leave"}[m[1].toLowerCase()],argument:m[2]};
+    m=text.match(/^пригласить бота ([^\s]+) (![^\s]+)$/i);
     if(m)return {action:"room-invite",argument:JSON.stringify({server:m[1],room:m[2]})};
-    m=text.match(/^автоприём (включить|выключить)$/);
+    m=command.match(/^автоприём (включить|выключить)$/);
     if(m)return {action:"auto-accept",argument:m[1]==="включить"?"true":"false"};
     return null;
 }
@@ -123,7 +126,7 @@ class FederationBot {
         if(m){await this.call("panel-preferences",{key:{обновления:"updates",регистрации:"registrations",статистика:"statistics"}[m[1]],enabled:m[2]==="включить"},event);await reply("Настройка уведомлений сохранена.");return;}
         m=text.match(/^статистика (день|неделя|месяц|всего)$/);
         if(m){await reply(statisticsText(await this.call("panel-statistics",{день:"day",неделя:"week",месяц:"month",всего:"all"}[m[1]],event)));return;}
-        const request=parse(original) || parse(text);
+        const request=parse(original);
         if(!request){await reply(HELP);return;}
         const result=await this.control({...request,actor:event.sender,event_id:event.event_id});
         await reply(JSON.stringify(result,(key,value)=>/backup|migration|move|checkpoint/i.test(key)?undefined:value,2));
