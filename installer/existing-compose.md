@@ -66,6 +66,49 @@ systemd units. Токен/proxy остаются приватными; неза�
 `backup external create`, `storage status`, `storage s3 check/cleanup/connect`
 и `storage recover`, `update apply/recover --source PATH`. CLI, SSH-меню и Telegram используют один backend и lock.
 Системный Caddy и другие внешние службы не перезапускаются этими командами.
+После отдельного проверенного переноса Caddy и Telegram worker можно зарегистрировать
+в Compose-инвентаризации. Они тогда входят в `start`, `stop`, `status` и `check`.
+Обновление Misbot само по себе сохраняет прежний режим служб.
+
+Для Caddy `existing.proxy` содержит `format: 1`, имя зарегистрированного `container`
+и три отдельных относительных каталога под `runtime/`: `config_directory`,
+`data_directory` и `state_directory`. Они монтируются в `/etc/caddy` (readonly),
+`/data` и `/config`. `features.caddyfile` указывает на `config_directory/Caddyfile`.
+Homepage validate/reload/recovery используют этот runtime; кандидат проверяется
+отдельным контейнером без сети и с копией TLS в RAM. Внешние readonly mounts
+допускаются только для принятого `features.site_directory` под `/srv` и собственного
+публичного сокета федерации под `/run`, с точной регистрацией в `external_runtime_mounts`.
+Индивидуальная тема сайта может храниться root-only в `.misbot/features/site-template/`
+как `index.html` и `site.css`; применение сайта сохраняет эту тему.
+
+Для Telegram в `existing.telegram_control` дополнительно задаются `worker_container`,
+относительный `worker_config` и `socket_directory`. `worker_directory` после переноса
+находится внутри установки. Worker получает только свой config (UID/GID 10001, 0600),
+свой каталог данных (10001:10001, 0700) и readonly control socket (root:10001, 0750).
+Его root filesystem readonly; Docker socket и MAS credentials в него не монтируются.
+Root control остаётся отдельной host-службой. Старый host worker отключается при
+переносе; обновление runtime перезапускает зарегистрированный контейнер.
+Копия сохраняет действующий worker config и согласованный SQLite snapshot в прежнем
+формате архива; меняющиеся SQLite/WAL исключаются из сырого дерева установки.
+
+Перенос требует инвентаризации маршрутов, копии сертификатов/config/SQLite,
+проверки candidate images и восстановления. Сохраняйте исходные units и их
+включённость для отката; два Telegram polling worker одновременно не запускаются.
+Незавершённый индивидуальный перенос может зарегистрировать журнал
+`.misbot/runtime-migration.json`, блокирующий обычные операции до recovery плана.
+Новые поля необязательны и имеют формат 1: прежние установки 1.1.0 обновляются
+без преобразования layout или изменения схемы PostgreSQL/SQLite.
+
+Для уже зарегистрированного worker source update автоматически собирает образ,
+если изменились `worker.py`, `common.py`, `Dockerfile` или `requirements.txt`.
+Build context содержит только эти проверенные публичные файлы; базовый образ
+должен быть закреплён по digest. До переключения образ проверяется без сети,
+приватных mounts и polling. Сохранённый журнал содержит прежнюю инвентаризацию,
+pins и новый image ID; переключается только worker с ожиданием healthcheck.
+`update recover --source PATH` возвращает прежний образ с текущей SQLite, сохраняя
+новые отметки доставки. Source комплект без поддержки зарегистрированных runtime
+отклоняется до создания копии и изменения файлов. Старые архивы без Telegram
+и прежние source-update журналы остаются допустимыми.
 Source update проверяет полный public manifest, использует последнюю проверенную
 внешнюю копию при совпадении identity/images или создаёт новую, сохраняет
 checkpoint, обновляет только исходники и системную команду. `installation.json`,

@@ -241,7 +241,7 @@ class ReleaseDataMigrationTests(unittest.TestCase):
                 patch.object(update, 'run_up', side_effect=start), patch.object(update, 'refresh_command'):
             with self.assertRaisesRegex(RuntimeError, 'rollback healthy=True'):
                 update.perform_update(self.source, self.root, 'apply')
-        self.assertEqual(calls, ['1.1.0', '1.0.0'])
+        self.assertEqual(calls, [update.release(self.source)['version'], '1.0.0'])
         with sqlite3.connect(self.root / 'data/admin-panel/panel.sqlite') as db:
             self.assertEqual(db.execute('SELECT value FROM settings WHERE key="welcome"').fetchone()[0],
                              '"KEEP_NEW_VALUE"')
@@ -279,3 +279,27 @@ class ReleaseDataMigrationTests(unittest.TestCase):
                 update.recover_update(self.root, self.source)
             start.assert_not_called(); restore.assert_not_called()
         self.assertTrue((self.root / 'update-journal.json').exists())
+
+    def test_release_110_updates_and_repeats_without_changing_existing_data(self):
+        info = update.release(self.root)
+        info.update(version='1.1.0', data_schema_version=1)
+        (self.root / 'release.json').write_text(json.dumps(info))
+        entries = update.validate_manifest(self.source)[0]
+        (self.root / 'SHA256SUMS').write_text(''.join(
+            hashlib.sha256((self.root / name).read_bytes()).hexdigest() + '  ' + name + '\n'
+            for name in entries))
+        metadata = json.loads((self.root / 'installation.json').read_text())
+        metadata['applied_release_version'] = '1.1.0'
+        state_store.write_json(self.root / 'installation.json', metadata)
+        migrations.migrate(self.root)
+        with sqlite3.connect(self.root / 'data/admin-panel/panel.sqlite') as db:
+            db.execute('INSERT INTO settings VALUES (?,?)', ('welcome', '"RETAIN_110_VALUE"'))
+        with patch.object(update, 'update_resource_check'), patch.object(update, 'verified_backup'), \
+                patch.object(update, 'run_up', side_effect=self.start), patch.object(update, 'refresh_command'):
+            update.perform_update(self.source, self.root, 'apply')
+            update.perform_update(self.source, self.root, 'apply')
+        self.assertEqual(update.release(self.root)['version'], '1.1.1')
+        self.assertEqual(migrations.check(self.root), 1)
+        with sqlite3.connect(self.root / 'data/admin-panel/panel.sqlite') as db:
+            self.assertEqual(db.execute('SELECT value FROM settings WHERE key="welcome"').fetchone()[0],
+                             '"RETAIN_110_VALUE"')

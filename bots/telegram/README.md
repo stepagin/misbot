@@ -50,6 +50,16 @@ Matrix-сервером в личном чате. Перед работой во
 Bridge запускается root с `--config PATH --socket-directory /run/misbot-telegram`.
 Socket допускает worker UID/GID 10001; не выдавайте этому UID доступ к Docker.
 
+Worker можно отдельно перенести в Compose с образом из `Dockerfile`; архив Misbot
+содержит `telegram-bot/Dockerfile` и `requirements.txt`. Монтируются только собственный
+`worker.json` readonly, каталог worker SQLite и readonly control socket. Управляющая
+служба остаётся на хосте. Перед переключением остановите прежний worker и сохраните
+согласованную SQLite; отключите его systemd unit, сохранив unit для восстановления.
+После регистрации в инвентаризации Misbot управляет worker через общие команды,
+а source update автоматически собирает и проверяет изменённый worker image с
+сохранением прежнего pin для rollback. Изменение схемы SQLite требует отдельной
+совместимой миграции; обновление образа не заменяет базу старым snapshot.
+
 `/health` показывает готовность бота и управляющей службы.
 После запуска проверьте реальный `/start`, вход через MAS и административное меню.
 Локальные тесты: `python3 -m unittest discover -s bots/telegram/tests -p 'test_*.py'`.

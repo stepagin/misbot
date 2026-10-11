@@ -5,6 +5,7 @@ import html
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import logging
+import os
 from pathlib import Path
 import secrets
 import sqlite3
@@ -335,6 +336,7 @@ class Health(BaseHTTPRequestHandler):
 
 
 def main():
+    os.umask(0o077)
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', default='/config/worker.json')
     parser.add_argument('--data', default='/data')

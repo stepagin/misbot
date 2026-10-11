@@ -11,11 +11,13 @@ import hashlib
 import importlib.util
 import shutil
 import subprocess
+import stat
 from urllib.parse import urlsplit
 from urllib.request import urlopen
 
 import configuration_schema as schema
 import command_wrapper
+from existing_proxy import Proxy
 import federation
 from existing_compose import Installation, Error, private_directory, save, emit, digest
 
@@ -129,6 +131,26 @@ class Homepage:
         values=json.loads((self.folder/'site.json').read_text())
         return {k:values[k] for k in homepage.KEYS}|{'links':self.links()}
 
+    def assets(self, model):
+        """Render an optional root-owned local theme without replacing its source."""
+        import homepage
+        folder=self.folder/'site-template'
+        if not folder.exists() and not folder.is_symlink():
+            return (homepage.render(model,self.links()).encode(),
+                    (self.installation.root/'site/site.css').read_bytes())
+        info=folder.lstat()
+        if (folder.resolve()!=folder.absolute() or not stat.S_ISDIR(info.st_mode)
+                or info.st_uid!=0 or info.st_mode&0o077):
+            raise Error('Локальный шаблон сайта должен быть root-only без symlink.')
+        contents=[]
+        for name,limit in (('index.html',2*1024**2),('site.css',256*1024)):
+            path=folder/name;info=command_wrapper.regular(path)
+            if (path.resolve()!=path.absolute() or info.st_uid!=0
+                    or info.st_mode&0o077 or info.st_size>limit):
+                raise Error('Файлы шаблона должны быть root-only; превышен размер или небезопасный путь.')
+            contents.append(path.read_text(encoding='utf-8'))
+        return homepage.render(model,self.links(),template=contents[0]).encode(),contents[1].encode()
+
     def proposed(self, changes):
         import homepage
         if set(changes)-set(homepage.KEYS):raise Error('Допускаются только поля сайта.')
@@ -154,9 +176,10 @@ class Homepage:
 
     def check(self, changes):
         model=self.proposed(changes)
+        self.assets(model)
         staged=self.folder/'homepage.proposed'
         command_wrapper.atomic(staged,self.candidate(model).encode(),0o600)
-        self.installation.run(['caddy','validate','--config',str(staged),'--adapter','caddyfile'])
+        Proxy(self.installation).validate(staged)
         emit('existing_homepage_check',passed=True,identity_preserved=True)
         return model
 
@@ -164,6 +187,7 @@ class Homepage:
         import homepage
         self.installation.require_no_pending()
         model=self.check(changes)
+        markup,stylesheet=self.assets(model)
         stage=private_directory(self.folder/'homepage-checkpoints'/uuid.uuid4().hex)
         site=Path(self.plan['site_directory'])
         paths={'Caddyfile':Path(self.plan['caddyfile']),'site.json':self.folder/'site.json',
@@ -171,9 +195,10 @@ class Homepage:
         for name,path in paths.items():command_wrapper.atomic(stage/name,path.read_bytes(),0o600)
         save(self.folder/'homepage.json',{'format':1,'checkpoint':str(stage)})
         try:
-            command_wrapper.atomic(site/'index.html',homepage.render(model,self.links()).encode(),0o644)
+            command_wrapper.atomic(site/'index.html',markup,0o644)
+            command_wrapper.atomic(site/'site.css',stylesheet,0o644)
             write_in_place(Path(self.plan['caddyfile']),self.candidate(model).encode())
-            self.installation.run(['systemctl','reload','caddy'])
+            Proxy(self.installation).reload()
             with urlopen('https://'+self.installation.state['domain']+'/_matrix/client/versions',timeout=15) as response:
                 if response.status!=200:raise Error('Matrix API после reload не подтверждён.')
             save(self.folder/'site.json',{k:model[k] for k in homepage.KEYS})
@@ -193,7 +218,7 @@ class Homepage:
                             'index.html':site/'index.html','site.css':site/'site.css'}.items():
             if name=='Caddyfile':write_in_place(target,(stage/name).read_bytes())
             else:command_wrapper.atomic(target,(stage/name).read_bytes(),0o600 if name=='site.json' else 0o644)
-        self.installation.run(['systemctl','reload','caddy'])
+        Proxy(self.installation).reload()
         (self.folder/'homepage.json').unlink(missing_ok=True)
         emit('existing_homepage_recovery',passed=True,core_restarted=False)
 
@@ -227,7 +252,9 @@ class Features:
             raise Error('Нужен HTTPS origin существующего Element Web с / в конце.')
         if value['admin_domain'] in (value['primary_domain'], web.hostname, self.installation.state['domain']):
             raise Error('Admin hostname занят действующей службой.')
-        if value['caddyfile'] not in self.installation.model.get('external_backup_paths', []):
+        caddyfile = Path(value['caddyfile'])
+        if (not caddyfile.is_relative_to(self.root) and
+                value['caddyfile'] not in self.installation.model.get('external_backup_paths', [])):
             raise Error('Caddyfile должен входить в принятую резервную копию.')
         for name in ('caddyfile', 'site_directory', 'image_archive', 'image_manifest'):
             target = Path(value[name])
@@ -397,17 +424,25 @@ class Features:
                 self.installation.run(['systemctl','daemon-reload'])
             for name,source in mapping.items():command_wrapper.atomic(runtime/name,source.read_bytes(),0o644)
             save(config,settings)
-            self.installation.run(['systemctl','restart',value['control_unit'],value['worker_unit']])
-            self.installation.run(['systemctl','is-active','--quiet',value['control_unit'],value['worker_unit']])
+            self.restart_telegram(value)
         except BaseException:
             for name,data in previous.items():command_wrapper.atomic(runtime/name,data,0o644)
             command_wrapper.atomic(config,before,0o600)
             command_wrapper.atomic(control_unit,unit_before,0o644)
             self.installation.run(['systemctl','daemon-reload'])
-            self.installation.run(['systemctl','restart',value['control_unit'],value['worker_unit']],allowed=(0,1))
+            self.restart_telegram(value, allowed=(0,1))
             raise
         emit('existing_telegram_runtime',passed=True,core_restarted=False,shared_federation_backend=True)
         return True
+
+    def restart_telegram(self, value, allowed=(0,)):
+        worker = self.installation.model.get('telegram_control', {}).get('worker_container')
+        units = [value['control_unit']] if worker else [value['control_unit'], value['worker_unit']]
+        self.installation.run(['systemctl','restart',*units], allowed=allowed)
+        self.installation.run(['systemctl','is-active','--quiet',*units], allowed=allowed)
+        if worker:
+            from telegram_container import restart
+            restart(self.installation, allowed)
 
     def prepare_swap(self):
         # Keep swap outside the backup payload; root-only and independently owned.
@@ -522,9 +557,9 @@ class Features:
         candidate += '\n'+plan['admin_domain']+' {\n    reverse_proxy 127.0.0.1:8092\n}\n'
         staged = self.folder/'Caddyfile.proposed'
         command_wrapper.atomic(staged,candidate.encode(),0o600)
-        self.installation.run(['caddy','validate','--config',str(staged),'--adapter','caddyfile'])
+        Proxy(self.installation).validate(staged)
         write_in_place(path,candidate.encode())
-        self.installation.run(['systemctl','reload','caddy'])
+        Proxy(self.installation).reload()
         for origin,path_suffix in ((plan['primary_domain'],'/'),(plan['admin_domain'],'/'),(self.installation.state['domain'],'/.well-known/misbot'),(self.installation.state['domain'],'/_matrix/client/versions')):
             with urlopen('https://'+origin+path_suffix,timeout=15) as response:
                 if response.status != 200:raise Error('Новый публичный маршрут не подтверждён.')
@@ -536,7 +571,7 @@ class Features:
         if stage.parent != self.folder/'checkpoints' or stage.resolve()!=stage:raise Error('Неверный feature checkpoint.')
         # Revert only public routes. Preserve newly issued bot sessions and crypto.
         write_in_place(Path(value['plan']['caddyfile']),(stage/'Caddyfile.before').read_bytes())
-        self.installation.run(['systemctl','reload','caddy'])
+        Proxy(self.installation).reload()
         emit('existing_features_recovery', public_routes_restored=True, bot_identity_retained=True,
                 continuation='Repair the failed phase, then repeat misbot features enable --config PATH with the same plan.')
 

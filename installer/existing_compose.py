@@ -164,6 +164,10 @@ class Installation:
                 "status": parts[0], "health": parts[1], "image_id": parts[2]}
 
     def accepted_runtime_mount(self, name, volume):
+        from existing_proxy import accepted_mount as proxy_mount
+        from telegram_container import accepted_mount as worker_mount
+        if proxy_mount(self, name, volume) or worker_mount(self, name, volume):
+            return True
         source=Path(volume.get('source',''))
         accepted={'container':name,'source':str(source),'target':volume.get('target')}
         if (name!='misbot-referral-bot' or volume.get('target')!='/run/control' or
@@ -176,6 +180,13 @@ class Installation:
 
     def validate(self):
         import yaml
+        from existing_proxy import Proxy, validate_service as validate_proxy
+        from telegram_container import paths as worker_paths, validate_service as validate_worker
+        Proxy(self)
+        if self.model.get('telegram_control', {}).get('worker_container'):
+            name, _, _, _ = worker_paths(self.root, self.model)
+            if name not in self.services:
+                raise Error('Telegram worker отсутствует в принятом Compose-проекте.')
         for relative in self.model.get("critical_paths", []):
             path = self.root / relative
             if not path.is_relative_to(self.root) or path.resolve() != path or not path.exists():
@@ -198,6 +209,8 @@ class Installation:
                 raise Error("Состав Compose-проекта отличается от принятой инвентаризации.")
             for service, name in project["services"].items():
                 entry = model["services"][service]
+                validate_proxy(self, name, entry)
+                validate_worker(self, name, entry)
                 if entry.get("container_name") != name or entry.get("pull_policy") != "never":
                     raise Error("Имя контейнера или политика загрузки образов изменились.")
                 if entry.get("image") != self.model["images"][name]["digest"]:
@@ -225,6 +238,8 @@ class Installation:
                                  if c.backend in cli_commands.EXISTING_BACKENDS])
 
     def require_no_pending(self):
+        if (self.control / 'runtime-migration.json').exists():
+            raise Error('Незавершённый перенос runtime. Выполните recovery сохранённого плана переноса; журнал не удаляйте.')
         if self.journal.exists():
             raise Error("Есть незавершённая копия. Выполните sudo misbot backup recover; журнал не удаляйте.")
         if (self.control / 's3/media-journal.json').exists():
@@ -394,6 +409,9 @@ class Installation:
                 "--exclude=" + relative + "/backup-*.sql", "--exclude=*.log", "--exclude=*.log.*"]
             for item in self.model["raw_database_paths"]:
                 arguments.append("--exclude=" + relative + "/" + item)
+            worker_data = telegram_backup.raw_data_exclusion(self.root, self.model)
+            if worker_data:
+                arguments.append('--exclude=' + worker_data)
             arguments += ["-C", "/", relative]
             for path in self.model.get("external_backup_paths", []):
                 if not Path(path).is_absolute() or Path(path).resolve() != Path(path):

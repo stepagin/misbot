@@ -219,7 +219,12 @@ def serve(root):
         public=Path('/run/misbot-federation-'+hashlib.sha256(metadata['domain'].encode()).hexdigest()[:16])
         public.mkdir(mode=0o755,exist_ok=True)
         if public.is_symlink() or public.stat().st_uid!=0:raise RuntimeError('Unsafe public socket directory')
-        public.chmod(0o755)
+        if metadata.get('existing',{}).get('proxy'):
+            # The registered proxy shares GID 10001 and mounts this directory
+            # readonly. Preserve its permissions across controller restarts.
+            os.chown(public,0,10001);public.chmod(0o750)
+        else:
+            public.chmod(0o755)
         path=public/'http.sock'
         if path.exists():
             info=path.lstat()

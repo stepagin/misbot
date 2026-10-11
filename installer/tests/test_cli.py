@@ -40,7 +40,7 @@ class CommandTests(unittest.TestCase):
             self.assertTrue(output.getvalue())
         with contextlib.redirect_stdout(io.StringIO()) as version:
             self.assertEqual(misbot.main(['version']),0)
-        self.assertIn('1.1.0',version.getvalue())
+        self.assertIn('1.1.1',version.getvalue())
 
     def test_split_installation_routes_configuration_invitation_and_ui_without_shell(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -159,7 +159,7 @@ class CommandTests(unittest.TestCase):
             launcher,lib=wrapper.paths(system)
             result=subprocess.run([str(launcher),'version'],cwd='/tmp',capture_output=True,text=True)
             self.assertEqual(result.returncode,0,result.stderr)
-            self.assertIn('1.1.0',result.stdout)
+            self.assertIn('1.1.1',result.stdout)
             self.assertFalse((lib/'__pycache__').exists())
             if os.geteuid()==0:
                 base.chmod(0o755);system.chmod(0o755)

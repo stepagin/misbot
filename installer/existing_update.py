@@ -9,6 +9,7 @@ import stat
 import uuid
 
 import command_wrapper
+import telegram_container
 from existing_compose import Installation, Error, digest, emit, private_directory, save, interrupted
 import update
 
@@ -48,6 +49,8 @@ def restore(installation):
     if folder.parent != installation.control / 'source-updates' or folder.resolve() != folder:
         raise Error('Некорректный source checkpoint; файлы сохранены.')
     previous = json.loads((folder / 'files.json').read_text())
+    if record.get('worker_image'):
+        telegram_container.recover_update(installation, folder, record['worker_image'])
     for name in record['files']:
         target = installation.root / name
         if target.resolve() != target or not target.is_relative_to(installation.root):
@@ -62,6 +65,10 @@ def restore(installation):
             if digest(target) != record['files'][name]:
                 raise Error('Новый source файл изменён; сохраните checkpoint.')
             target.unlink()
+    if (folder / 'telegram-public-before').exists():
+        from existing_features import Features
+        Features(installation.root).refresh_telegram(
+            installation.model['features'], folder / 'telegram-recovery')
     command_wrapper.install(installation.root)
     installation.validate()
     path.unlink()
@@ -74,6 +81,9 @@ def apply(installation, source):
     if journal.exists():
         raise Error('Есть незавершённый source update; выполните misbot update recover --source PATH.')
     entries, revision = sources(source)
+    if installation.model.get('proxy') and 'existing_proxy.py' not in entries:
+        raise Error('Source комплект не поддерживает зарегистрированный Caddy container.')
+    worker_changed = telegram_container.update_needed(installation, entries)
     candidate = update.release(source)
     update.run_data_migrations(source, installation.root, candidate, 'check')
     previous, _ = update.validate_manifest(installation.root)
@@ -122,6 +132,7 @@ def apply(installation, source):
         emit('existing_source_update', passed=True, already_current=True)
         return
     folder = private_directory(installation.control / 'source-updates' / uuid.uuid4().hex)
+    worker_image = telegram_container.prepare_update(installation, entries, folder) if worker_changed else None
     before = {}
     for name in changes:
         target = installation.root / name
@@ -136,6 +147,7 @@ def apply(installation, source):
             before[name] = {'sha256': digest(saved), 'mode': stat.S_IMODE(info.st_mode)}
     save(folder / 'files.json', before)
     save(journal, {'format': 1, 'checkpoint': str(folder), 'revision': revision,
+                   'worker_image': worker_image,
                    'files': {name: digest(p) for name, p in changes.items()}})
     try:
         update.run_data_migrations(source, installation.root, candidate, 'apply', folder)
@@ -144,6 +156,8 @@ def apply(installation, source):
             command_wrapper.public_directory(target.parent)
             command_wrapper.atomic(target, source_file.read_bytes(), 0o755 if name == 'install.sh' else 0o644)
         update.validate_manifest(installation.root)
+        if worker_image:
+            telegram_container.publish_update(installation, folder, worker_image)
         installation.validate()
         command_wrapper.install(installation.root)
         if installation.model.get('features',{}).get('enabled') and installation.model['features'].get('telegram_runtime'):
