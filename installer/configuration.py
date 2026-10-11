@@ -500,6 +500,7 @@ def apply_settings(root, changes):
         'REGISTRATION_TOKEN_REQUIRED',
         'INVITATION_LIFETIME_SECONDS',
         'INVITATION_USAGE_LIMIT',
+        'MAX_UPLOAD_SIZE_MIB',
     }
     if set(changes) - allowed:
         raise RuntimeError(

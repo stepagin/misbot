@@ -700,6 +700,8 @@ class InstallationWizardTests(unittest.TestCase):
                     self.assertEqual(interface.wizard(), 0)
                 model = configuration.load(root, True)
                 self.assertEqual(model['MEDIA_MODE'], media)
+                self.assertEqual(model['MAX_UPLOAD_SIZE_MIB'], '256')
+                self.assertNotIn('MAX_UPLOAD_SIZE_MIB —', self.output.getvalue())
                 for provider in ('GOOGLE', 'TELEGRAM'):
                     self.assertEqual(
                         bool(model[provider + '_CLIENT_SECRET']), provider in providers

@@ -459,7 +459,12 @@ synapse = {
     'room_list_publication_rules': [
         {'user_id': f'@*:{domain}', 'alias': f'#*:{domain}', 'action': 'allow'}
     ],
-    'max_upload_size': '100M',
+    'max_upload_size': int(
+        settings.get(
+            'MAX_UPLOAD_SIZE_MIB', configuration_schema.FIELDS['MAX_UPLOAD_SIZE_MIB'].default
+        )
+    )
+    * 1024**2,
     'enable_registration': False,
     'url_preview_enabled': False,
     'enable_metrics': False,

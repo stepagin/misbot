@@ -1185,6 +1185,7 @@ class UI:
             'INVITATION_USAGE_LIMIT',
             'OPEN_REGISTRATION',
             'REGISTRATION_TOKEN_REQUIRED',
+            'MAX_UPLOAD_SIZE_MIB',
         )
         before = dict(self.model)
         changes = self.edit_fields('Что изменить?', keys)

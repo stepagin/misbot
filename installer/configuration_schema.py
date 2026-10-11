@@ -163,6 +163,14 @@ FIELDS: dict[str, Field] = {
     'INVITATION_USAGE_LIMIT': Field(
         'policy', 'Лимит приглашений бота; первый токен всегда на одного', '1', 'usage', example='1'
     ),
+    'MAX_UPLOAD_SIZE_MIB': Field(
+        'policy',
+        'Максимальный размер вложения, МиБ (1–65536)',
+        '256',
+        'upload_size',
+        example='512',
+        impact='Для новых загрузок файлов, фото и видео; сохранённые вложения не изменяются.',
+    ),
     'GOOGLE_CLIENT_ID': Field(
         'auth',
         'Client ID из Google Cloud',
@@ -354,6 +362,7 @@ def field_value(
                 'port',
                 'lifetime',
                 'usage',
+                'upload_size',
                 'subnet',
                 'domains',
                 'role',
@@ -420,7 +429,7 @@ def field_value(
             net = ipaddress.ip_network(value, strict=True)
             if net.version != 4 or net.prefixlen != 24 or not net.is_private:
                 raise ValueError('приватная IPv4 сеть /24')
-        limits = {'port': 65535, 'lifetime': 315360000, 'usage': 2147483647}
+        limits = {'port': 65535, 'lifetime': 315360000, 'usage': 2147483647, 'upload_size': 65536}
         if item.kind in limits and (
             not re.fullmatch(r'[0-9]{1,10}', value) or not 1 <= int(value) <= limits[item.kind]
         ):
