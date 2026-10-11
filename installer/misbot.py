@@ -74,17 +74,14 @@ def operation_help(command):
     )
     print(command.purpose + '\n\nКоманда: ' + syntax.rstrip())
     print('Обязательные аргументы: ' + (', '.join('--' + n for n in command.arguments) or 'нет'))
-    print(
-        'Необязательные: --directory PATH; для update --source PATH; для S3 check --read-only, --json, --catalog-directory PATH; для S3 cleanup --json.'
-        if command.backend.startswith('s3-')
-        else 'Необязательные: --directory PATH'
-        + (
-            '; --source PATH (доверенный распакованный комплект)'
-            if command.backend in ('update', 'update-recover')
-            else ''
-        )
-        + '.'
-    )
+    optional = ['--directory PATH']
+    optional.extend('--' + name.replace('_', '-') + ' VALUE' for name in command.optional_arguments)
+    optional.extend('--' + name.replace('_', '-') for name in command.switches)
+    if command.backend in ('update', 'update-recover'):
+        optional.append('--source PATH (доверенный распакованный комплект)')
+    print('Необязательные: ' + '; '.join(optional) + '.')
+    if command.backend == 'ui':
+        print('Мастер использует весь экран терминала; --plain включает последовательный вывод.')
     print(
         'Defaults: сохранённый системный каталог; из распакованного комплекта укажите --directory. init/restore: /opt/matrix-stack.'
     )

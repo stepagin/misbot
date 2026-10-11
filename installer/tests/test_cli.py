@@ -21,6 +21,22 @@ BUNDLE = Path(__file__).resolve().parents[1]
 
 
 class CommandTests(unittest.TestCase):
+    def test_operation_help_lists_only_the_commands_registered_optional_options(self):
+        for command in cli_commands.COMMANDS:
+            with (
+                self.subTest(command=command.path),
+                contextlib.redirect_stdout(io.StringIO()) as output,
+            ):
+                misbot.operation_help(command)
+                optional = next(
+                    line
+                    for line in output.getvalue().splitlines()
+                    if line.startswith('Необязательные:')
+                )
+                for name in command.optional_arguments + command.switches:
+                    self.assertIn('--' + name.replace('_', '-'), optional)
+                self.assertEqual('--plain' in optional, command.path == 'ui')
+
     def test_optional_arguments_keep_their_command_scope(self):
         for argv in (
             ['admin', 'bot', 'show', '--administrator', 'FICTIONAL_PRIVATE_VALUE'],
