@@ -118,6 +118,7 @@ class GeneratorTests(unittest.TestCase):
             self.assertIn('matrix-installer/terminal_views.py', names)
             self.assertIn('matrix-installer/ui_actions.py', names)
             self.assertIn('matrix-installer/welcome_message.py', names)
+            self.assertIn('matrix-installer/welcome_settings.py', names)
             manifest = archive.extractfile('matrix-installer/SHA256SUMS').read().decode()
             self.assertEqual(
                 {'matrix-installer/' + line.split('  ', 1)[1] for line in manifest.splitlines()},

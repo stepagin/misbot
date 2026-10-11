@@ -10,7 +10,7 @@ import admin_panel
 import releases
 import release_update
 import state_store
-from welcome_message import DEFAULT_WELCOME
+from welcome_message import DEFAULT_WELCOME, LEGACY_WELCOMES
 
 EXPECTED_WELCOME = (
     'Привет! Добро пожаловать в example.org.\n\n'
@@ -137,6 +137,25 @@ class PanelTests(unittest.TestCase):
         self.assertEqual(
             restarted.welcome_text(custom), 'Привет, MiXeD! example.org\n{"data": 1}\n{unknown}'
         )
+
+    def test_start_upgrades_old_stock_text_without_greeting_known_users_again(self):
+        self.users = [{'mxid': '@alice:example.org', 'created': self.now, 'active': True}]
+        self.panel.observe_users()
+        for item in self.pending():
+            self.panel.handle('panel-ack', {'id': item['id'], 'delivered': True}, None)
+        self.panel.handle('panel-welcome', LEGACY_WELCOMES[2], '$old-stock')
+        before = self.panel.settings()
+        restarted = admin_panel.Panel(self.root, lambda: self.now)
+        self.assertEqual(restarted.settings(), before | {'welcome': EXPECTED_WELCOME})
+        restarted.user_page = self.panel.user_page
+        restarted.observe_users()
+        self.assertEqual(self.pending(), [])
+        self.users.append({'mxid': '@bob:example.org', 'created': self.now, 'active': True})
+        restarted.observe_users()
+        greetings = [item for item in self.pending() if item['via'] == 'welcome']
+        self.assertEqual(len(greetings), 1)
+        self.assertEqual(greetings[0]['recipient'], '@bob:example.org')
+        self.assertEqual(greetings[0]['body'], EXPECTED_WELCOME)
 
     def test_substituted_values_are_not_treated_as_more_template_fields(self):
         state_store.write_text(

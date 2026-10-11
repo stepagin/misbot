@@ -23,6 +23,7 @@ names = [
     'release-notes.md',
     'admin_panel.py',
     'welcome_message.py',
+    'welcome_settings.py',
     'releases.py',
     'release_update.py',
     'remove_server.py',

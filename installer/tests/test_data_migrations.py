@@ -15,6 +15,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import data_migrations as migrations
 import state_store
 import update
+from welcome_message import DEFAULT_WELCOME, WelcomeContext
+
+# Frozen source text from the old runtime, independent of the new matcher.
+STOCK_WELCOME = (
+    'Добро пожаловать на сервер {domain}! Здесь можно общаться в личных '
+    'и групповых чатах, делиться файлами и звонить через Matrix. '
+    'Личные чаты поддерживают сквозное шифрование. Приглашения: @referral-bot:{domain}. '
+    'Этот бот присылает новости сервера и не отвечает на сообщения.'
+)
+
+
+def upgraded_text(domain='matrix.example.org'):
+    return WelcomeContext(
+        domain, domain, '@referral-bot:' + domain, '@matrix-admin:' + domain
+    ).render(DEFAULT_WELCOME)
 
 
 class DataMigrationTests(unittest.TestCase):
@@ -23,9 +38,10 @@ class DataMigrationTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve()
         self.path = self.root / 'data/admin-panel/panel.sqlite'
+        state_store.write_json(self.root / 'installation.json', {'domain': 'matrix.example.org'})
 
-    def legacy(self):
-        self.path.parent.mkdir(mode=0o700, parents=True)
+    def legacy(self, welcome='MiXeD Привет'):
+        self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         with sqlite3.connect(self.path) as db:
             # Frozen layout of the old runtime, independent of migration SQL.
             db.executescript("""
@@ -36,7 +52,7 @@ class DataMigrationTests(unittest.TestCase):
                     attempts INTEGER NOT NULL DEFAULT 0, next_at REAL NOT NULL DEFAULT 0);
                 CREATE INDEX outbox_pending ON outbox(state,next_at);
             """)
-            db.execute('INSERT INTO settings VALUES (?,?)', ('welcome', json.dumps('MiXeD Привет')))
+            db.execute('INSERT INTO settings VALUES (?,?)', ('welcome', json.dumps(welcome)))
             db.execute('INSERT INTO settings VALUES (?,?)', ('notified_version', '"1.1.0"'))
             db.execute('INSERT INTO users VALUES (?,?,?)', ('@alice:fictional.example', 100, 1))
             db.execute(
@@ -69,6 +85,133 @@ class DataMigrationTests(unittest.TestCase):
     def test_preflight_does_not_create_data(self):
         self.assertEqual(migrations.check(self.root), 0)
         self.assertFalse((self.root / 'data').exists())
+
+    def test_stock_welcome_variants_upgrade_once_with_original_checkpoint_and_no_deliveries(self):
+        state_store.write_json(self.root / 'installation.json', {'domain': 'matrix.example.org'})
+        variants = (
+            STOCK_WELCOME,
+            STOCK_WELCOME.replace('@referral-bot:{domain}. ', '@referral-bot:{domain} '),
+            STOCK_WELCOME.replace('@referral-bot:{domain}. ', '@referral-bot:{domain}\n'),
+        )
+        for index, old in enumerate(
+            variants + tuple(body.replace('{domain}', 'matrix.example.org') for body in variants)
+        ):
+            with self.subTest(variant=index):
+                self.path.unlink(missing_ok=True)
+                self.legacy(old)
+                before = self.rows()
+                checkpoint = self.root / ('checkpoint-' + str(index))
+                self.assertEqual(migrations.migrate(self.root, checkpoint), (0, 1))
+                after = self.rows()
+                expected = dict(before)
+                expected['settings'] = [
+                    (key, json.dumps(upgraded_text()) if key == 'welcome' else value)
+                    for key, value in before['settings']
+                ]
+                self.assertEqual(after, expected)
+                with sqlite3.connect(checkpoint / 'data-migrations/panel.sqlite') as db:
+                    self.assertEqual(
+                        db.execute("SELECT value FROM settings WHERE key='welcome'").fetchone()[0],
+                        json.dumps(old),
+                    )
+                saved = self.path.read_bytes()
+                self.assertEqual(migrations.migrate(self.root), (1, 1))
+                self.assertEqual(migrations.migrate(self.root), (1, 1))
+                self.assertEqual(self.path.read_bytes(), saved)
+                self.assertEqual(self.rows(), after)
+
+    def test_custom_welcome_and_close_variants_are_never_replaced(self):
+        state_store.write_json(self.root / 'installation.json', {'domain': 'matrix.example.org'})
+        for custom in (
+            'Мой MiXeD текст для {domain}.\nhttps://example.org/',
+            STOCK_WELCOME + '\nДополнительная инструкция.',
+            STOCK_WELCOME.replace('Приглашения:', 'Наши приглашения:'),
+            STOCK_WELCOME.replace('{domain}', 'foreign.example'),
+            DEFAULT_WELCOME,
+            42,
+            {'message': 'Retain invalid values too'},
+        ):
+            with self.subTest(custom=custom):
+                self.path.unlink(missing_ok=True)
+                self.legacy(custom)
+                before = self.rows()
+                migrations.migrate(self.root)
+                migrations.migrate(self.root)
+                self.assertEqual(self.rows(), before)
+
+    def test_welcome_failure_rolls_back_setting_schema_and_history_then_retry_succeeds(self):
+        self.legacy(STOCK_WELCOME)
+        before = self.rows()
+        inspect = migrations.inspect_database
+
+        def fail_after_replacement(db):
+            version = inspect(db)
+            saved = db.execute("SELECT value FROM settings WHERE key='welcome'").fetchone()
+            if saved and json.loads(saved[0]) == upgraded_text():
+                raise RuntimeError('fictional interruption before commit')
+            return version
+
+        checkpoint = self.root / 'checkpoint'
+        with patch.object(migrations, 'inspect_database', side_effect=fail_after_replacement):
+            with self.assertRaisesRegex(RuntimeError, 'before commit'):
+                migrations.migrate(self.root, checkpoint)
+        self.assertEqual(self.rows(), before)
+        self.assertEqual(migrations.check(self.root), 0)
+        with sqlite3.connect(checkpoint / 'data-migrations/panel.sqlite') as db:
+            self.assertEqual(
+                json.loads(
+                    db.execute("SELECT value FROM settings WHERE key='welcome'").fetchone()[0]
+                ),
+                STOCK_WELCOME,
+            )
+        self.assertEqual(migrations.migrate(self.root), (0, 1))
+        self.assertEqual(self.rows()['outbox'], before['outbox'])
+        self.assertIn(('welcome', json.dumps(upgraded_text())), self.rows()['settings'])
+
+    def test_invalid_configured_identity_retains_old_text_and_checkpoint_until_corrected(self):
+        self.legacy(STOCK_WELCOME)
+        before = self.rows()
+        config = self.root / 'config/referral-bot.json'
+        config.parent.mkdir(mode=0o700)
+        state_store.write_json(config, {'user_id': 'FICTIONAL_SECRET'})
+        checkpoint = self.root / 'checkpoint'
+        with self.assertRaisesRegex(RuntimeError, '^Invalid local welcome identity$'):
+            migrations.migrate(self.root, checkpoint)
+        self.assertEqual(self.rows(), before)
+        self.assertEqual(migrations.check(self.root), 0)
+        self.assertTrue((checkpoint / 'data-migrations/panel.sqlite').is_file())
+        state_store.write_json(config, {'user_id': '@referral-bot:matrix.example.org'})
+        migrations.migrate(self.root)
+        self.assertIn(('welcome', json.dumps(upgraded_text())), self.rows()['settings'])
+        self.assertEqual(self.rows()['outbox'], before['outbox'])
+
+    def test_exit_during_welcome_upgrade_rolls_back_and_recovers_without_duplicate_delivery(self):
+        self.legacy(STOCK_WELCOME)
+        before = self.rows()
+        script = """import json, os, sys
+import data_migrations as migrations
+from welcome_message import DEFAULT_WELCOME
+inspect = migrations.inspect_database
+def exit_after_replacement(db):
+    version = inspect(db)
+    saved = db.execute("SELECT value FROM settings WHERE key='welcome'").fetchone()
+    if saved and json.loads(saved[0]).startswith('Привет! Добро пожаловать в '):
+        os._exit(23)
+    return version
+migrations.inspect_database = exit_after_replacement
+migrations.migrate(sys.argv[1])
+"""
+        result = subprocess.run(
+            [sys.executable, '-c', script, str(self.root)],
+            cwd=Path(migrations.__file__).parent,
+        )
+        self.assertEqual(result.returncode, 23)
+        self.assertEqual(migrations.check(self.root), 0)
+        self.assertEqual(self.rows(), before)
+        migrations.migrate(self.root)
+        migrations.migrate(self.root)
+        self.assertEqual(self.rows()['outbox'], before['outbox'])
+        self.assertIn(('welcome', json.dumps(upgraded_text())), self.rows()['settings'])
 
     def test_online_checkpoint_contains_previous_schema_and_is_not_overwritten(self):
         self.legacy()
@@ -187,7 +330,13 @@ os._exit(23)
 
 class ReleaseDataMigrationTests(unittest.TestCase):
     def test_ui_release_updates_previous_versions_without_changing_private_data(self):
-        added = {'terminal_views.py', 'ui_actions.py', 'third-party-licenses.md'}
+        added = {
+            'terminal_views.py',
+            'ui_actions.py',
+            'third-party-licenses.md',
+            'welcome_message.py',
+            'welcome_settings.py',
+        }
         entries = update.validate_manifest(self.source)[0]
         (self.root / 'secrets').mkdir(mode=0o700)
         state_store.write_text(self.root / 'secrets/fictional.key', 'FICTIONAL_KEEP_KEY')
@@ -289,6 +438,118 @@ class ReleaseDataMigrationTests(unittest.TestCase):
         )
         state_store.write_json(root / 'installation.json', info)
         return 0
+
+    def test_source_update_upgrades_stock_before_start_and_retains_edit_on_repeat(self):
+        state_store.write_text(self.root / 'settings.env', 'DOMAIN=fictional.example\n')
+        migrations.migrate(self.root)
+        database = self.root / 'data/admin-panel/panel.sqlite'
+        old = STOCK_WELCOME.replace('@referral-bot:{domain}. ', '@referral-bot:{domain}\n')
+        with sqlite3.connect(database) as db:
+            db.execute('INSERT INTO settings VALUES (?,?)', ('welcome', json.dumps(old)))
+            db.execute('INSERT INTO settings VALUES (?,?)', ('enabled_at', '100'))
+            db.execute('INSERT INTO users VALUES (?,?,?)', ('@alice:fictional.example', 150, 1))
+            db.execute(
+                'INSERT INTO outbox(id,recipient,via,body,state) VALUES (?,?,?,?,?)',
+                ('delivered-before-update', '@alice:fictional.example', 'welcome', 'old', 'sent'),
+            )
+        expected = upgraded_text('fictional.example')
+
+        def start(root, log):
+            with sqlite3.connect(database) as db:
+                self.assertEqual(
+                    json.loads(
+                        db.execute("SELECT value FROM settings WHERE key='welcome'").fetchone()[0]
+                    ),
+                    expected,
+                )
+                self.assertEqual(
+                    db.execute('SELECT * FROM users').fetchall(),
+                    [('@alice:fictional.example', 150, 1)],
+                )
+                self.assertEqual(
+                    db.execute('SELECT id,state FROM outbox').fetchall(),
+                    [('delivered-before-update', 'sent')],
+                )
+            return self.start(root, log)
+
+        with (
+            patch.object(update, 'update_resource_check'),
+            patch.object(update, 'verified_backup'),
+            patch.object(update, 'run_up', side_effect=start),
+            patch.object(update, 'refresh_command'),
+        ):
+            update.perform_update(self.source, self.root, 'apply')
+            checkpoints = list(
+                (self.root / 'stages/updates').glob('*/data-migrations/panel.sqlite')
+            )
+            self.assertEqual(len(checkpoints), 1)
+            with sqlite3.connect(checkpoints[0]) as db:
+                self.assertEqual(
+                    json.loads(
+                        db.execute("SELECT value FROM settings WHERE key='welcome'").fetchone()[0]
+                    ),
+                    old,
+                )
+            expected = 'Изменено владельцем после обновления. {domain}'
+            with sqlite3.connect(database) as db:
+                db.execute(
+                    "UPDATE settings SET value=? WHERE key='welcome'", (json.dumps(expected),)
+                )
+            saved = database.read_bytes()
+            update.perform_update(self.source, self.root, 'apply')
+            self.assertEqual(database.read_bytes(), saved)
+
+    def test_adopted_source_migration_is_usable_by_running_domain_only_reader(self):
+        metadata = {
+            'domain': 'matrix.example.org',
+            'backend': 'existing-compose',
+            'existing': {'features': {'primary_domain': 'example.org'}},
+        }
+        state_store.write_json(self.root / 'installation.json', metadata)
+        config = self.root / 'config'
+        config.mkdir(mode=0o700)
+        state_store.write_json(
+            config / 'referral-bot.json', {'user_id': '@referral-bot:matrix.example.org'}
+        )
+        state_store.write_json(
+            config / 'admin-panel-identity.json',
+            {'administrator_mxid': '@owner:matrix.example.org'},
+        )
+        site = self.root / '.misbot/features/site.json'
+        site.parent.mkdir(parents=True, mode=0o700)
+        state_store.write_json(site, {'SITE_NAME': 'example.org'})
+        migrations.migrate(self.root)
+        database = self.root / 'data/admin-panel/panel.sqlite'
+        old = STOCK_WELCOME.replace('@referral-bot:{domain}. ', '@referral-bot:{domain}\n')
+        with sqlite3.connect(database) as db:
+            db.execute('INSERT INTO settings VALUES (?,?)', ('welcome', json.dumps(old)))
+            db.execute(
+                'INSERT INTO outbox(id,recipient,via,body,state) VALUES (?,?,?,?,?)',
+                ('existing-delivery', '@alice:matrix.example.org', 'welcome', 'retain', 'sent'),
+            )
+        update.run_data_migrations(
+            self.source, self.root, update.release(self.source), 'apply', self.root / 'checkpoint'
+        )
+        with sqlite3.connect(database) as db:
+            setting = json.loads(
+                db.execute("SELECT value FROM settings WHERE key='welcome'").fetchone()[0]
+            )
+        # Frozen rendering contract of the already-running old host controller.
+        delivered = setting.replace('{domain}', metadata['domain'])
+        expected = (
+            upgraded_text()
+            .replace('в matrix.example.org.', 'в example.org.')
+            .replace('@matrix-admin:', '@owner:')
+        )
+        self.assertEqual(delivered, expected)
+        saved = database.read_bytes()
+        update.run_data_migrations(self.source, self.root, update.release(self.source), 'apply')
+        self.assertEqual(database.read_bytes(), saved)
+        with sqlite3.connect(database) as db:
+            self.assertEqual(
+                db.execute('SELECT id,state FROM outbox').fetchall(),
+                [('existing-delivery', 'sent')],
+            )
 
     def test_verified_backup_precedes_migration_and_migration_precedes_start(self):
         events = []

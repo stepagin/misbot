@@ -13,6 +13,29 @@ DEFAULT_WELCOME = (
     '{administrator_url}'
 )
 
+# Keep these exact historical texts: punctuation fixes are stock variants,
+# while any other edit belongs to the operator and must remain unchanged.
+_LEGACY_WELCOME = (
+    'Добро пожаловать на сервер {domain}! Здесь можно общаться в личных '
+    'и групповых чатах, делиться файлами и звонить через Matrix. '
+    'Личные чаты поддерживают сквозное шифрование. Приглашения: @referral-bot:{domain}. '
+    'Этот бот присылает новости сервера и не отвечает на сообщения.'
+)
+LEGACY_WELCOMES = (
+    _LEGACY_WELCOME,
+    _LEGACY_WELCOME.replace('@referral-bot:{domain}. ', '@referral-bot:{domain} '),
+    _LEGACY_WELCOME.replace('@referral-bot:{domain}. ', '@referral-bot:{domain}\n'),
+)
+
+
+def is_legacy_welcome(value: object, domain: str | None = None) -> bool:
+    if not isinstance(value, str):
+        return False
+    return value in LEGACY_WELCOMES or (
+        isinstance(domain, str)
+        and any(value == template.replace('{domain}', domain) for template in LEGACY_WELCOMES)
+    )
+
 
 def matrix_url(mxid: str, domain: str) -> str:
     if not isinstance(mxid, str) or not re.fullmatch(

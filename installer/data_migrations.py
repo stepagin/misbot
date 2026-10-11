@@ -7,6 +7,7 @@ compatible with schema 0; incompatible changes need a separate recovery plan.
 
 import argparse
 import hashlib
+import json
 import os
 from pathlib import Path
 import sqlite3
@@ -14,6 +15,8 @@ import stat
 import uuid
 
 import configuration
+from welcome_message import DEFAULT_WELCOME, is_legacy_welcome
+from welcome_settings import welcome_context
 
 SCHEMA_VERSION = 1
 MIGRATIONS = (
@@ -141,6 +144,36 @@ def snapshot(root, checkpoint):
     os.replace(temporary, saved)
 
 
+def upgrade_builtin_welcome(db, root):
+    """Reconcile only obsolete stock text, inside the caller's transaction.
+
+    This changes a compatible setting, not the schema or published DDL history.
+    Outbox rows and registration/delivery markers are deliberately untouched.
+    """
+    row = db.execute("SELECT value FROM settings WHERE key='welcome'").fetchone()
+    if row is None:
+        return
+    try:
+        saved = json.loads(row[0])
+    except ValueError:
+        return  # Retain invalid/custom values; this is not a configuration repair.
+    if not isinstance(saved, str):
+        return
+    metadata = Path(root) / 'installation.json'
+    domain = configuration.read_private_json(metadata).get('domain') if metadata.exists() else None
+    if not is_legacy_welcome(saved, domain):
+        return
+    if not isinstance(domain, str):
+        raise RuntimeError('Welcome upgrade requires the saved installation identity')
+    # An adopted source update leaves its running host controller in place.
+    # Save fully rendered text so its older {domain}-only reader works too.
+    replacement = welcome_context(Path(root), domain).render(DEFAULT_WELCOME)
+    db.execute(
+        "UPDATE settings SET value=? WHERE key='welcome' AND value=?",
+        (json.dumps(replacement), row[0]),
+    )
+
+
 def migrate(root, checkpoint=None):
     validate_registry()
     path = database_path(root)
@@ -169,6 +202,7 @@ def migrate(root, checkpoint=None):
                         (number, identifier, fingerprint(migration)),
                     )
                     db.execute('PRAGMA user_version=' + str(number))
+            upgrade_builtin_welcome(db, root)
             inspect_database(db)
             db.commit()
         except BaseException:
