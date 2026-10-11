@@ -28,23 +28,5 @@ jobs:
         run: |
           python -m pip install --require-hashes --only-binary=:all: -r ci/requirements.txt
           npm ci --ignore-scripts
-      - name: Check source quality
-        run: python ci/check.py
-      - name: Run isolated tests
-        run: |
-          python -m unittest discover -s installer/tests -p 'test_*.py'
-          python -m unittest discover -s bots/telegram/tests -p 'test_*.py'
-          python -m unittest discover -s deployment/tests -p 'test_*.py'
-          python -m unittest discover -s ci/tests -p 'test_*.py'
-          npm test --prefix bots/matrix-referral
-          node --test bots/matrix-federation/tests/*.test.js
-          bash -n installer/install.sh
-      - name: Verify release archive
-        run: |
-          python installer/build.py --check
-          python installer/build.py
-          cd dist
-          sha256sum -c matrix-installer.tar.gz.sha256
-          tar -xzf matrix-installer.tar.gz
-          cd matrix-installer
-          sha256sum -c SHA256SUMS
+      - name: Check sources, tests and reproducible archive
+        run: python ci/check.py all --check-manifest
