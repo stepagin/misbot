@@ -14,6 +14,42 @@ from existing_compose import digest
 
 
 class ExistingUpdateTests(unittest.TestCase):
+    def test_public_source_license_is_accepted_without_allowing_private_paths(self):
+        for license_path, accepted in (('LICENSE', True), ('LICENSE.env', False),
+                                       ('secrets/LICENSE', False)):
+            with self.subTest(path=license_path), tempfile.TemporaryDirectory() as temporary:
+                source = Path(temporary).resolve() / 'source'
+                source.mkdir(mode=0o700)
+                names = update.update.ESSENTIAL | {
+                    'existing_compose.py', 'existing_s3.py', 'existing_update.py', license_path}
+                for name in names:
+                    path = source / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text('# fictional public source\n')
+                (source / 'release.json').write_text(json.dumps({
+                    'family': update.update.FAMILY, 'version': '1.0.0',
+                    'data_schema_version': 1,
+                    'update_scope': 'source-configuration-and-approved-components'}))
+                (source / 'SHA256SUMS').write_text(''.join(
+                    digest(source / name) + '  ' + name + '\n' for name in sorted(names)))
+                original_stat = Path.stat
+                source_info = source.stat()
+                root_owned_info = os.stat_result((*source_info[:4], 0, *source_info[5:]))
+                def source_stat(path, *args, **kwargs):
+                    if path == source:
+                        return root_owned_info
+                    return original_stat(path, *args, **kwargs)
+                with (patch.object(Path, 'stat', source_stat),
+                      patch.object(update.command_wrapper, 'regular',
+                                   return_value=SimpleNamespace(st_uid=0, st_mode=0o600))):
+                    if accepted:
+                        entries, revision = update.sources(source)
+                        self.assertIn('LICENSE', entries)
+                        self.assertEqual(revision, digest(source / 'SHA256SUMS'))
+                    else:
+                        with self.assertRaisesRegex(update.Error, 'приватный путь'):
+                            update.sources(source)
+
     def test_current_sources_still_apply_declared_data_migrations_after_verified_backup(self):
         with tempfile.TemporaryDirectory() as temporary:
             base=Path(temporary); root=base/'installation'; root.mkdir()

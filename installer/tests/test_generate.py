@@ -53,6 +53,8 @@ class GeneratorTests(unittest.TestCase):
                 '/tests/' in p or '/verification/' in p or '/evidence/' in p or
                 'SYNAPSE_INSTALLER_' in p or p.endswith('live-test.js') for p in names))
             self.assertEqual(json.loads(archive.extractfile('matrix-installer/release.json').read())['version'], '1.1.0')
+            self.assertEqual(archive.extractfile('matrix-installer/LICENSE').read(),
+                             (BUNDLE.parent/'LICENSE').read_bytes())
             manifest=archive.extractfile('matrix-installer/SHA256SUMS').read().decode()
             self.assertEqual({'matrix-installer/'+line.split('  ',1)[1] for line in manifest.splitlines()},
                              names-{'matrix-installer/SHA256SUMS'})

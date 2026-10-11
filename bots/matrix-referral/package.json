@@ -2,6 +2,7 @@
   "name": "misbot-referral-bot",
   "version": "1.0.0",
   "private": true,
+  "license": "MIT",
   "description": "Encrypted Matrix invitation management for misbot.ru",
   "engines": { "node": ">=24" },
   "scripts": { "start": "node main.js", "test": "node --test tests/*.test.js" },

@@ -27,7 +27,7 @@ def sources(folder):
         parts=Path(name).parts
         public_directories={'site','configuration-examples','synapse-s3','referral-bot','referral-control','federation-bot','telegram-bot'}
         public_file=(len(parts)==1 and (Path(name).suffix in ('.py','.md') or
-                     name in ('install.sh','versions.json','release.json','misbot-api.openapi.json')))
+                     name in ('LICENSE','install.sh','versions.json','release.json','misbot-api.openapi.json')))
         if parts[0] in protected or not (public_file or (len(parts)>1 and parts[0] in public_directories)):
             raise Error('Source комплект содержит приватный путь установки.')
         info = command_wrapper.regular(path)
