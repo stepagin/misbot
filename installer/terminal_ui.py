@@ -63,18 +63,13 @@ class UI:
         self.reader = reader
         self.runner = runner
         self.view = view or TerminalView()
-        self.draft = Path(
-            draft
-            or Path.home()
-            / '.local/state/misbot/wizard'
-            / (hashlib.sha256(str(self.root).encode()).hexdigest() + '.json')
-        )
+        self.explicit_draft = draft is not None
+        self.draft = Path(draft) if self.explicit_draft else self.draft_path(self.root)
         self.model = {}
         self.backup = {}
         self.confirmed_domains = set()
         self.step = 0
         if self.draft.exists():
-            import s3_config
             from configuration import read_private_json
 
             saved = read_private_json(self.draft)
@@ -91,6 +86,14 @@ class UI:
             from configuration import load
 
             self.model = load(self.root, complete=False)
+
+    @staticmethod
+    def draft_path(root):
+        return (
+            Path.home()
+            / '.local/state/misbot/wizard'
+            / (hashlib.sha256(str(root).encode()).hexdigest() + '.json')
+        )
 
     def ask(self, label, default='', secret=False):
         return question(label, default, secret, self.reader)
@@ -192,9 +195,16 @@ class UI:
     def save(self):
         from configuration import directory
 
+        previous = self.draft
+        destination = previous if self.explicit_draft else self.draft_path(self.root)
+        if destination != previous and destination.exists():
+            raise RuntimeError(
+                'Для этого каталога уже есть черновик. Сохраните текущий и откройте '
+                'ui --directory для нужного каталога, чтобы продолжить его.'
+            )
         directory(self.draft.parent)
         state_store.write_json(
-            self.draft,
+            destination,
             {
                 'format': 1,
                 'directory': str(self.root),
@@ -204,6 +214,9 @@ class UI:
                 'confirmed_domains': sorted(self.confirmed_domains),
             },
         )
+        self.draft = destination
+        if previous != destination:
+            previous.unlink(missing_ok=True)
 
     def initialized(self):
         from configuration import read_private_json
@@ -519,6 +532,17 @@ class UI:
                     and not (path / 'installation.json').exists()
                 ):
                     self.view.message('Каталог чужой и непустой. Выберите другой.')
+                    continue
+                if (
+                    not self.explicit_draft
+                    and self.draft_path(path) != self.draft
+                    and self.draft_path(path).exists()
+                ):
+                    self.view.message(
+                        'Для этого каталога уже есть черновик. Чтобы продолжить его, '
+                        'откройте ui --directory ' + shlex.quote(str(path)) + '.',
+                        'yellow',
+                    )
                     continue
                 self.root = path
                 self.save()

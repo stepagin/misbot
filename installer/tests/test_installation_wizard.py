@@ -47,6 +47,87 @@ class InstallationWizardTests(unittest.TestCase):
         self.assertNotIn('Использовать именно', self.output.getvalue())
         self.assertFalse(self.root.exists())
 
+    def test_default_draft_follows_selected_directory_and_resumes(self):
+        with patch.object(Path, 'home', return_value=self.base):
+            interface = terminal_ui.UI(self.base / 'initial', view=TerminalView(plain=True))
+            original = interface.draft
+            values = iter(['fictional.example.org', str(self.root)])
+            interface.reader = lambda *args: next(values)
+            interface.setup_step(0)
+            interface.step = 1
+            interface.save()
+            resumed = terminal_ui.UI(self.root, view=TerminalView(plain=True))
+            self.assertEqual(resumed.step, 1)
+            self.assertEqual(resumed.model['DOMAIN'], 'fictional.example.org')
+            self.assertEqual(resumed.draft, interface.draft)
+            self.assertFalse(original.exists())
+            self.assertEqual(interface.draft.stat().st_mode & 0o777, 0o600)
+            self.assertFalse(self.root.exists())
+
+    def test_directory_choice_preserves_another_existing_draft(self):
+        with patch.object(Path, 'home', return_value=self.base):
+            other = terminal_ui.UI(self.root, view=TerminalView(plain=True))
+            other.model = {
+                'DOMAIN': 'other.example.org',
+                'GOOGLE_CLIENT_SECRET': 'FICTIONAL_PRIVATE',
+            }
+            other.step = 4
+            other.save()
+            before = other.draft.read_bytes()
+            target = self.base / 'another'
+            interface = terminal_ui.UI(self.base / 'initial', view=TerminalView(plain=True))
+            values = iter(['fictional.example.org', str(self.root), str(target)])
+            interface.reader = lambda *args: next(values)
+            interface.setup_step(0)
+            self.assertEqual(other.draft.read_bytes(), before)
+            self.assertEqual(interface.root, target)
+            self.assertEqual(terminal_ui.UI(target).model['DOMAIN'], 'fictional.example.org')
+            self.assertNotIn('FICTIONAL_PRIVATE', self.output.getvalue())
+
+    def test_explicit_draft_path_is_preserved_after_directory_choice(self):
+        previous = self.interface.draft
+        self.answers(['fictional.example.org', str(self.root)])
+        self.interface.setup_step(0)
+        self.assertEqual(self.interface.draft, previous)
+        self.assertEqual(self.saved()['directory'], str(self.root))
+
+    def test_legacy_draft_with_different_directory_migrates_on_save(self):
+        with patch.object(Path, 'home', return_value=self.base):
+            initial = self.base / 'initial'
+            legacy = terminal_ui.UI(initial, view=TerminalView(plain=True))
+            legacy.root = self.root
+            legacy.explicit_draft = True
+            legacy.model = {
+                'DOMAIN': 'fictional.example.org',
+                'GOOGLE_CLIENT_SECRET': 'FICTIONAL_PRIVATE',
+            }
+            legacy.step = 2
+            legacy.save()
+            resumed = terminal_ui.UI(initial, view=TerminalView(plain=True))
+            self.assertEqual(resumed.root, self.root)
+            resumed.save()
+            final = terminal_ui.UI(self.root, view=TerminalView(plain=True))
+            self.assertEqual(final.step, 2)
+            self.assertEqual(final.model, legacy.model)
+            self.assertFalse(legacy.draft.exists())
+
+    def test_failed_draft_relocation_preserves_previous_file(self):
+        with patch.object(Path, 'home', return_value=self.base):
+            interface = terminal_ui.UI(self.base / 'initial', view=TerminalView(plain=True))
+            interface.model = {'DOMAIN': 'fictional.example.org'}
+            interface.save()
+            previous = interface.draft
+            before = previous.read_bytes()
+            interface.root = self.root
+            with patch.object(
+                state_store, 'write_json', side_effect=OSError('fictional write failure')
+            ):
+                with self.assertRaises(OSError):
+                    interface.save()
+            self.assertEqual(interface.draft, previous)
+            self.assertEqual(previous.read_bytes(), before)
+            self.assertFalse(interface.draft_path(self.root).exists())
+
     def test_mixed_script_domain_is_shown_and_rejected_before_save(self):
         self.interface.model = {'DOMAIN': 'previous.example.org'}
         self.interface.save()
