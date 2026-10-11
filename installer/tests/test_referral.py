@@ -77,6 +77,9 @@ class ReferralTests(unittest.TestCase):
         self.assertEqual(first['config']['user_id'], '@referral-bot:chat.example.org')
         self.assertEqual(first['config']['device_id'], referral.DEVICE_ID)
         self.assertEqual(first['config']['invitation_lifetime_seconds'], 604800)
+        self.assertEqual(first['config']['site_name'], 'chat.example.org')
+        self.assertEqual(first['config']['site_url'], 'https://chat.example.org/')
+        self.assertEqual(first['config']['web_url'], 'https://web.chat.example.org')
         self.assertNotIn('urn:mas:admin', first['metadata']['scope'])
         self.assertNotIn('urn:synapse:admin', first['metadata']['scope'])
         self.assertEqual((self.control / 'session.json').stat().st_mode & 0o777, 0o600)
@@ -183,6 +186,69 @@ class ReferralTests(unittest.TestCase):
         self.assertEqual(second['config']['invitation_lifetime_seconds'], 3600)
         self.assertEqual(second['config']['invitation_usage_limit'], 3)
         self.assertEqual(len(self.api.sessions), 1)
+
+    def test_new_installation_uses_site_name_in_invitation_config(self):
+        referral.configure(self.root, self.metadata, {'SITE_NAME': 'Наш сервер'}, preview=True)
+        config = json.loads((self.root / 'config/referral-bot.json').read_text())
+        self.assertEqual(config['site_name'], 'Наш сервер')
+        self.assertEqual(
+            module.provision(self.control, self.api)['config']['site_name'], 'Наш сервер'
+        )
+
+    def test_existing_config_updates_presentation_without_replacing_identity_or_data(self):
+        first = module.provision(self.control, self.api)
+        config = self.root / 'config/referral-bot.json'
+        referral.private(config, dict(first['config'], custom_field='preserved'))
+        referral.private(self.root / 'secrets/referral-session.json', first['metadata'])
+        database = self.control / 'data/bot-control.sqlite3'
+        database.write_bytes(b'fictional unchanged database fixture')
+        checkpoint = self.root / 'data/referral-bot/state.json'
+        checkpoint.write_text('{"processed:$fictional": 1}')
+        self.metadata['referral_provisioned'] = True
+        journal = self.control / 'session.json'
+        before = {path: path.read_bytes() for path in (database, checkpoint, journal)}
+        referral.configure(self.root, self.metadata, {'SITE_NAME': 'Новое имя'}, preview=True)
+        updated = json.loads(config.read_text())
+        for key in ('user_id', 'access_token', 'device_id', 'homeserver_url'):
+            self.assertEqual(updated[key], first['config'][key])
+        self.assertEqual(updated['site_name'], 'Новое имя')
+        self.assertEqual(updated['custom_field'], 'preserved')
+        second = module.provision(self.control, self.api)
+        self.assertEqual(second['config']['site_name'], 'Новое имя')
+        self.assertEqual(len(self.api.sessions), 1)
+        self.assertEqual({path: path.read_bytes() for path in before}, before)
+        content, modified = config.read_bytes(), config.stat().st_mtime_ns
+        referral.configure(self.root, self.metadata, {'SITE_NAME': 'Новое имя'}, preview=True)
+        self.assertEqual((config.read_bytes(), config.stat().st_mtime_ns), (content, modified))
+
+    def test_legacy_policy_without_presentation_fields_keeps_existing_session(self):
+        policy = json.loads((self.control / 'bot-policy.json').read_text())
+        for key in ('site_name', 'site_url', 'web_url'):
+            policy['servers'][self.metadata['domain']].pop(key)
+        (self.control / 'bot-policy.json').write_text(json.dumps(policy))
+        first = module.provision(self.control, self.api)
+        second = module.provision(self.control, self.api)
+        self.assertEqual(first, second)
+        self.assertNotIn('site_name', second['config'])
+        self.assertEqual(len(self.api.sessions), 1)
+
+    def test_adopted_site_and_web_chat_can_differ_from_matrix_identity(self):
+        policy = json.loads((self.control / 'bot-policy.json').read_text())
+        policy['servers'][self.metadata['domain']].update(
+            site_name='Наш сервер',
+            site_url='https://community.example.org/',
+            web_url='https://chat.example.org',
+        )
+        (self.control / 'bot-policy.json').write_text(json.dumps(policy))
+        result = module.provision(self.control, self.api)
+        self.assertEqual(result['config']['site_name'], 'Наш сервер')
+        self.assertEqual(result['config']['site_url'], 'https://community.example.org/')
+        self.assertEqual(result['config']['web_url'], 'https://chat.example.org')
+        self.assertEqual(result['config']['server_name'], 'chat.example.org')
+        self.assertEqual(result['config']['user_id'], '@referral-bot:chat.example.org')
+        for options in ({'federation': True}, {'welcome': True}):
+            separate = module.provision(self.control, API(), **options)
+            self.assertNotIn('site_name', separate['config'])
 
 
 if __name__ == '__main__':

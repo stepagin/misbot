@@ -115,6 +115,10 @@ def provision(root, api, federation=False, welcome=False, username=None):
         invitation_lifetime_seconds=policy['invitation_lifetime_seconds'],
         invitation_usage_limit=policy['invitation_usage_limit'],
     )
+    if not federation and not welcome:
+        for key in ('site_name', 'site_url', 'web_url'):
+            if key in policy:
+                result['config'][key] = policy[key]
     return result
 
 

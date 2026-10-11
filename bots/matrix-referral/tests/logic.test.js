@@ -64,7 +64,7 @@ test("local encrypted direct chat creates one invitation per event", async () =>
     assert.doesNotMatch(sent[0].body, /Отозвать|\отозвать|own-token/);
 });
 
-test("old slash input only shows Russian help; links contain no invitation", async () => {
+test("old slash input only shows Russian help; invitation links contain no code", async () => {
     const { bot, event, calls, sent, item } = setup();
     event.content.body = "/invite";
     await bot.message("!room", event);
@@ -75,12 +75,129 @@ test("old slash input only shows Russian help; links contain no invitation", asy
     assert.match(sent[0].body, /пригласить/);
     assert.match(sent[0].body, /помощь/);
     const message = tokenMessage(item, "example.org");
-    assert.match(message.body, /Реферальный бот/);
-    assert.match(message.body, /Следующая команда боту: токены/);
-    const links = message.body.match(/https:\/\/\S+/g);
+    assert.doesNotMatch(message.body, /Реферальный бот|Следующая команда|токены|отозвать/);
+    const links = [...message.formatted_body.matchAll(/href="([^"]+)"/g)].map((match) => match[1]);
     assert.equal(links.length, 2);
     for (const link of links) assert.equal(link.includes(item.attributes.token), false);
-    assert.match(message.body, /Один код — один человек/);
+    assert.deepEqual(links, ["https://example.org/", "https://web.example.org"]);
+    assert.match(message.body, /Для одной регистрации/);
+});
+
+test("invitation uses configured title, landing and web chat with Matrix formatting", async () => {
+    const { bot, event, config, item, sent } = setup();
+    Object.assign(config, {
+        site_name: "Наш сервер",
+        site_url: "https://community.example.org/",
+        web_url: "https://community.example.org"
+    });
+    item.attributes.token = "MIS-fictional-code";
+    await bot.message("!room", event);
+    assert.equal(
+        sent[0].body,
+        `Приглашение в Наш сервер
+
+Код: MIS-fictional-code
+
+Для одной регистрации. Действует до 01.01.2027 02:30 МСК.
+
+На телефоне:
+1. Установи Element X — ссылки на community.example.org (https://community.example.org/).
+2. В приложении укажи сервер misbot.ru.
+3. Создай аккаунт и введи код приглашения при регистрации.
+
+На компьютере: открой веб-чат (https://community.example.org) и выбери «Создать учётную запись».`
+    );
+    assert.equal(sent[0].format, "org.matrix.custom.html");
+    assert.match(sent[0].formatted_body, /<strong>Приглашение в Наш сервер<\/strong>/);
+    assert.match(sent[0].formatted_body, /Код: <code>MIS-fictional-code<\/code>/);
+    assert.match(sent[0].formatted_body, /Действует до <code>01\.01\.2027 02:30 МСК<\/code>\./);
+    assert.match(sent[0].formatted_body, /<strong>На телефоне:<\/strong>/);
+    assert.match(sent[0].formatted_body, /<ol>[\s\S]*<li>[\s\S]*<\/ol>/);
+    assert.match(sent[0].formatted_body, /сервер <code>misbot\.ru<\/code>/);
+    assert.match(
+        sent[0].formatted_body,
+        /<a href="https:\/\/community\.example\.org\/">community\.example\.org<\/a>/
+    );
+    assert.match(
+        sent[0].formatted_body,
+        /<strong>На компьютере:<\/strong> открой <a href="https:\/\/community\.example\.org">веб-чат<\/a>/
+    );
+});
+
+test("custom web chat paths and HTML characters remain safe", () => {
+    const { item } = setup();
+    const message = tokenMessage(item, "example.org", {
+        site_name: '<Наш & "сервер">',
+        site_url: "https://community.example.org/",
+        web_url: "https://chat.example.org/?from=invite&lang=ru#/register"
+    });
+    assert.match(message.formatted_body, /&lt;Наш &amp; &quot;сервер&quot;&gt;/);
+    assert.match(message.formatted_body, /<code>MIS-test_&lt;&amp;&gt;<\/code>/);
+    assert.match(
+        message.formatted_body,
+        /href="https:\/\/chat\.example\.org\/\?from=invite&amp;lang=ru#\/register"/
+    );
+    assert.doesNotMatch(message.formatted_body, /<Наш/);
+});
+
+test("invitation describes real limits and an unlimited lifetime", () => {
+    const { item } = setup();
+    item.attributes.usage_limit = 3;
+    item.attributes.expires_at = null;
+    const message = tokenMessage(item, "example.org");
+    assert.match(message.body, /Регистраций по этому коду: 3\. Без срока действия\./);
+    assert.doesNotMatch(message.body, /Для одной регистрации|Действует до/);
+    assert.match(message.formatted_body, /Регистраций по этому коду: 3\. Без срока действия\./);
+});
+
+test("invitation rejects links with credentials or a non-HTTPS scheme", () => {
+    const { item } = setup();
+    for (const key of ["site_url", "web_url"]) {
+        for (const value of [
+            "http://example.org",
+            "javascript:alert(1)",
+            "https://user:fictional@example.org/"
+        ]) {
+            assert.throws(
+                () => tokenMessage(item, "example.org", { [key]: value }),
+                /Invalid invitation link/
+            );
+        }
+    }
+});
+
+test("upgraded presentation preserves processed events across a bot restart", async () => {
+    const { bot, client, store, config, calls, event, sent } = setup();
+    await bot.message("!room", event);
+    const restart = new ReferralBot(client, bot.control, store, {
+        ...config,
+        site_name: "Обновлённое имя",
+        site_url: "https://community.example.org/",
+        web_url: "https://chat.example.org/"
+    });
+    await restart.message("!room", event);
+    assert.equal(calls.filter((call) => call.action === "matrix_invite").length, 1);
+    assert.equal(sent.length, 1);
+    await restart.message("!room", { ...event, event_id: "$next-invite" });
+    assert.equal(calls.filter((call) => call.action === "matrix_invite").length, 2);
+    assert.match(sent[1].body, /Приглашение в Обновлённое имя/);
+});
+
+test("retry after failed delivery keeps the controller request ID", async () => {
+    const { bot, client, event, calls, sent, saved } = setup();
+    const send = client.sendMessage;
+    client.sendMessage = async () => {
+        throw new Error("fictional delivery failure");
+    };
+    await assert.rejects(bot.message("!room", event), /fictional delivery failure/);
+    assert.equal(saved.has("processed:" + event.event_id), false);
+    client.sendMessage = send;
+    await bot.message("!room", event);
+    assert.deepEqual(
+        calls.filter((call) => call.action === "matrix_invite").map((call) => call.request_id),
+        ["matrix:$unique", "matrix:$unique"]
+    );
+    assert.equal(sent.length, 1);
 });
 
 test("foreign accounts, group rooms and plaintext rooms cannot issue codes", async () => {

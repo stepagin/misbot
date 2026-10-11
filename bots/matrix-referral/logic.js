@@ -31,20 +31,47 @@ function remaining(item, now = Date.now()) {
         mins = minutes % 60;
     return `осталось ${days ? `${days} д ${hours} ч` : hours ? `${hours} ч ${mins} мин` : `${mins} мин`}`;
 }
-function tokenMessage(item, server, bot = "@referral-bot:" + server) {
+function tokenMessage(item, server, config = {}) {
     const a = item.attributes;
+    const name = config.site_name || server;
+    const site = new URL(config.site_url || `https://${server}/`);
+    const web = new URL(config.web_url || `https://web.${server}`);
+    for (const url of [site, web]) {
+        if (url.protocol !== "https:" || url.username || url.password)
+            throw new Error("Invalid invitation link");
+    }
+    const siteUrl = site.href;
+    const webUrl = web.href.replace(/\/$/, "");
     const uses =
         a.usage_limit === 1
-            ? "Один код — один человек."
+            ? "Для одной регистрации."
             : `Регистраций по этому коду: ${a.usage_limit}.`;
-    const body = `Приглашение на ${server}\n\n${a.token}\n\nДо: ${expiry(a.expires_at)}\n${uses}\n\nОткрой Element X, укажи сервер ${server} и введи код при регистрации.
+    const validity = a.expires_at ? `Действует до ${expiry(a.expires_at)}.` : "Без срока действия.";
+    const validityHtml = a.expires_at
+        ? `Действует до <code>${escapeHtml(expiry(a.expires_at))}</code>.`
+        : escapeHtml(validity);
+    const body = `Приглашение в ${name}
 
-Регистрация: https://web.${server}
-Реферальный бот помогает управлять своими кодами: https://matrix.to/#/${encodeURIComponent(bot)}
-Следующая команда боту: токены.`;
-    const html = escapeHtml(body)
-        .replace(escapeHtml(a.token), `<code>${escapeHtml(a.token)}</code>`)
-        .replace(/\n/g, "<br>");
+Код: ${a.token}
+
+${uses} ${validity}
+
+На телефоне:
+1. Установи Element X — ссылки на ${site.hostname} (${siteUrl}).
+2. В приложении укажи сервер ${server}.
+3. Создай аккаунт и введи код приглашения при регистрации.
+
+На компьютере: открой веб-чат (${webUrl}) и выбери «Создать учётную запись».`;
+    const html = `<p><strong>Приглашение в ${escapeHtml(name)}</strong></p>
+<p>Код: <code>${escapeHtml(a.token)}</code></p>
+<p>${escapeHtml(uses)} ${validityHtml}</p>
+<p><strong>На телефоне:</strong></p>
+<ol>
+<li>Установи Element X — ссылки на <a href="${escapeHtml(siteUrl)}">${escapeHtml(site.hostname)}</a>.</li>
+<li>В приложении укажи сервер <code>${escapeHtml(server)}</code>.</li>
+<li>Создай аккаунт и введи код приглашения при регистрации.</li>
+</ol>
+<p><strong>На компьютере:</strong> открой <a href="${escapeHtml(webUrl)}">веб-чат</a> и выбери «Создать учётную запись».</p>`;
     return notice(body, html);
 }
 
@@ -211,7 +238,7 @@ class ReferralBot {
             if (arg) this.store.setValue(JSON.stringify(["label", sender, item.id]), arg);
             await this.client.sendMessage(
                 room,
-                tokenMessage(item, this.config.server_name, this.config.user_id)
+                tokenMessage(item, this.config.server_name, this.config)
             );
             if (arg) await this.client.sendNotice(room, `Название для тебя: ${arg}`);
         } else if (["токены"].includes(command)) {

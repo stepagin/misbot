@@ -814,6 +814,15 @@ class Features:
                 self.root / installation.model['telegram_control']['directory'] / 'bot-policy.json'
             ).read_text()
         )['servers'][installation.state['domain']]
+        site = self.folder / 'site.json'
+        values = json.loads(site.read_text()) if site.exists() else {}
+        policy.update(
+            site_name=schema.field_value(
+                'SITE_NAME', values.get('SITE_NAME') or plan['primary_domain']
+            ),
+            site_url='https://' + plan['primary_domain'] + '/',
+            web_url=plan['web_url'],
+        )
         save(control / 'bot-policy.json', {'servers': {installation.state['domain']: policy}})
         spec = importlib.util.spec_from_file_location(
             'misbot_provision', self.root / 'referral-control/provision.py'

@@ -15,7 +15,6 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function main() {
     const cfg = JSON.parse(fs.readFileSync("/test/config.json", "utf8"));
-    const domain = cfg.server_name || "misbot.ru";
     const botDevice = cfg.bot_device_id || "MISBOT-REFERRAL-01";
     const store = new SimpleFsStorageProvider("/test/state.json");
     const crypto = new RustSdkCryptoStorageProvider("/test/crypto", StoreType.Sqlite);
@@ -72,8 +71,9 @@ async function main() {
         await sendAndWait("помощь", (c) => c.body.includes("Реферальный бот"));
         console.log("Encrypted command and decrypted help reply received");
         const label = "Проверка диалога";
-        const invitation = await sendAndWait("пригласить " + label, (c) =>
-            c.body.includes("Приглашение на " + domain)
+        const invitation = await sendAndWait(
+            "пригласить " + label,
+            (c) => c.body.startsWith("Приглашение в ") && c.body.includes("Код: ")
         );
         if (!invitation.content.formatted_body.includes("<code>"))
             throw new Error("Code formatting missing");

@@ -9,6 +9,7 @@ import sqlite3
 import tarfile
 import tempfile
 import state_store
+import configuration_schema
 
 CLIENT_ID = '01K5WZ00000000000000000004'
 DEVICE_ID = 'MATRIX-REFERRAL-01'
@@ -86,6 +87,11 @@ def configure(root, metadata, settings, preview=False):
         'invitation_usage_limit': int(settings.get('INVITATION_USAGE_LIMIT', '1')),
         'registration_required': settings.get('REGISTRATION_TOKEN_REQUIRED', 'true') == 'true',
         'federation_servers': [],
+        'site_name': configuration_schema.field_value(
+            'SITE_NAME', settings.get('SITE_NAME') or domain
+        ),
+        'site_url': 'https://' + domain + '/',
+        'web_url': 'https://web.' + domain,
     }
     control = root / 'data/referral-control'
     for directory in [control, control / 'data', root / 'data/referral-bot']:
@@ -109,8 +115,14 @@ def configure(root, metadata, settings, preview=False):
     )
     private(control / 'bot-policy.json', {'servers': {domain: policy}})
     config = root / 'config/referral-bot.json'
-    if not config.exists():
-        private(config, {'pending_provisioning': True, 'user_id': '@referral-bot:' + domain})
+    current = (
+        json.loads(config.read_text())
+        if config.exists()
+        else {'pending_provisioning': True, 'user_id': '@referral-bot:' + domain}
+    )
+    updated = dict(current, **{key: policy[key] for key in ('site_name', 'site_url', 'web_url')})
+    if not config.exists() or current != updated:
+        private(config, updated)
     if not preview and os.geteuid() == 0:
         os.chown(socket, 0, 10001)
         os.chown(root / 'data/referral-bot', 10002, 10001)
