@@ -30,7 +30,7 @@ def links(model):
             'homeserver':'https://matrix.'+model['DOMAIN']}
 
 
-def render(model, public_links=None):
+def render(model, public_links=None, template=None):
     model=schema.validate(model,preview=True);urls=public_links or links(model);escape=lambda value:html.escape(value,quote=True)
     if public_links is not None:
         if set(public_links)!=set(links(model)):
@@ -44,7 +44,8 @@ def render(model, public_links=None):
         note=('Для регистрации попросите код приглашения у участника сервера. Введите его в поле регистрационного кода в форме регистрации; не добавляйте код в адрес страницы.'
               if model['REGISTRATION_TOKEN_REQUIRED']=='true' else 'Создайте учётную запись через кнопку «Зарегистрироваться».')
     support=('<a href="'+escape(model['SITE_SUPPORT_URL'])+'">Связаться с поддержкой</a>') if model['SITE_SUPPORT_URL'] else ''
-    template=(Path(__file__).parent/'site/index.html').read_text(encoding='utf-8')
+    if template is None:
+        template=(Path(__file__).parent/'site/index.html').read_text(encoding='utf-8')
     values={'NAME':escape(model['SITE_NAME'] or model['DOMAIN']),'DESCRIPTION':escape(model['SITE_DESCRIPTION']),
             'LOGIN':escape(urls['login']),'REGISTER':registration,'CLIENT':escape(urls['client']),
             'HOMESERVER':escape(model['DOMAIN']),'NOTE':escape(note),'SUPPORT':support}

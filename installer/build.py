@@ -17,6 +17,7 @@ names = [
     'data_migrations.py', 'data-migrations.md', 'release-notes.md',
     'admin_panel.py','releases.py','release_update.py','remove_server.py','admin_identity.py','admin-panel.md',
     'existing_compose.py','existing_s3.py','existing_update.py','existing_features.py','existing_schedule.py','misbot_s3_provider.py','existing-compose.md','telegram_backup.py',
+    'existing_proxy.py','telegram_container.py',
     'homepage.py','homepage.md','site/index.html','site/site.css','configuration-examples/site.env.example',
     'federation.py','federation_runtime.py','federation_protocol.py','federation_service.py',
     'federation_admin_api.py','federation_matrix_api.py','federation.md','misbot-api.openapi.json',
@@ -37,7 +38,7 @@ sources['LICENSE'] = root.parent / 'LICENSE'
 source_names = {
     'referral-bot': ['Dockerfile','package.json','package-lock.json','main.js','logic.js','signing.js'],
     'referral-control': ['bridge.py','common.py','mas.py','control.py'],
-    'telegram-bot': ['worker.py','common.py','README.md'],
+    'telegram-bot': ['Dockerfile','requirements.txt','worker.py','common.py','README.md'],
 }
 for destination,files in source_names.items():
     source = root.parent / 'bots' / ('matrix-referral' if destination == 'referral-bot' else 'telegram')

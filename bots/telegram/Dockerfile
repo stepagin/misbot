@@ -3,6 +3,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY common.py worker.py .
+COPY --chown=10001:10001 common.py worker.py ./
 USER 10001:10001
 CMD ["python", "worker.py"]

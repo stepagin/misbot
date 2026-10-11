@@ -61,6 +61,35 @@ class TelegramBackupTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 backup.regular(other, os.getuid())
 
+    def test_container_backup_uses_actual_worker_config_and_preserves_sqlite_state(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root, worker, destination, model = self.fixture(Path(folder))
+            runtime = root / 'runtime/telegram'
+            runtime.mkdir(parents=True)
+            worker.rename(runtime / 'data')
+            config = runtime / 'worker.json'
+            config.write_bytes(b'FICTIONAL_ACTIVE_CONTAINER_CONFIG')
+            config.chmod(0o600)
+            model['telegram_control'].update(worker_container='misbot-telegram-worker',
+                worker_config='runtime/telegram/worker.json', worker_directory=str(runtime/'data'),
+                socket_directory='/run/misbot-telegram')
+            self.assertEqual(backup.raw_data_exclusion(root, model), str(runtime/'data').lstrip('/'))
+            regular = backup.regular
+            with patch.object(backup, 'regular', side_effect=lambda path, owner: regular(path, os.getuid())):
+                metadata = backup.snapshot(root, destination, model)
+            self.assertEqual((destination/'telegram/config/worker.json').read_bytes(), config.read_bytes())
+            with sqlite3.connect(destination/'telegram/worker.sqlite3') as db:
+                self.assertEqual(db.execute('SELECT value FROM state').fetchone()[0], 'committed')
+            backup.verify(destination, {'telegram': metadata}, set(backup.MEMBERS))
+
+    def test_raw_exclusion_retains_unrelated_data_and_legacy_external_worker(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root, worker, _, model = self.fixture(Path(folder))
+            self.assertIsNone(backup.raw_data_exclusion(root, model))
+            self.assertIsNone(backup.raw_data_exclusion(root, {}))
+            model['telegram_control']['worker_directory'] = str(root)
+            with self.assertRaises(RuntimeError): backup.raw_data_exclusion(root, model)
+
     def test_legacy_archive_and_incomplete_telegram_manifest(self):
         with tempfile.TemporaryDirectory() as folder:
             self.assertIsNone(backup.snapshot(Path(folder), Path(folder), {}))

@@ -26,6 +26,20 @@ def regular(path, owner):
     return path
 
 
+def raw_data_exclusion(root, model):
+    """Do not also archive changing SQLite/WAL when the worker moved inside root."""
+    config = model.get('telegram_control')
+    if not config:
+        return None
+    root = Path(root)
+    worker = Path(config['worker_directory'])
+    if worker.is_relative_to(root):
+        if worker == root or worker.resolve() != worker:
+            raise RuntimeError('Invalid Telegram raw-data exclusion')
+        return str(worker).lstrip('/')
+    return None
+
+
 def snapshot(root, destination, model):
     root, destination = Path(root), Path(destination)
     config = model.get('telegram_control')
@@ -39,7 +53,12 @@ def snapshot(root, destination, model):
     target.mkdir(mode=0o700)
     (target / 'config').mkdir(mode=0o700)
     for name in CONFIG_FILES:
-        source = regular(control / name, 0)
+        if name == 'worker.json' and config.get('worker_container'):
+            from telegram_container import paths
+            _, worker_config, _, _ = paths(root, model)
+            source = regular(worker_config, 10001)
+        else:
+            source = regular(control / name, 0)
         shutil.copyfile(source, target / 'config' / name)
         (target / 'config' / name).chmod(0o600)
     sources = ((control / 'data/bot-control.sqlite3', 0, 'control.sqlite3'),

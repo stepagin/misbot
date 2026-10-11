@@ -62,6 +62,45 @@ class FeatureTests(unittest.TestCase):
         self.assertNotIn('web.matrix.fictional.example.org',html)
         with self.assertRaises(RuntimeError):homepage.render(model,{'client':'https://chat.fictional.example.org/'})
 
+    def test_custom_theme_retains_adopted_links_and_escaped_editable_text(self):
+        model={'DOMAIN':'matrix.fictional.example.org','SITE_NAME':'<fictional>',
+               'SITE_DESCRIPTION':'A & B','OPEN_REGISTRATION':'false'}
+        links={'client':'https://chat.fictional.example.org/',
+               'login':'https://chat.fictional.example.org/#/login',
+               'register':'https://chat.fictional.example.org/#/register',
+               'homeserver':'https://matrix.fictional.example.org'}
+        theme='<h1>@@NAME@@</h1><p>@@DESCRIPTION@@</p><a href="@@LOGIN@@">Login</a>@@REGISTER@@'
+        result=homepage.render(model,links,template=theme)
+        self.assertIn('&lt;fictional&gt;',result)
+        self.assertIn('A &amp; B',result)
+        self.assertIn(links['login'],result)
+        self.assertNotIn(links['register'],result)
+        self.assertIn('Updated',homepage.render(dict(model,SITE_NAME='Updated'),links,template=theme))
+
+    def test_local_theme_checks_ownership_permissions_and_symlinks(self):
+        with tempfile.TemporaryDirectory() as folder:
+            base=Path(folder);theme=base/'site-template';theme.mkdir(mode=0o700)
+            for name,content in (('index.html','<h1>@@NAME@@</h1>'),('site.css','body{color:green}')):
+                path=theme/name;path.write_text(content);path.chmod(0o600)
+            page=object.__new__(features.Homepage);page.folder=base
+            page.plan={'web_url':'https://chat.fictional.example.org/'}
+            page.installation=SimpleNamespace(state={'domain':'matrix.fictional.example.org'})
+            lstat=Path.lstat
+            def root_stat(path,*args,**kwargs):
+                info=lstat(path,*args,**kwargs)
+                if path in (theme,theme/'index.html',theme/'site.css'):
+                    values=list(info);values[4]=0;return os.stat_result(values)
+                return info
+            model={'DOMAIN':'matrix.fictional.example.org','SITE_NAME':'Fictional'}
+            with patch.object(Path,'lstat',root_stat):
+                markup,css=page.assets(model)
+                self.assertIn(b'Fictional',markup);self.assertEqual(css,b'body{color:green}')
+                (theme/'site.css').chmod(0o644)
+                with self.assertRaises(existing.Error):page.assets(model)
+                (theme/'site.css').chmod(0o600)
+                (theme/'index.html').unlink();(theme/'index.html').symlink_to(theme/'site.css')
+                with self.assertRaises((RuntimeError,existing.Error)):page.assets(model)
+
     def test_adopted_cli_routes_features_federation_site_and_schedule(self):
         with tempfile.TemporaryDirectory() as folder:
             root,_=ExistingTests().fixture(Path(folder))
