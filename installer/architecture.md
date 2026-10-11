@@ -1,6 +1,6 @@
 # Архитектура и варианты хранения
 
-Misbot 1.0.0 использует Docker Compose с отдельными сервисами PostgreSQL,
+Misbot 1.2.0 использует Docker Compose с отдельными сервисами PostgreSQL,
 Synapse, MAS, Element Web/Admin, Caddy, HAProxy, LiveKit, JWT и двумя сервисами
 реферального бота, отдельным административным Matrix-ботом и узкой host-службой
 [федерации/API](federation.md). Компоненты имеют собственные pins, healthchecks и постоянные

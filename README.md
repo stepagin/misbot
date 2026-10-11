@@ -17,7 +17,7 @@ SSH-мастер или административного бота. Для ре
 Скачайте `matrix-installer.tar.gz` и
 `matrix-installer.tar.gz.sha256` из [GitHub Releases](https://github.com/stepagin/misbot/releases).
 Сверьте контрольную сумму с опубликованным значением. Для запуска утилиты на
-сервере нужен Python 3.
+сервере нужен Python 3.11 или новее.
 
 Нужны Linux VPS (Debian/Ubuntu), права root/sudo, SSH, публичный IPv4 и домен с
 доступом к DNS. Практический минимум для небольшого сообщества — **2 vCPU,
@@ -33,6 +33,8 @@ sha256sum -c matrix-installer.tar.gz.sha256
 sudo install -d -m 700 /root/misbot-setup
 sudo tar -xzf matrix-installer.tar.gz -C /root/misbot-setup
 sudo sh -c 'cd /root/misbot-setup/matrix-installer && sha256sum -c SHA256SUMS'
+sudo apt-get update
+sudo apt-get install -y python3 python3-yaml python3-rich dnsutils iproute2
 sudo python3 /root/misbot-setup/matrix-installer/misbot.py ui
 ```
 

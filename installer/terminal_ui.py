@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import signal
 import subprocess
@@ -70,6 +71,7 @@ class UI:
         )
         self.model = {}
         self.backup = {}
+        self.confirmed_domains = set()
         self.step = 0
         if self.draft.exists():
             import s3_config
@@ -78,6 +80,7 @@ class UI:
             saved = read_private_json(self.draft)
             self.model = saved['values']
             self.backup = saved.get('backup', {})
+            self.confirmed_domains = set(saved.get('confirmed_domains', []))
             self.step = saved.get('step', 0)
             self.root = Path(saved['directory'])
         elif (
@@ -124,11 +127,63 @@ class UI:
             )
 
     def confirm(self, label='Выполнить операцию?'):
+        return self.answer(label + ' да/нет', ('да', 'нет'), 'нет') == 'да'
+
+    def answer(self, label, choices, default):
         while True:
-            answer = self.ask(label + ' да/нет', 'нет').strip().casefold()
-            if answer in ('да', 'нет'):
-                return answer == 'да'
-            self.view.message('Введите «да» или «нет». Enter отменяет действие.', 'yellow')
+            answer = self.ask(label, default).strip().casefold()
+            if answer in choices:
+                return answer
+            self.view.message(
+                'Допустимые ответы: ' + ', '.join(choices) + '. Enter — ' + default + '.',
+                'yellow',
+            )
+
+    def input_value(self, label, default, validate, secret=False):
+        while True:
+            value = self.ask(label, default, secret)
+            try:
+                return validate(value)
+            except schema.InvalidConfiguration as error:
+                self.view.message(error.field + ': ' + error.explanation, 'yellow')
+            except (ValueError, RuntimeError) as error:
+                self.view.message(str(error), 'yellow')
+            except OSError:
+                self.view.message('Не удалось проверить путь. Проверьте каталог и права.', 'yellow')
+
+    def confirm_domain(self, value):
+        if not any(part.startswith('xn--') for part in value.split('.')):
+            return True
+        if value in self.confirmed_domains:
+            return True
+        try:
+            readable = value.encode('ascii').decode('idna')
+        except UnicodeError:
+            self.view.message('Не удалось прочитать международное имя. Проверьте домен.', 'yellow')
+            return False
+        self.view.details([('Имя домена', readable), ('Адрес для DNS', value)])
+        self.view.message(
+            'В домене есть нелатинские символы. Проверьте раскладку и лишние буквы. '
+            'Если имя неверно, выберите «нет» и введите его заново.',
+            'yellow',
+        )
+        if not self.confirm('Использовать именно этот домен?'):
+            return False
+        self.confirmed_domains.add(value)
+        return True
+
+    def check_domain_inputs(self):
+        for key in ('DOMAIN', 'MAS_DOMAIN'):
+            try:
+                value = schema.field_value(key, self.model.get(key, ''))
+            except schema.InvalidConfiguration:
+                self.field(key)
+                continue
+            if not self.confirm_domain(value):
+                self.field(key)
+            else:
+                self.model[key] = value
+        self.save()
 
     def save(self):
         from configuration import directory
@@ -142,6 +197,7 @@ class UI:
                 'step': self.step,
                 'values': self.model,
                 'backup': self.backup,
+                'confirmed_domains': sorted(self.confirmed_domains),
             },
         )
 
@@ -210,10 +266,15 @@ class UI:
                 if value == '/очистить' and not item.secret:
                     value = ''
             try:
-                self.model[key] = schema.field_value(key, value)
+                normalized = schema.field_value(key, value)
+                if key == 'MAS_DOMAIN':
+                    schema.validate({'DOMAIN': self.model['DOMAIN'], 'MAS_DOMAIN': normalized})
             except schema.InvalidConfiguration as error:
-                self.view.message(str(error))
+                self.view.message(error.field + ': ' + error.explanation)
                 continue
+            if item.kind == 'domain' and not self.confirm_domain(normalized):
+                continue
+            self.model[key] = normalized
             self.save()
             return
 
@@ -274,9 +335,7 @@ class UI:
             'S3_SECRET_ACCESS_KEY',
         )
         for key in keys:
-            item = schema.FIELDS[key]
-            values[key] = self.ask(item.label + ' (' + key + ')', values.get(key, ''), item.secret)
-            self.save()
+            self.s3_field(key, values)
         path = self.draft.parent / (self.draft.stem + '-' + purpose + '.env')
         while True:
             from configuration import serialize
@@ -297,8 +356,10 @@ class UI:
                 self.view.message(action)
             if result['passed']:
                 return
-            choice = self.ask(
-                '1 исправить поле, 2 повторить, 3 локальные медиа/отложить, сохранить и выйти', '1'
+            choice = self.answer(
+                '1 исправить поле, 2 повторить, 3 локальные медиа/отложить, сохранить и выйти',
+                ('1', '2', '3'),
+                '1',
             )
             if choice == '3':
                 if purpose == 'media':
@@ -321,9 +382,121 @@ class UI:
                 if selection == '0':
                     raise Back()
                 key = keys[int(selection) - 1]
-                item = schema.FIELDS[key]
-                values[key] = self.ask(item.label, values.get(key, ''), item.secret)
-                self.save()
+                self.s3_field(key, values)
+
+    def s3_field(self, key, values):
+        import s3_config
+
+        item = schema.FIELDS[key]
+
+        def validate(value):
+            if key == 'S3_ENDPOINT_URL' and value == '/очистить':
+                value = ''
+            return s3_config.validate_field(key, schema.field_value(key, value))
+
+        if key == 'S3_ENDPOINT_URL':
+            self.view.message(
+                'Enter сохраняет endpoint; /очистить выбирает AWS endpoint для региона.', 'dim'
+            )
+        values[key] = self.input_value(
+            item.label + ' (' + key + ')',
+            values.get(key, item.default),
+            validate,
+            item.secret,
+        )
+        self.save()
+
+    def backup_key(self, value):
+        import stat
+
+        value = schema.field_value('BACKUP_KEY_FILE', value, schema=schema.BACKUP_FIELDS)
+        if not value or Path(value).is_relative_to(self.root):
+            raise ValueError('Укажите путь ключа вне каталога установки.')
+        path = Path(value)
+        if path.exists():
+            info = path.lstat()
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.geteuid()
+                or info.st_mode & 0o077
+                or info.st_nlink != 1
+                or info.st_size != 32
+            ):
+                raise ValueError('Нужен существующий ключ Misbot: приватный файл 0600, 32 байта.')
+        elif not path.parent.is_dir():
+            raise ValueError('Каталог для нового ключа должен существовать.')
+        return value
+
+    def calendar_value(self, value):
+        if value == '/очистить':
+            return ''
+        if not value:
+            return value
+        value = schema.backup_calendar(value)
+        try:
+            result = subprocess.run(
+                ['systemd-analyze', 'calendar', value],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            raise ValueError(
+                'Не удалось проверить расписание через systemd-analyze. Повторите ввод.'
+            ) from None
+        if result.returncode:
+            raise ValueError('Неверное расписание systemd. Пример: *-*-* 03:00:00 UTC')
+        return value
+
+    def previous_step(self):
+        # The system check has no editable inputs; DNS failures return to the domain.
+        self.step = 0 if self.step == 2 else max(0, self.step - 1)
+        self.save()
+
+    def operation_argument(self, key, value, backend):
+        value = value.strip()
+        if not value or any(ord(c) < 32 or ord(c) == 127 for c in value):
+            raise ValueError('Это поле обязательно. Введите одну строку без управляющих символов.')
+        if key == 'public-ip':
+            return schema.field_value('PUBLIC_IP', value)
+        if key == 'server':
+            value = schema.field_value('DOMAIN', value)
+            if not self.confirm_domain(value):
+                raise ValueError('Введите домен заново.')
+        if key == 'sha256':
+            if not re.fullmatch(r'[0-9a-fA-F]{64}', value):
+                raise ValueError('SHA256 должен содержать ровно 64 шестнадцатеричных символа.')
+            return value.lower()
+        if key == 'purpose' and value not in ('media', 'backup'):
+            raise ValueError('Назначение S3: media или backup.')
+        if key == 'confirm':
+            expected = 'source-stopped' if backend == 'restore-activate' else 'target-stopped'
+            if value != expected:
+                raise ValueError('Подтверждение остановки другого сервера: ' + expected)
+        if key == 'request' and not re.fullmatch(r'MB-[0-9a-f]{32}', value):
+            raise ValueError('Выберите идентификатор заявки MB-… из показанного списка.')
+        if key == 'tag':
+            mxid = (
+                value
+                if ':' in value
+                else '@' + value.removeprefix('@') + ':' + self.installation()['domain']
+            )
+            if not re.fullmatch(
+                r'@[a-z0-9][a-z0-9._=-]{0,63}:' + re.escape(self.installation()['domain']), mxid
+            ):
+                raise ValueError('Укажите локальное имя бота: строчные латинские буквы и цифры.')
+        if key == 'calendar':
+            return self.calendar_value(value)
+        if key == 'key':
+            return self.backup_key(value)
+        if key in ('config', 'input', 'archive', 'output', 'catalog', 'source'):
+            value = schema.field_value('BACKUP_KEY_FILE', value, schema=schema.BACKUP_FIELDS)
+            if Path(value) == Path('/'):
+                raise ValueError('Укажите отдельный абсолютный путь без symlink и ..')
+        if key == 'object' and (value.startswith('/') or '..' in value.split('/')):
+            raise ValueError('Укажите ключ объекта в выделенном префиксе копий, без ..')
+        return value
 
     def setup_step(self, index):
         import preflight
@@ -331,24 +504,21 @@ class UI:
         if index == 0:
             self.field('DOMAIN')
             while True:
-                path = Path(
-                    self.ask(
-                        'Пустой каталог установки, абсолютный путь; допускаются пробелы',
-                        str(self.root),
-                    )
+                path = self.input_value(
+                    'Пустой каталог установки, абсолютный путь; допускаются пробелы',
+                    str(self.root),
+                    schema.installation_directory,
                 )
-                if path.is_absolute() and path != Path('/') and path.resolve() == path:
-                    if (
-                        path.exists()
-                        and any(path.iterdir())
-                        and not (path / 'installation.json').exists()
-                    ):
-                        self.view.message('Каталог чужой и непустой. Выберите другой.')
-                        continue
-                    self.root = path
-                    self.save()
-                    break
-                self.view.message('Нужен отдельный абсолютный каталог без symlink/..')
+                if (
+                    path.exists()
+                    and any(path.iterdir())
+                    and not (path / 'installation.json').exists()
+                ):
+                    self.view.message('Каталог чужой и непустой. Выберите другой.')
+                    continue
+                self.root = path
+                self.save()
+                break
         elif index == 1:
             import shutil
 
@@ -364,21 +534,29 @@ class UI:
             )
             preflight.system_check(self.root)
         elif index == 2:
+            self.check_domain_inputs()
             self.field('MAS_DOMAIN')
             self.field('PUBLIC_IP')
             self.field('ACME_EMAIL')
             domain = self.model['DOMAIN']
             ip = self.model.get('PUBLIC_IP')
             self.view.message(
-                'Создайте A на VPS для: '
-                + ', '.join(schema.public_hosts(self.model))
-                + '. Удалите AAAA; отключите CDN proxy. Порты описаны в README.'
+                'В DNS-панели домена создайте записи A. Для каждого имени укажите публичный IPv4 VPS:'
+            )
+            for host in schema.public_hosts(self.model):
+                self.view.message('  ' + host)
+            self.view.message(
+                'Удалите записи AAAA для этих имён и отключите CDN proxy (DNS only). '
+                'Сетевые порты перечислены в README.md комплекта.'
             )
             if not ip:
                 addresses = preflight.resolve(domain, __import__('socket').AF_INET)
                 if len(addresses) != 1:
                     raise RuntimeError(
-                        'DOMAIN не имеет одного A. Исправьте DNS или PUBLIC_IP; повторите этот шаг.'
+                        'Не удалось определить один IPv4 по записи A основного домена. '
+                        'Проверьте имя домена и записи в DNS-панели. Можно указать PUBLIC_IP '
+                        'из панели VPS; затем будут проверены записи всех имён. '
+                        '«назад» вернёт к вводу домена.'
                     )
                 ip = next(iter(addresses))
             preflight.dns_check(domain, ip, self.model.get('MAS_DOMAIN', ''))
@@ -396,30 +574,53 @@ class UI:
                 'Парольный вход доступен без Google/Telegram. OAuth можно пропустить и настроить до запуска позднее.'
             )
             for provider in ('GOOGLE', 'TELEGRAM'):
-                enabled = self.ask('Подключить ' + provider + '? да/нет', 'нет')
+                default = (
+                    'да'
+                    if self.model.get(provider + '_CLIENT_ID')
+                    or self.model.get(provider + '_CLIENT_SECRET')
+                    else 'нет'
+                )
+                enabled = self.answer('Подключить ' + provider + '? да/нет', ('да', 'нет'), default)
                 if enabled == 'да':
                     self.field(provider + '_CLIENT_ID')
                     self.field(provider + '_CLIENT_SECRET')
                     if provider == 'TELEGRAM':
                         self.field('SOCKS5_CONFIG')
+                else:
+                    self.model[provider + '_CLIENT_ID'] = ''
+                    self.model[provider + '_CLIENT_SECRET'] = ''
+                    self.save()
             self.field('INVITATION_LIFETIME_SECONDS')
         elif index == 5:
             self.view.message(
                 'Внешние копии требуют отдельного private bucket/prefix и recovery key вне установки. Можно явно отложить; локальная копия не защищает от потери VPS.'
             )
-            if self.ask('Настроить внешние копии сейчас? да/отложить', 'отложить') == 'да':
+            if (
+                self.answer(
+                    'Настроить внешние копии сейчас? да/отложить',
+                    ('да', 'отложить'),
+                    'да' if self.backup else 'отложить',
+                )
+                == 'да'
+            ):
                 self.s3_form('backup')
                 if self.backup:
-                    self.backup['BACKUP_KEY_FILE'] = self.ask(
+                    self.backup['BACKUP_KEY_FILE'] = self.input_value(
                         'Путь recovery key вне установки; отсутствующий ключ будет создан',
-                        '/root/misbot-backup.key',
+                        self.backup.get('BACKUP_KEY_FILE', '/root/misbot-backup.key'),
+                        self.backup_key,
                     )
-                    self.backup['BACKUP_CALENDAR'] = self.ask(
-                        'Systemd calendar (пусто — ручные копии)', ''
+                    self.backup['BACKUP_CALENDAR'] = self.input_value(
+                        'Systemd calendar (пусто — ручные копии; /очистить — убрать расписание)',
+                        self.backup.get('BACKUP_CALENDAR', ''),
+                        self.calendar_value,
                     )
                     schema.validate_backup(self.backup)
+            else:
+                self.backup = {}
             self.save()
         elif index == 6:
+            self.check_domain_inputs()
             self.model = schema.validate(self.model)
             self.view.message(
                 'Итог. Внутренние пароли/ключи создаёт backend и сохраняет при повторе.'
@@ -560,7 +761,7 @@ class UI:
                         'Первоначальное применение уже выполнено. Возвращаемся в меню управления существующей установкой.'
                     )
                     return self.menu()
-                self.step = max(0, self.step - 1)
+                self.previous_step()
                 continue
             except (Cancel, KeyboardInterrupt):
                 self.view.message(
@@ -579,7 +780,9 @@ class UI:
                 return 0
             except (RuntimeError, OSError):
                 self.view.message(
-                    'Этап не завершён. Выполните sudo misbot config validate и sudo misbot status; данные и ключи сохраняются.'
+                    'Этап не завершён. Черновик сохранён; исправьте ввод или повторите проверку.'
+                    if not self.installation()
+                    else 'Этап не завершён. Выполните sudo misbot config validate и sudo misbot status; данные и ключи сохраняются.'
                 )
                 # Show only schema/preflight static safe messages, never SDK bodies.
                 error = sys.exc_info()[1]
@@ -590,7 +793,7 @@ class UI:
                 except Back:
                     if self.initialized():
                         return self.menu()
-                    self.step = max(0, self.step - 1)
+                    self.previous_step()
                 except (SaveExit, Cancel, KeyboardInterrupt):
                     self.save()
                     self.view.message('Draft сохранён; повторите ui для продолжения.')
@@ -665,13 +868,14 @@ class UI:
         execution_root = self.root
         if command.backend in ('restore', 'restore-local'):
             while True:
-                target = Path(
-                    self.ask('Пустой каталог для восстановления, абсолютный путь', str(self.root))
+                target = self.input_value(
+                    'Пустой каталог для восстановления, абсолютный путь',
+                    str(self.root),
+                    schema.installation_directory,
                 )
-                if target.is_absolute() and target != Path('/') and target.resolve() == target:
-                    if not target.exists() or (target.is_dir() and not any(target.iterdir())):
-                        execution_root = target
-                        break
+                if not target.exists() or not any(target.iterdir()):
+                    execution_root = target
+                    break
                 self.view.message(
                     'Выберите пустой абсолютный каталог без symlink и переходов ..', 'yellow'
                 )
@@ -705,19 +909,15 @@ class UI:
                     if command.backend == 'restore-activate'
                     else 'Введите target-stopped после остановки назначения и возврата DNS.'
                 )
-            while True:
-                value = self.ask(label, default).strip()
-                if value:
-                    args[key] = value
-                    break
-                self.view.message('Это поле обязательно. «назад» — отменить ввод.', 'yellow')
+            args[key] = self.input_value(
+                label, default, lambda value: self.operation_argument(key, value, command.backend)
+            )
         if command.backend in ('update', 'update-recover'):
-            while True:
-                source = self.ask('Доверенный распакованный комплект, абсолютный путь').strip()
-                if source:
-                    args['source'] = source
-                    break
-                self.view.message('Укажите каталог комплекта или введите «назад».', 'yellow')
+            args['source'] = self.input_value(
+                'Доверенный распакованный комплект, абсолютный путь',
+                '',
+                lambda value: self.operation_argument('source', value, command.backend),
+            )
         if not item.read_only:
             rows = [
                 ('Операция', item.title),

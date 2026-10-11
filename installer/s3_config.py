@@ -23,6 +23,87 @@ class ConfigError(RuntimeError):
         self.code = code
 
 
+def validate_field(key: str, value: str) -> str:
+    """Validate one form field using the same rules as a complete S3 profile."""
+    if key not in FIELDS:
+        raise ConfigError('unknown_parameters', 'Допустимы только шесть S3-полей.')
+    if not isinstance(value, str) or any(ord(c) < 32 for c in value):
+        raise ConfigError(
+            'invalid_parameters', 'S3-параметры должны быть строками без управляющих символов.'
+        )
+    values = {key: value}
+    if key == 'S3_BUCKET':
+        if not values.get('S3_BUCKET'):
+            raise ConfigError(
+                'bucket_required', 'Укажите S3_BUCKET — имя существующего bucket, не URL.'
+            )
+        bucket = values['S3_BUCKET']
+        if (
+            not re.fullmatch(r'[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]', bucket)
+            or '..' in bucket
+            or '.-' in bucket
+            or '-.' in bucket
+            or re.fullmatch(r'\d+\.\d+\.\d+\.\d+', bucket)
+        ):
+            raise ConfigError(
+                'bucket_format',
+                'Проверьте имя S3_BUCKET: 3–63 строчные буквы, цифры, точки или дефисы.',
+            )
+    elif key == 'S3_REGION':
+        if not values.get('S3_REGION') or not re.fullmatch(
+            r'[a-z0-9][a-z0-9-]{0,62}', values['S3_REGION']
+        ):
+            raise ConfigError(
+                'region_required',
+                'Укажите S3_REGION из документации провайдера. Это параметр подписи SigV4; он не определяется по endpoint автоматически.',
+            )
+    elif key in ('S3_ACCESS_KEY_ID', 'S3_SECRET_ACCESS_KEY'):
+        if not value:
+            raise ConfigError(
+                'credentials_pair_required',
+                'Заполните оба S3_ACCESS_KEY_ID и S3_SECRET_ACCESS_KEY приватно.',
+            )
+    elif key == 'S3_ENDPOINT_URL':
+        endpoint = values.get('S3_ENDPOINT_URL', '')
+        if endpoint:
+            try:
+                parsed = urlsplit(endpoint)
+                valid = (
+                    parsed.scheme == 'https'
+                    and parsed.hostname
+                    and parsed.port != 0
+                    and parsed.username is None
+                    and parsed.password is None
+                    and parsed.path in ('', '/')
+                    and not parsed.query
+                    and not parsed.fragment
+                    and not any(c.isspace() for c in endpoint)
+                )
+            except ValueError:
+                valid = False
+            if not valid:
+                raise ConfigError(
+                    'endpoint_format',
+                    'S3_ENDPOINT_URL должен быть HTTPS origin без credentials, query и пути. Пустое значение выбирает AWS endpoint для заданного region.',
+                )
+    elif key == 'S3_PREFIX':
+        prefix = values.get('S3_PREFIX', '')
+        if (
+            not prefix
+            or not prefix.endswith('/')
+            or prefix.startswith('/')
+            or any(part in ('.', '..', '') for part in prefix[:-1].split('/'))
+            or '\\' in prefix
+            or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._/-]{0,199}/', prefix)
+            or '.misbot-probes' in prefix.split('/')
+        ):
+            raise ConfigError(
+                'prefix_format',
+                'Укажите отдельный относительный S3_PREFIX с завершающим /, без пустых частей, . и ..; namespace .misbot-probes зарезервирован.',
+            )
+    return value
+
+
 def validate(values: Mapping[str, str]) -> dict[str, str]:
     if set(values) - FIELDS:
         raise ConfigError(
@@ -33,71 +114,16 @@ def validate(values: Mapping[str, str]) -> dict[str, str]:
         raise ConfigError(
             'invalid_parameters', 'S3-параметры должны быть строками без управляющих символов.'
         )
-    if not values.get('S3_BUCKET'):
-        raise ConfigError(
-            'bucket_required', 'Укажите S3_BUCKET — имя существующего bucket, не URL.'
-        )
-    bucket = values['S3_BUCKET']
-    if (
-        not re.fullmatch(r'[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]', bucket)
-        or '..' in bucket
-        or '.-' in bucket
-        or '-.' in bucket
-        or re.fullmatch(r'\d+\.\d+\.\d+\.\d+', bucket)
+    for key in (
+        'S3_BUCKET',
+        'S3_REGION',
+        'S3_ACCESS_KEY_ID',
+        'S3_SECRET_ACCESS_KEY',
+        'S3_ENDPOINT_URL',
+        'S3_PREFIX',
     ):
-        raise ConfigError(
-            'bucket_format',
-            'Проверьте имя S3_BUCKET: 3–63 строчные буквы, цифры, точки или дефисы.',
-        )
-    if not values.get('S3_REGION') or not re.fullmatch(
-        r'[a-z0-9][a-z0-9-]{0,62}', values['S3_REGION']
-    ):
-        raise ConfigError(
-            'region_required',
-            'Укажите S3_REGION из документации провайдера. Это параметр подписи SigV4; он не определяется по endpoint автоматически.',
-        )
-    if not values.get('S3_ACCESS_KEY_ID') or not values.get('S3_SECRET_ACCESS_KEY'):
-        raise ConfigError(
-            'credentials_pair_required',
-            'Заполните оба S3_ACCESS_KEY_ID и S3_SECRET_ACCESS_KEY приватно.',
-        )
-    endpoint = values.get('S3_ENDPOINT_URL', '')
-    if endpoint:
-        try:
-            parsed = urlsplit(endpoint)
-            valid = (
-                parsed.scheme == 'https'
-                and parsed.hostname
-                and parsed.port != 0
-                and not parsed.username
-                and not parsed.password
-                and parsed.path in ('', '/')
-                and not parsed.query
-                and not parsed.fragment
-                and not any(c.isspace() for c in endpoint)
-            )
-        except ValueError:
-            valid = False
-        if not valid:
-            raise ConfigError(
-                'endpoint_format',
-                'S3_ENDPOINT_URL должен быть HTTPS origin без credentials, query и пути. Пустое значение выбирает AWS endpoint для заданного region.',
-            )
-    prefix = values.get('S3_PREFIX', '')
-    if (
-        not prefix
-        or not prefix.endswith('/')
-        or prefix.startswith('/')
-        or any(part in ('.', '..', '') for part in prefix[:-1].split('/'))
-        or '\\' in prefix
-        or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._/-]{0,199}/', prefix)
-        or '.misbot-probes' in prefix.split('/')
-    ):
-        raise ConfigError(
-            'prefix_format',
-            'Укажите отдельный относительный S3_PREFIX с завершающим /, без пустых частей, . и ..; namespace .misbot-probes зарезервирован.',
-        )
-    return dict(values, S3_ENDPOINT_URL=endpoint)
+        validate_field(key, values.get(key, ''))
+    return dict(values, S3_ENDPOINT_URL=values.get('S3_ENDPOINT_URL', ''))
 
 
 def read_profile(path: str | Path, purpose: str = 'media') -> dict[str, str]:

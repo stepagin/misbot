@@ -71,15 +71,16 @@ def unit_name(root):
 
 
 def validate_calendar(value):
-    if (
-        not isinstance(value, str)
-        or not value
-        or len(value) > 128
-        or any(ord(c) < 32 or ord(c) > 126 or c in '%\\' for c in value)
-    ):
+    import configuration_schema
+
+    try:
+        if not isinstance(value, str):
+            raise ValueError()
+        configuration_schema.backup_calendar(value)
+    except ValueError:
         raise RuntimeError(
             'Provide one systemd calendar expression, for example: *-*-* 03:00:00 UTC'
-        )
+        ) from None
     if command('systemd-analyze', 'calendar', value, allowed=(0, 1)).returncode:
         raise RuntimeError(
             'Invalid backup calendar. Check it with systemd-analyze calendar, then retry'

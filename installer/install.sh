@@ -305,6 +305,16 @@ case "$task_action" in
     exec python3 "$task_root/lifecycle.py" --directory "$task_root" "$task_action" "${task_command_args[@]}"
     ;;
   init)
+    # Reject a domain typo before installing packages or creating host state.
+    task_domain="$(python3 -B -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+import configuration_schema
+try:
+    print(configuration_schema.domain(sys.argv[2]))
+except (ValueError, UnicodeError):
+    raise SystemExit(2)
+' "$task_source" "$task_domain")" || die 'Invalid domain. Use a hostname such as example.org, without a URL, IP address, port or invisible characters; then repeat init.'
     host_dependencies
     python3 "$task_source/command_wrapper.py" check --directory "$task_root"
     python3 "$task_source/generate.py" --directory "$task_root" --domain "$task_domain" --initialize-env "${task_storage_args[@]}"

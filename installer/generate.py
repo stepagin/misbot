@@ -51,24 +51,11 @@ def fail(message, code=None):
 
 def domain_name(value):
     try:
-        value = value.strip().lower().encode('idna').decode('ascii')
+        return configuration_schema.domain(value)
     except (ValueError, UnicodeError):
-        fail('Invalid domain')
-    if (
-        len(value) > 253
-        or '.' not in value
-        or not all(
-            re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', part) for part in value.split('.')
-        )
-    ):
         fail(
-            'Domain must be a hostname without scheme, path or port. Use example.org, then repeat init with the same directory'
+            'Domain must be a hostname without scheme, path, port, invisible characters or an IP address. Use example.org, then repeat init with the same directory'
         )
-    try:
-        ipaddress.ip_address(value)
-    except ValueError:
-        return value
-    fail('Use a domain, not an IP address. Correct it and repeat init with the same directory')
 
 
 # Reject an initial typo before creating an otherwise unowned nonempty directory.

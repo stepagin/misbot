@@ -6,6 +6,7 @@ from typing import NoReturn, cast
 import ipaddress
 from pathlib import Path
 import re
+import unicodedata
 from urllib.parse import urlsplit, urlunsplit, quote
 import s3_config
 from operation_models import ConfigurationFailure, OperationResult, OperationStage, OperationStatus
@@ -16,6 +17,7 @@ class InvalidConfiguration(RuntimeError):
         self.file = str(file)
         self.field = field
         self.code = code
+        self.explanation = message
         super().__init__(f'{self.file}: {field}: {message}. Повтор: sudo misbot config validate')
 
     def result(self) -> ConfigurationFailure:
@@ -266,15 +268,23 @@ BACKUP_FIELDS.update(
             example='/root/misbot-backup.key',
         ),
         'BACKUP_CALENDAR': Field(
-            'backup', 'Расписание systemd, необязательно', example='*-*-* 03:00:00 UTC'
+            'backup',
+            'Расписание systemd, необязательно',
+            kind='calendar',
+            example='*-*-* 03:00:00 UTC',
         ),
     }
 )
 
 
 def domain(value: str) -> str:
+    value = value.strip().lower()
+    if any(c.isspace() or unicodedata.category(c).startswith('C') for c in value):
+        raise ValueError('hostname без пробелов и невидимых символов')
     try:
-        value = value.strip().lower().encode('idna').decode('ascii')
+        value = value.encode('idna').decode('ascii')
+        if any(part.startswith('xn--') for part in value.split('.')):
+            value.encode('ascii').decode('idna')
     except (UnicodeError, ValueError):
         raise ValueError('hostname без схемы, порта и пути') from None
     if (
@@ -290,6 +300,33 @@ def domain(value: str) -> str:
     except ValueError:
         return value
     raise ValueError('домен, а не IP')
+
+
+def installation_directory(value: str) -> Path:
+    """Validate the path accepted by install.sh without creating anything."""
+    path = Path(value)
+    if (
+        not re.fullmatch(r'/[a-zA-Z0-9. _/-]+', value)
+        or path == Path('/')
+        or '..' in path.parts
+        or path.resolve() != path
+        or (path.exists() and not path.is_dir())
+    ):
+        raise ValueError(
+            'Нужен абсолютный путь к каталогу: латинские буквы, цифры, пробелы, '
+            'точки, дефисы и подчёркивания; без symlink и ..'
+        )
+    return path
+
+
+def backup_calendar(value: str) -> str:
+    if (
+        not value
+        or len(value) > 128
+        or any(ord(c) < 32 or ord(c) > 126 or c in '%\\' for c in value)
+    ):
+        raise ValueError('Расписание systemd: одна строка до 128 символов, без % и backslash.')
+    return value
 
 
 def field_value(
@@ -326,6 +363,8 @@ def field_value(
             return value
         if item.kind == 'domain':
             return domain(value)
+        if item.kind == 'calendar':
+            return backup_calendar(value)
         if item.kind == 'domains':
             if any(not p.strip() for p in value.split(',')):
                 raise ValueError('непустой список доменов через запятую')
@@ -537,12 +576,5 @@ def validate_backup(values: Mapping[str, str], file: str = 'settings/backup.env'
     if not model['BACKUP_KEY_FILE']:
         raise InvalidConfiguration(
             file, 'BACKUP_KEY_FILE', 'required', 'нужен путь recovery key вне установки'
-        )
-    if any(ord(c) < 32 or c in '%\\' for c in model['BACKUP_CALENDAR']):
-        raise InvalidConfiguration(
-            file,
-            'BACKUP_CALENDAR',
-            'field_format',
-            'одна строка systemd calendar без % или backslash',
         )
     return model

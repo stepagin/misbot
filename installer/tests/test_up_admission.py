@@ -12,6 +12,35 @@ BUNDLE = Path(__file__).resolve().parents[1]
 
 
 class UpAdmissionTests(unittest.TestCase):
+    def test_invalid_init_domain_is_rejected_before_packages_or_host_changes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            base = Path(folder)
+            commands = base / 'commands'
+            commands.mkdir()
+            marker = base / 'unexpected-host-change'
+            (commands / 'id').write_text('#!/bin/sh\nprintf "0\\n"\n')
+            (commands / 'apt-get').write_text('#!/bin/sh\ntouch "' + str(marker) + '"\nexit 99\n')
+            for executable in commands.iterdir():
+                executable.chmod(0o700)
+            for domain in (
+                'https://fictional.example.org',
+                '127.0.0.1',
+                'fi\u200bctional.example.org',
+                'xn--a.example.org',
+            ):
+                with self.subTest(domain=domain):
+                    root = base / 'target'
+                    result = subprocess.run(
+                        ['bash', str(BUNDLE / 'install.sh'), 'init', domain, str(root)],
+                        capture_output=True,
+                        text=True,
+                        env={**os.environ, 'PATH': str(commands) + ':' + os.environ['PATH']},
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn('Invalid domain', result.stderr)
+                    self.assertFalse(marker.exists())
+                    self.assertFalse(root.exists())
+
     def test_s3_credentials_shell_routes_private_file_and_recovery_without_packages(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder) / 'installation'

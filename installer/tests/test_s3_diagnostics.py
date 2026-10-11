@@ -175,6 +175,7 @@ class DiagnosticTests(unittest.TestCase):
                 'endpoint_format',
             ),
             ({'S3_ENDPOINT_URL': 'http://fictional.invalid'}, 'endpoint_format'),
+            ({'S3_ENDPOINT_URL': 'https://@fictional.invalid'}, 'endpoint_format'),
             ({'S3_ENDPOINT_URL': 'https://fictional.invalid:bad'}, 'endpoint_format'),
             ({'S3_SECRET_ACCESS_KEY': ''}, 'credentials_pair_required'),
             ({'S3_PREFIX': '../media/'}, 'prefix_format'),

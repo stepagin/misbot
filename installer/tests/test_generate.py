@@ -219,7 +219,7 @@ class GeneratorTests(unittest.TestCase):
         self.assertTrue((self.root / 'remove_server.py').exists())
 
     def test_initial_domain_typo_or_missing_domain_does_not_poison_retry_directory(self):
-        for domain in ('https://fictional.invalid', '127.0.0.1', None):
+        for domain in ('https://fictional.invalid', '127.0.0.1', 'mi\u200bsbot.example.org', None):
             with self.subTest(domain=domain):
                 args = ['--initialize-env']
                 if domain is not None:
