@@ -80,6 +80,10 @@ Homepage validate/reload/recovery используют этот runtime; кан�
 публичного сокета федерации под `/run`, с точной регистрацией в `external_runtime_mounts`.
 Индивидуальная тема сайта может храниться root-only в `.misbot/features/site-template/`
 как `index.html` и `site.css`; применение сайта сохраняет эту тему.
+Шаблон также входит в зашифрованный `misbot-control/features/site-template/` payload
+копии; при полном восстановлении верните его в `.misbot/features/site-template/`
+с владельцем root, правами 0700 на каталог и 0600 на файлы. Для проверки новых
+архивов с этим payload используйте Misbot 1.1.1 или новее; старые архивы допустимы.
 
 Для Telegram в `existing.telegram_control` дополнительно задаются `worker_container`,
 относительный `worker_config` и `socket_directory`. `worker_directory` после переноса

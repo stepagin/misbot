@@ -383,10 +383,7 @@ class Installation:
             control_snapshot = destination / 'misbot-control'
             control_snapshot.mkdir(mode=0o700)
             # Operation journals/locks and changing SQLite are not copied as config.
-            for path in [*(self.control / 'pins').glob('*.json'),
-                         *(self.control / 's3').glob('*.env'),
-                         *(self.control / 's3').glob('*-active.json'),
-                         *[self.control/'features'/name for name in ('site.json','policy.json','backup-schedule.json','backup-schedule-verified.json') if (self.control/'features'/name).exists()]]:
+            for path in self.backup_control_sources():
                 info = command_wrapper.regular(path)
                 if info.st_uid != 0 or info.st_mode & 0o022:
                     raise Error('Служебные настройки должны принадлежать root без чужой записи.')
@@ -481,6 +478,26 @@ class Installation:
              sha256=manifest["encrypted_archive_sha256"], encrypted_bytes=manifest['encrypted_bytes'],
              paused_seconds=paused, verified=bool(remote))
 
+    def backup_control_sources(self):
+        sources = [*(self.control / 'pins').glob('*.json'),
+                   *(self.control / 's3').glob('*.env'),
+                   *(self.control / 's3').glob('*-active.json'),
+                   *[self.control/'features'/name for name in
+                     ('site.json','policy.json','backup-schedule.json','backup-schedule-verified.json')
+                     if (self.control/'features'/name).exists()]]
+        theme = self.control / 'features/site-template'
+        if theme.exists() or theme.is_symlink():
+            info = theme.lstat()
+            if (theme.resolve()!=theme or not stat.S_ISDIR(info.st_mode) or
+                    info.st_uid!=0 or info.st_mode&0o077):
+                raise Error('Небезопасный локальный шаблон; копия не подтверждена.')
+            for name,limit in (('index.html',2*1024**2),('site.css',256*1024)):
+                path=theme/name;info=command_wrapper.regular(path)
+                if path.resolve()!=path or info.st_uid!=0 or info.st_mode&0o077 or info.st_size>limit:
+                    raise Error('Небезопасный файл локального шаблона; копия не подтверждена.')
+                sources.append(path)
+        return sources
+
     def verify(self, selected=None, values=None):
         self.require_no_pending()
         self.validate()
@@ -502,8 +519,8 @@ class Installation:
                 with tarfile.open(fileobj=reader, mode="r|gz") as payload:
                     for item in payload:
                         if item.name.startswith('misbot-control/') and item.isfile():
-                            if (not re.fullmatch(r'misbot-control/(pins/[a-z0-9_-]+\.json|s3/(media|backup)(\.env|-active\.json)|features/(site|policy|backup-schedule|backup-schedule-verified)\.json)', item.name)
-                                    or item.name in control_hashes or item.size > 1024 ** 2):
+                            if (not re.fullmatch(r'misbot-control/(pins/[a-z0-9_-]+\.json|s3/(media|backup)(\.env|-active\.json)|features/(site|policy|backup-schedule|backup-schedule-verified)\.json|features/site-template/(index\.html|site\.css))', item.name)
+                                    or item.name in control_hashes or item.size > 2*1024 ** 2):
                                 raise Error('Некорректный payload служебных настроек.')
                             control_hashes[item.name] = existing_s3.media_transfer.stream_digest(payload.extractfile(item))
                             continue

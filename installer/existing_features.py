@@ -106,7 +106,8 @@ def site_model(installation, values=None):
     account=yaml.safe_load((installation.root/installation.model['identity']['mas_config']).read_text()).get('account',{})
     model={'DOMAIN':installation.state['domain'],
            'OPEN_REGISTRATION':'true' if account.get('password_registration_enabled',True) else 'false',
-           'REGISTRATION_TOKEN_REQUIRED':'true' if account.get('password_registration_token_required',False) else 'false'}
+           'REGISTRATION_TOKEN_REQUIRED':'true' if account.get('password_registration_token_required',
+               account.get('registration_token_required',False)) else 'false'}
     model.update(values or {})
     return schema.validate(model)
 
