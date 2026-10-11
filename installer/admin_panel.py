@@ -8,6 +8,7 @@ import sqlite3
 import time
 
 import configuration
+import data_migrations
 import lifecycle
 import releases
 import state_store
@@ -50,13 +51,8 @@ class Panel:
         self.path = self.folder / 'panel.sqlite'
         if self.path.is_symlink():
             raise RuntimeError('Unsafe panel database')
+        data_migrations.migrate(self.root)
         with self.database() as db:
-            db.executescript('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-                CREATE TABLE IF NOT EXISTS users (mxid TEXT PRIMARY KEY, created INTEGER, active INTEGER);
-                CREATE TABLE IF NOT EXISTS outbox (id TEXT PRIMARY KEY, recipient TEXT NOT NULL,
-                    via TEXT NOT NULL, body TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending',
-                    attempts INTEGER NOT NULL DEFAULT 0, next_at REAL NOT NULL DEFAULT 0);
-                CREATE INDEX IF NOT EXISTS outbox_pending ON outbox(state,next_at);''')
             for key, value in {**PREFERENCES, 'welcome': DEFAULT_WELCOME, 'enabled_at': int(self.clock()),
                                'month': datetime.fromtimestamp(self.clock(), timezone.utc).strftime('%Y-%m')}.items():
                 db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', (key, json.dumps(value)))

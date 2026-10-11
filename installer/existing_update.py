@@ -74,6 +74,8 @@ def apply(installation, source):
     if journal.exists():
         raise Error('Есть незавершённый source update; выполните misbot update recover --source PATH.')
     entries, revision = sources(source)
+    candidate = update.release(source)
+    update.run_data_migrations(source, installation.root, candidate, 'check')
     previous, _ = update.validate_manifest(installation.root)
     installation.validate()
     # The candidate backend can take a backup before its public source is applied.
@@ -113,6 +115,9 @@ def apply(installation, source):
     changes = {name: p for name, p in entries.items()
                if not (installation.root / name).exists() or digest(installation.root / name) != digest(p)}
     if not changes:
+        if candidate.get('data_schema_version'):
+            checkpoint = private_directory(installation.control / 'source-updates' / uuid.uuid4().hex)
+            update.run_data_migrations(source, installation.root, candidate, 'apply', checkpoint)
         command_wrapper.install(installation.root)
         emit('existing_source_update', passed=True, already_current=True)
         return
@@ -133,6 +138,7 @@ def apply(installation, source):
     save(journal, {'format': 1, 'checkpoint': str(folder), 'revision': revision,
                    'files': {name: digest(p) for name, p in changes.items()}})
     try:
+        update.run_data_migrations(source, installation.root, candidate, 'apply', folder)
         for name, source_file in changes.items():
             target = installation.root / name
             command_wrapper.public_directory(target.parent)
@@ -145,6 +151,7 @@ def apply(installation, source):
             Features(installation.root).refresh_telegram(installation.model['features'],folder)
         journal.unlink()
     except BaseException:
+        update.run_data_migrations(source, installation.root, candidate, 'rollback-check')
         restore(installation)
         raise
     emit('existing_source_update', passed=True, files_changed=len(changes),
@@ -169,6 +176,7 @@ def main():
             if args.action == 'update':
                 apply(installation, args.source)
             else:
+                update.run_data_migrations(args.source, installation.root, update.release(args.source), 'rollback-check')
                 restore(installation)
         return 0
     except Exception as error:

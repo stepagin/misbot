@@ -1,15 +1,17 @@
-name: Build Misbot release
+name: Misbot release
 on:
   push:
+    branches: ['**']
     tags: ['v[0-9]*', '[0-9]*']
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.ref }}-${{ github.sha }}
   cancel-in-progress: false
 jobs:
   build:
+    if: github.event_name != 'push' || github.ref_type == 'tag' || startsWith(github.ref_name, 'release/') || github.ref_name == github.event.repository.default_branch
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -26,6 +28,7 @@ jobs:
           RELEASE_REF: ${{ github.ref_name }}
           RELEASE_REF_TYPE: ${{ github.ref_type }}
         run: |
+          python ci/release.py validate
           python - <<'PY'
           import json, os, re
           version = json.load(open('installer/release.json'))['version']
@@ -47,6 +50,7 @@ jobs:
           python -m unittest discover -s installer/tests -p 'test_*.py'
           python -m unittest discover -s bots/telegram/tests -p 'test_*.py'
           python -m unittest discover -s deployment/tests -p 'test_*.py'
+          python -m unittest discover -s ci/tests -p 'test_*.py'
           node --test bots/matrix-referral/tests/*.test.js
           node --test bots/matrix-federation/tests/*.test.js
           bash -n installer/install.sh
@@ -57,25 +61,70 @@ jobs:
             dist/matrix-installer.tar.gz
             dist/matrix-installer.tar.gz.sha256
           if-no-files-found: error
-  draft-release:
-    if: github.ref_type == 'tag'
+  open-pr:
+    if: github.event_name == 'push' && github.ref_type == 'branch' && startsWith(github.ref_name, 'release/')
     needs: build
     runs-on: ubuntu-24.04
     permissions:
-      contents: write
+      contents: read
+      pull-requests: write
+    concurrency:
+      group: release-pr-${{ github.ref }}
+      cancel-in-progress: false
     steps:
+      - uses: actions/checkout@v4
+      - name: Create or reuse release PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 ci/release.py open-pr
+  create-tag:
+    if: github.event_name == 'push' && github.ref_type == 'branch' && github.ref_name == github.event.repository.default_branch
+    needs: build
+    runs-on: ubuntu-24.04
+    outputs:
+      release_tag: ${{ steps.tag.outputs.release_tag }}
+    permissions:
+      contents: write
+      pull-requests: read
+    concurrency:
+      group: create-release-tag-${{ github.sha }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag merged release PR
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 ci/release.py tag
+  publish-release:
+    if: always() && needs.build.result == 'success' && (github.ref_type == 'tag' || needs.create-tag.outputs.release_tag != '')
+    needs: [build, create-tag]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    concurrency:
+      group: publish-release-${{ needs.create-tag.outputs.release_tag || github.ref_name }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: misbot-installer
           path: dist
-      - name: Attach installer to draft release
+      - name: Publish release with verified installer
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || needs.create-tag.outputs.release_tag }}
         run: |
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release create "$RELEASE_TAG" --verify-tag --draft --title "Misbot $RELEASE_TAG" --generate-notes
+            gh release create "$RELEASE_TAG" --verify-tag --draft --title "Misbot $RELEASE_TAG" --notes-file installer/release-notes.md
           fi
-          test "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" = true
-          gh release upload "$RELEASE_TAG" dist/matrix-installer.tar.gz dist/matrix-installer.tar.gz.sha256 --clobber
+          if [ "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" = true ]; then
+            gh release upload "$RELEASE_TAG" dist/matrix-installer.tar.gz dist/matrix-installer.tar.gz.sha256 --clobber
+            gh release edit "$RELEASE_TAG" --draft=false --latest
+          else
+            gh release download "$RELEASE_TAG" --pattern 'matrix-installer.tar.gz*' --dir published
+            cmp dist/matrix-installer.tar.gz published/matrix-installer.tar.gz
+            cmp dist/matrix-installer.tar.gz.sha256 published/matrix-installer.tar.gz.sha256
+          fi

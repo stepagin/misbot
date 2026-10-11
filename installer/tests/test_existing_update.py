@@ -14,11 +14,45 @@ from existing_compose import digest
 
 
 class ExistingUpdateTests(unittest.TestCase):
+    def test_current_sources_still_apply_declared_data_migrations_after_verified_backup(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base=Path(temporary); root=base/'installation'; root.mkdir()
+            control=root/'.misbot'; control.mkdir()
+            source=base/'source'; source.mkdir()
+            candidate={'family':update.update.FAMILY,'version':'1.1.0','data_schema_version':1,
+                       'update_scope':'source-configuration-and-approved-components'}
+            (source/'release.json').write_text(json.dumps(candidate))
+            (root/'SHA256SUMS').write_text('unchanged manifest\n')
+            (source/'SHA256SUMS').write_text('unchanged manifest\n')
+            backup=base/'backups'/'accepted'; backup.mkdir(parents=True)
+            images={'fixture':{'id':'sha256:'+'a'*64}}
+            (backup/'manifest.json').write_text(json.dumps({'server_name':'fictional.example.org',
+                'images':images,'encrypted_archive_sha256':'b'*64}))
+            (control/'last-backup.json').write_text(json.dumps({'directory':str(backup),
+                'sha256':'b'*64,'remote':{'verified':True}}))
+            installation=SimpleNamespace(root=root,control=control,
+                state={'domain':'fictional.example.org'},
+                model={'backup_directory':str(base/'backups'),'images':images},
+                require_no_pending=Mock(),validate=Mock(),backup=Mock(),verify=Mock())
+            def private(path):
+                path.mkdir(mode=0o700,parents=True,exist_ok=True); return path
+            with (patch.object(update,'sources',return_value=({},'same-revision')),
+                  patch.object(update.update,'validate_manifest',return_value=({},'same-revision')),
+                  patch.object(update.update,'run_data_migrations') as migrate,
+                  patch.object(update,'private_directory',side_effect=private),
+                  patch.object(update.command_wrapper,'install')):
+                update.apply(installation,source)
+            self.assertEqual([call.args[3] for call in migrate.call_args_list],['check','apply'])
+            self.assertTrue(migrate.call_args.args[4].is_relative_to(control/'source-updates'))
+            installation.backup.assert_not_called()
+
     def test_failed_public_update_restores_previous_files_without_new_backup(self):
         with tempfile.TemporaryDirectory() as temporary:
             base=Path(temporary);root=base/'installation';root.mkdir()
             control=root/'.misbot';control.mkdir()
             source=base/'source';source.mkdir()
+            (source/'release.json').write_text(json.dumps({'family':update.update.FAMILY,
+                'version':'1.1.0','update_scope':'source-configuration-and-approved-components'}))
             backup=base/'backups'/'accepted';backup.mkdir(parents=True)
             images={'fixture':{'id':'sha256:'+'a'*64}}
             manifest={'server_name':'fictional.example.org','images':images,

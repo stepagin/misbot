@@ -13,6 +13,7 @@ parser.add_argument('--output', type=Path, default=root.parent / 'dist/matrix-in
 parser.add_argument('--check', action='store_true', help='verify that SHA256SUMS matches the current source files')
 args = parser.parse_args()
 names = [
+    'data_migrations.py', 'data-migrations.md', 'release-notes.md',
     'admin_panel.py','releases.py','release_update.py','remove_server.py','admin_identity.py','admin-panel.md',
     'existing_compose.py','existing_s3.py','existing_update.py','existing_features.py','existing_schedule.py','misbot_s3_provider.py','existing-compose.md','telegram_backup.py',
     'homepage.py','homepage.md','site/index.html','site/site.css','configuration-examples/site.env.example',
