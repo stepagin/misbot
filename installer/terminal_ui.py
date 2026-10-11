@@ -316,7 +316,7 @@ class UI:
                     child.wait(timeout=1)
                 except subprocess.TimeoutExpired:
                     pass
-                except KeyboardInterrupt:
+                except (KeyboardInterrupt, state_store.OperationInterrupted):
                     pass
             self.view.message(
                 'Проверьте sudo misbot --directory '
@@ -795,7 +795,9 @@ class UI:
                 if type(error) is RuntimeError or isinstance(error, schema.InvalidConfiguration):
                     self.view.message(str(error))
                 try:
-                    self.ask('Повторить шаг / назад / сохранить и выйти', 'повторить')
+                    self.answer(
+                        'Повторить шаг / назад / сохранить и выйти', ('повторить',), 'повторить'
+                    )
                 except Back:
                     if self.initialized():
                         return self.menu()

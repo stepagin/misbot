@@ -358,6 +358,64 @@ class InstallationWizardTests(unittest.TestCase):
                 self.assertEqual(self.saved()['step'], 1)
                 self.assertFalse(self.root.exists())
 
+    def test_unknown_failure_answer_does_not_retry_the_step(self):
+        self.interface.step = 1
+        self.interface.model = {'DOMAIN': 'fictional.example.org'}
+        with patch.object(
+            self.interface,
+            'setup_step',
+            side_effect=[RuntimeError('Fictional failure'), terminal_ui.SaveExit()],
+        ) as step:
+            answers = iter(['FICTIONAL_UNEXPECTED', 'повторить'])
+
+            def reader(*args):
+                self.assertEqual(step.call_count, 1)
+                return next(answers)
+
+            self.interface.reader = reader
+            self.assertEqual(self.interface.wizard(), 0)
+        self.assertEqual(step.call_count, 2)
+        self.assertEqual(self.saved()['step'], 1)
+        self.assertNotIn('FICTIONAL_UNEXPECTED', self.output.getvalue())
+
+    def test_back_at_every_wizard_step_saves_editable_previous_step(self):
+        for index in range(10):
+            with self.subTest(step=index):
+                self.interface.step = index
+                self.interface.model = {'DOMAIN': 'fictional.example.org'}
+                with (
+                    patch.object(
+                        self.interface,
+                        'setup_step',
+                        side_effect=[terminal_ui.Back(), terminal_ui.SaveExit()],
+                    ) as step,
+                    patch.object(self.interface, 'run') as run,
+                ):
+                    self.assertEqual(self.interface.wizard(), 0)
+                previous = 0 if index == 2 else max(0, index - 1)
+                self.assertEqual([item.args[0] for item in step.call_args_list], [index, previous])
+                self.assertEqual(self.saved()['step'], previous)
+                run.assert_not_called()
+                self.assertFalse(self.root.exists())
+
+    def test_cancel_and_save_at_every_wizard_step_preserve_draft_and_data(self):
+        for index, interruption in itertools.product(
+            range(10), (terminal_ui.Cancel, terminal_ui.SaveExit)
+        ):
+            with self.subTest(step=index, interruption=interruption.__name__):
+                self.interface.step = index
+                self.interface.model = {'DOMAIN': 'fictional.example.org'}
+                with (
+                    patch.object(self.interface, 'setup_step', side_effect=interruption()),
+                    patch.object(self.interface, 'run') as run,
+                ):
+                    expected = 130 if interruption is terminal_ui.Cancel else 0
+                    self.assertEqual(self.interface.wizard(), expected)
+                self.assertEqual(self.saved()['step'], index)
+                self.assertEqual(self.saved()['values'], self.interface.model)
+                run.assert_not_called()
+                self.assertFalse(self.root.exists())
+
     def test_invalid_restore_arguments_are_retried_before_confirmation_or_backend(self):
         self.answers(
             [

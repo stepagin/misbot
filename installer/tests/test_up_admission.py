@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -12,6 +13,37 @@ BUNDLE = Path(__file__).resolve().parents[1]
 
 
 class UpAdmissionTests(unittest.TestCase):
+    def test_missing_python_explains_dependency_without_claiming_domain_error(self):
+        with tempfile.TemporaryDirectory() as folder:
+            base = Path(folder)
+            commands = base / 'commands'
+            commands.mkdir()
+            marker = base / 'unexpected-host-change'
+            (commands / 'dirname').symlink_to(shutil.which('dirname'))
+            (commands / 'id').write_text('#!/bin/sh\nprintf "0\\n"\n')
+            (commands / 'apt-get').write_text('#!/bin/sh\n/usr/bin/touch "' + str(marker) + '"\n')
+            for executable in (commands / 'id', commands / 'apt-get'):
+                executable.chmod(0o700)
+            root = base / 'target'
+            result = subprocess.run(
+                [
+                    shutil.which('bash'),
+                    str(BUNDLE / 'install.sh'),
+                    'init',
+                    'fictional.example.org',
+                    str(root),
+                ],
+                capture_output=True,
+                text=True,
+                env={**os.environ, 'PATH': str(commands)},
+                timeout=10,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('Install python3', result.stderr)
+            self.assertNotIn('Invalid domain', result.stderr)
+            self.assertFalse(marker.exists())
+            self.assertFalse(root.exists())
+
     def test_invalid_init_domain_is_rejected_before_packages_or_host_changes(self):
         with tempfile.TemporaryDirectory() as folder:
             base = Path(folder)

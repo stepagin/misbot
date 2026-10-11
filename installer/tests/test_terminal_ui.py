@@ -649,6 +649,36 @@ while True:time.sleep(.05)
             self.assertTrue(done.exists())
             self.assertEqual(children[0].poll(), 143)
 
+    def test_repeated_interruption_still_waits_for_backend_shutdown(self):
+        class Child:
+            def __init__(self):
+                self.interruptions = [KeyboardInterrupt(), ui.state_store.OperationInterrupted()]
+                self.stopped = False
+                self.signals = []
+
+            def wait(self, timeout=None):
+                if self.interruptions:
+                    raise self.interruptions.pop(0)
+                self.stopped = True
+                return 143
+
+            def poll(self):
+                return 143 if self.stopped else None
+
+            def send_signal(self, number):
+                self.signals.append(number)
+
+        with tempfile.TemporaryDirectory() as folder:
+            interface = ui.UI(Path(folder) / 'target', draft=Path(folder) / 'draft.json')
+            child = Child()
+            with (
+                patch.object(ui.subprocess, 'Popen', return_value=child),
+                patch('sys.stdout', new=io.StringIO()),
+            ):
+                self.assertEqual(interface.run('start'), 130)
+            self.assertTrue(child.stopped)
+            self.assertEqual(child.signals, [signal.SIGTERM])
+
     def test_real_ui_ssh_hangup_keeps_saved_draft(self):
         if os.geteuid() != 0:
             self.skipTest('UI requires an isolated root operator')

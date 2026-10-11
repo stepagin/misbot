@@ -306,6 +306,7 @@ case "$task_action" in
     ;;
   init)
     # Reject a domain typo before installing packages or creating host state.
+    command -v python3 >/dev/null || die 'Python 3.11 or newer is required before init. Install python3, then repeat init.'
     task_domain="$(python3 -B -c '
 import sys
 sys.path.insert(0, sys.argv[1])
