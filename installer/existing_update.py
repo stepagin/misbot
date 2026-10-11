@@ -1,4 +1,5 @@
 """Verified public source updates for an adopted stack; core pins are preserved."""
+
 import argparse
 import json
 import os
@@ -22,14 +23,39 @@ def sources(folder):
         raise Error('Source каталог должен принадлежать root без чужой записи.')
     entries, revision = update.validate_manifest(folder)
     update.release(folder)
-    protected = {'installation.json', 'docker-compose.yml', 'settings', '.misbot',
-                 'synapse', 'mas', 'postgres', 'live', 'config', 'data', 'secrets', 'run'}
+    protected = {
+        'installation.json',
+        'docker-compose.yml',
+        'settings',
+        '.misbot',
+        'synapse',
+        'mas',
+        'postgres',
+        'live',
+        'config',
+        'data',
+        'secrets',
+        'run',
+    }
     for name, path in entries.items():
-        parts=Path(name).parts
-        public_directories={'site','configuration-examples','synapse-s3','referral-bot','referral-control','federation-bot','telegram-bot'}
-        public_file=(len(parts)==1 and (Path(name).suffix in ('.py','.md') or
-                     name in ('LICENSE','install.sh','versions.json','release.json','misbot-api.openapi.json')))
-        if parts[0] in protected or not (public_file or (len(parts)>1 and parts[0] in public_directories)):
+        parts = Path(name).parts
+        public_directories = {
+            'site',
+            'configuration-examples',
+            'synapse-s3',
+            'referral-bot',
+            'referral-control',
+            'federation-bot',
+            'telegram-bot',
+        }
+        public_file = len(parts) == 1 and (
+            Path(name).suffix in ('.py', '.md')
+            or name
+            in ('LICENSE', 'install.sh', 'versions.json', 'release.json', 'misbot-api.openapi.json')
+        )
+        if parts[0] in protected or not (
+            public_file or (len(parts) > 1 and parts[0] in public_directories)
+        ):
             raise Error('Source комплект содержит приватный путь установки.')
         info = command_wrapper.regular(path)
         if path.resolve() != path or info.st_uid != 0 or info.st_mode & 0o022:
@@ -42,8 +68,13 @@ def sources(folder):
 def homepage_paths(installation):
     site = Path(installation.model['features']['site_directory'])
     info = site.stat()
-    if (not site.is_absolute() or site.resolve() != site or
-            not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022):
+    if (
+        not site.is_absolute()
+        or site.resolve() != site
+        or not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != 0
+        or info.st_mode & 0o022
+    ):
         raise Error('Небезопасный каталог лендинга; source update не подтверждён.')
     paths = {name: site / name for name in ('index.html', 'site.css')}
     for path in paths.values():
@@ -64,13 +95,13 @@ def checkpoint_homepage(installation, folder):
     if json.loads((features / 'site.json').read_text())['HOMEPAGE_MODE'] != 'landing':
         return None
     from existing_features import Homepage
+
     page = Homepage(installation.root)
     saved = private_directory(folder / 'homepage-before')
     files = {}
     for name, path in homepage_paths(installation).items():
         command_wrapper.atomic(saved / name, path.read_bytes(), 0o600)
-        files[name] = {'sha256': digest(saved / name),
-                       'mode': stat.S_IMODE(path.stat().st_mode)}
+        files[name] = {'sha256': digest(saved / name), 'mode': stat.S_IMODE(path.stat().st_mode)}
     save(saved / 'files.json', files)
     return page
 
@@ -81,7 +112,9 @@ def restore_homepage(installation, folder):
         return
     files = json.loads((saved / 'files.json').read_text())
     paths = homepage_paths(installation)
-    if set(files) != set(paths) or any(digest(saved / name) != files[name]['sha256'] for name in paths):
+    if set(files) != set(paths) or any(
+        digest(saved / name) != files[name]['sha256'] for name in paths
+    ):
         raise Error('Checkpoint лендинга повреждён; сохраните source update.')
     for name, path in paths.items():
         command_wrapper.atomic(path, (saved / name).read_bytes(), files[name]['mode'])
@@ -116,8 +149,10 @@ def restore(installation):
     restore_homepage(installation, folder)
     if (folder / 'telegram-public-before').exists():
         from existing_features import Features
+
         Features(installation.root).refresh_telegram(
-            installation.model['features'], folder / 'telegram-recovery')
+            installation.model['features'], folder / 'telegram-recovery'
+        )
     command_wrapper.install(installation.root)
     installation.validate()
     path.unlink()
@@ -128,7 +163,9 @@ def apply(installation, source):
     installation.require_no_pending()
     journal = installation.control / 'source-update.json'
     if journal.exists():
-        raise Error('Есть незавершённый source update; выполните misbot update recover --source PATH.')
+        raise Error(
+            'Есть незавершённый source update; выполните misbot update recover --source PATH.'
+        )
     entries, revision = sources(source)
     if installation.model.get('proxy') and 'existing_proxy.py' not in entries:
         raise Error('Source комплект не поддерживает зарегистрированный Caddy container.')
@@ -143,45 +180,67 @@ def apply(installation, source):
     reused = False
     if selected.get('remote', {}).get('verified'):
         directory = Path(selected.get('directory', ''))
-        if directory.resolve()!=directory or not directory.is_relative_to(Path(installation.model['backup_directory'])):
+        if directory.resolve() != directory or not directory.is_relative_to(
+            Path(installation.model['backup_directory'])
+        ):
             raise Error('Проверенная копия находится вне принятого каталога.')
-        manifest = json.loads((directory/'manifest.json').read_text())
-        images_match=manifest.get('images')==installation.model['images']
-        pending=installation.control/'features/enable.json'
+        manifest = json.loads((directory / 'manifest.json').read_text())
+        images_match = manifest.get('images') == installation.model['images']
+        pending = installation.control / 'features/enable.json'
         if not images_match and pending.exists():
-            stage=Path(json.loads(pending.read_text())['checkpoint'])
-            if stage.parent!=installation.control/'features/checkpoints' or stage.resolve()!=stage:
+            stage = Path(json.loads(pending.read_text())['checkpoint'])
+            if (
+                stage.parent != installation.control / 'features/checkpoints'
+                or stage.resolve() != stage
+            ):
                 raise Error('Неверный feature checkpoint для source update.')
-            before=json.loads((stage/'installation.before').read_text())
-            original=before['existing']['images'];current=installation.model['images']
-            images_match=(manifest.get('images')==original and
-                all(current.get(name)==value for name,value in original.items()) and
-                set(current)-set(original)<= {'misbot-referral-bot','misbot-federation-bot','misbot-admin'} and
-                before['domain']==installation.state['domain'] and
-                before['existing']['identity']==installation.model['identity'])
-        reused = (manifest.get('server_name')==installation.state['domain'] and
-                  images_match and
-                  manifest.get('encrypted_archive_sha256')==selected.get('sha256'))
+            before = json.loads((stage / 'installation.before').read_text())
+            original = before['existing']['images']
+            current = installation.model['images']
+            images_match = (
+                manifest.get('images') == original
+                and all(current.get(name) == value for name, value in original.items())
+                and set(current) - set(original)
+                <= {'misbot-referral-bot', 'misbot-federation-bot', 'misbot-admin'}
+                and before['domain'] == installation.state['domain']
+                and before['existing']['identity'] == installation.model['identity']
+            )
+        reused = (
+            manifest.get('server_name') == installation.state['domain']
+            and images_match
+            and manifest.get('encrypted_archive_sha256') == selected.get('sha256')
+        )
     if not reused:
         configured = installation.control / 's3/backup.env'
         installation.backup(configured if configured.exists() else None)
         selected = json.loads(last.read_text())
         if not selected.get('remote', {}).get('verified'):
             installation.verify()
-    emit('existing_source_backup', verified=True, reused=reused,
-         scope='public sources and standard landing; configuration, images and database data preserved')
+    emit(
+        'existing_source_backup',
+        verified=True,
+        reused=reused,
+        scope='public sources and standard landing; configuration, images and database data preserved',
+    )
     entries = {**entries, 'SHA256SUMS': source / 'SHA256SUMS'}
-    changes = {name: p for name, p in entries.items()
-               if not (installation.root / name).exists() or digest(installation.root / name) != digest(p)}
+    changes = {
+        name: p
+        for name, p in entries.items()
+        if not (installation.root / name).exists() or digest(installation.root / name) != digest(p)
+    }
     if not changes:
         if candidate.get('data_schema_version'):
-            checkpoint = private_directory(installation.control / 'source-updates' / uuid.uuid4().hex)
+            checkpoint = private_directory(
+                installation.control / 'source-updates' / uuid.uuid4().hex
+            )
             update.run_data_migrations(source, installation.root, candidate, 'apply', checkpoint)
         command_wrapper.install(installation.root)
         emit('existing_source_update', passed=True, already_current=True)
         return
     folder = private_directory(installation.control / 'source-updates' / uuid.uuid4().hex)
-    worker_image = telegram_container.prepare_update(installation, entries, folder) if worker_changed else None
+    worker_image = (
+        telegram_container.prepare_update(installation, entries, folder) if worker_changed else None
+    )
     page = checkpoint_homepage(installation, folder)
     before = {}
     for name in changes:
@@ -196,23 +255,35 @@ def apply(installation, source):
             saved.chmod(0o600)
             before[name] = {'sha256': digest(saved), 'mode': stat.S_IMODE(info.st_mode)}
     save(folder / 'files.json', before)
-    save(journal, {'format': 1, 'checkpoint': str(folder), 'revision': revision,
-                   'worker_image': worker_image,
-                   'files': {name: digest(p) for name, p in changes.items()}})
+    save(
+        journal,
+        {
+            'format': 1,
+            'checkpoint': str(folder),
+            'revision': revision,
+            'worker_image': worker_image,
+            'files': {name: digest(p) for name, p in changes.items()},
+        },
+    )
     try:
         update.run_data_migrations(source, installation.root, candidate, 'apply', folder)
         for name, source_file in changes.items():
             target = installation.root / name
             command_wrapper.public_directory(target.parent)
-            command_wrapper.atomic(target, source_file.read_bytes(), 0o755 if name == 'install.sh' else 0o644)
+            command_wrapper.atomic(
+                target, source_file.read_bytes(), 0o755 if name == 'install.sh' else 0o644
+            )
         update.validate_manifest(installation.root)
         if worker_image:
             telegram_container.publish_update(installation, folder, worker_image)
         installation.validate()
         command_wrapper.install(installation.root)
-        if installation.model.get('features',{}).get('enabled') and installation.model['features'].get('telegram_runtime'):
+        if installation.model.get('features', {}).get('enabled') and installation.model[
+            'features'
+        ].get('telegram_runtime'):
             from existing_features import Features
-            Features(installation.root).refresh_telegram(installation.model['features'],folder)
+
+            Features(installation.root).refresh_telegram(installation.model['features'], folder)
         if page is not None:
             markup, stylesheet = page.assets(page.proposed({}))
             paths = homepage_paths(installation)
@@ -223,8 +294,14 @@ def apply(installation, source):
         update.run_data_migrations(source, installation.root, candidate, 'rollback-check')
         restore(installation)
         raise
-    emit('existing_source_update', passed=True, files_changed=len(changes),
-         checkpoint=str(folder), core_images_changed=False, core_services_restarted=False)
+    emit(
+        'existing_source_update',
+        passed=True,
+        files_changed=len(changes),
+        checkpoint=str(folder),
+        core_images_changed=False,
+        core_services_restarted=False,
+    )
 
 
 def main():
@@ -245,12 +322,19 @@ def main():
             if args.action == 'update':
                 apply(installation, args.source)
             else:
-                update.run_data_migrations(args.source, installation.root, update.release(args.source), 'rollback-check')
+                update.run_data_migrations(
+                    args.source, installation.root, update.release(args.source), 'rollback-check'
+                )
                 restore(installation)
         return 0
     except Exception as error:
-        emit('existing_source_update', passed=False,
-             explanation=str(error) if isinstance(error, Error) else 'Source update не подтверждён. Сохраните checkpoint и выполните misbot status.')
+        emit(
+            'existing_source_update',
+            passed=False,
+            explanation=str(error)
+            if isinstance(error, Error)
+            else 'Source update не подтверждён. Сохраните checkpoint и выполните misbot status.',
+        )
         return 1
 
 

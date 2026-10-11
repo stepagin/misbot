@@ -23,9 +23,17 @@ class FakeMAS:
     def api(self, path, method='GET', data=None):
         if method == 'POST' and path == 'user-registration-tokens':
             resource = str(len(self.tokens) + 1)
-            item = {'id': resource, 'attributes': {'token': data['token'],
-                'usage_limit': data['usage_limit'], 'expires_at': data['expires_at'],
-                'times_used': 0, 'valid': True, 'revoked_at': None}}
+            item = {
+                'id': resource,
+                'attributes': {
+                    'token': data['token'],
+                    'usage_limit': data['usage_limit'],
+                    'expires_at': data['expires_at'],
+                    'times_used': 0,
+                    'valid': True,
+                    'revoked_at': None,
+                },
+            }
             self.tokens[resource] = item
             return {'data': item}
         resource = path.split('/')[1]
@@ -43,13 +51,22 @@ class FakeMAS:
         return {'id': uid, 'attributes': {'username': 'member', 'admin': self.admin}}
 
     def matrix_user(self, mxid, server_name):
-        if not isinstance(mxid, str) or not mxid.startswith('@') or not mxid.endswith(':' + server_name):
+        if (
+            not isinstance(mxid, str)
+            or not mxid.startswith('@')
+            or not mxid.endswith(':' + server_name)
+        ):
             raise BotError('not local')
         return self.active_user('MAS-MATRIX-USER')
 
     def device_start(self):
-        return {'device_code': 'private-device-code', 'user_code': 'HUMAN-CODE',
-                'verification_uri': 'https://mas.example/link', 'expires_in': 600, 'interval': 5}
+        return {
+            'device_code': 'private-device-code',
+            'user_code': 'HUMAN-CODE',
+            'verification_uri': 'https://mas.example/link',
+            'expires_in': 600,
+            'interval': 5,
+        }
 
     def device_token(self, code):
         return self.device_result
@@ -65,11 +82,32 @@ class ControlTests(unittest.TestCase):
         (self.root / 'data').mkdir()
         (self.root / 'config').mkdir()
         (self.root / 'backups').mkdir()
-        (self.root / 'bot-config.json').write_text(json.dumps({'servers': {'misbot.ru': {
-            'stack_root': str(self.root), 'synapse_url': 'https://matrix.example'}}}))
-        (self.root / 'bot-policy.json').write_text(json.dumps({'servers': {'misbot.ru': {
-            'invitation_lifetime_seconds': 604800, 'invitation_usage_limit': 1,
-            'registration_required': True, 'federation_servers': ['misbot.ru']}}}))
+        (self.root / 'bot-config.json').write_text(
+            json.dumps(
+                {
+                    'servers': {
+                        'misbot.ru': {
+                            'stack_root': str(self.root),
+                            'synapse_url': 'https://matrix.example',
+                        }
+                    }
+                }
+            )
+        )
+        (self.root / 'bot-policy.json').write_text(
+            json.dumps(
+                {
+                    'servers': {
+                        'misbot.ru': {
+                            'invitation_lifetime_seconds': 604800,
+                            'invitation_usage_limit': 1,
+                            'registration_required': True,
+                            'federation_servers': ['misbot.ru'],
+                        }
+                    }
+                }
+            )
+        )
         self.bridge = Bridge(self.root / 'bot-config.json', FakeMAS)
         self.api = self.bridge.apis['misbot.ru']
 
@@ -81,11 +119,15 @@ class ControlTests(unittest.TestCase):
         return self.bridge.handle({'action': action, 'server': 'misbot.ru', 'uid': uid, **extras})
 
     def authorize(self, uid=10):
-        self.bridge.db.execute('INSERT INTO authorizations VALUES (?,?,?,?)', ('misbot.ru', uid, 'MAS-USER', int(time.time()) + 3600))
+        self.bridge.db.execute(
+            'INSERT INTO authorizations VALUES (?,?,?,?)',
+            ('misbot.ru', uid, 'MAS-USER', int(time.time()) + 3600),
+        )
         self.bridge.db.commit()
 
     def test_invitation_policy_unlimited_count_and_idempotent_delivery(self):
         from datetime import datetime
+
         self.authorize()
         before = time.time()
         first = self.call('invite', request_id='update:1')
@@ -111,8 +153,15 @@ class ControlTests(unittest.TestCase):
 
     def test_matrix_filter_before_pagination_keeps_used_even_after_expiry(self):
         def call(action, **kwargs):
-            return self.bridge.handle({'action': 'matrix_' + action, 'server': 'misbot.ru',
-                'mxid': '@member:misbot.ru', **kwargs})
+            return self.bridge.handle(
+                {
+                    'action': 'matrix_' + action,
+                    'server': 'misbot.ru',
+                    'mxid': '@member:misbot.ru',
+                    **kwargs,
+                }
+            )
+
         used = call('invite', request_id='matrix:used')
         used['attributes'].update(expires_at='2020-01-01T00:00:00Z', times_used=1, valid=False)
         active = [call('invite', request_id='matrix:active:' + str(i)) for i in range(6)]
@@ -123,7 +172,9 @@ class ControlTests(unittest.TestCase):
             else:
                 call('revoke', resource=hidden['id'])
         first = call('tokens')
-        self.assertEqual([x['id'] for x in first['tokens']], [x['id'] for x in reversed(active[1:])])
+        self.assertEqual(
+            [x['id'] for x in first['tokens']], [x['id'] for x in reversed(active[1:])]
+        )
         self.assertTrue(first['has_more'])
         last = call('tokens', offset=5)
         self.assertEqual([x['id'] for x in last['tokens']], [active[0]['id'], used['id']])
@@ -134,11 +185,13 @@ class ControlTests(unittest.TestCase):
     def test_lost_post_response_reuses_same_token(self):
         self.authorize()
         original = self.api.api
+
         def fail_after_post(path, **kwargs):
             result = original(path, **kwargs)
             if kwargs.get('method') == 'POST':
                 raise TimeoutError('response lost')
             return result
+
         self.api.api = fail_after_post
         with self.assertRaises(TimeoutError):
             self.call('invite', request_id='update:1')
@@ -175,7 +228,9 @@ class ControlTests(unittest.TestCase):
         self.api.admin = False
         self.api.device_result = (200, {'scope': 'openid'})
         self.bridge.poll_auths()
-        self.assertEqual(self.bridge.db.execute('SELECT COUNT(*) FROM authorizations').fetchone()[0], 1)
+        self.assertEqual(
+            self.bridge.db.execute('SELECT COUNT(*) FROM authorizations').fetchone()[0], 1
+        )
         self.assertTrue(self.call('identity')['authenticated'])
         self.assertFalse(self.call('identity')['admin'])
         self.assertTrue(self.call('invite', request_id='member:1')['attributes']['valid'])
@@ -213,21 +268,30 @@ class ControlTests(unittest.TestCase):
         self.bridge.db.close()
         db = sqlite3.connect(self.root / 'data/bot-control.sqlite3')
         db.execute('DROP TABLE auth_requests')
-        db.execute('CREATE TABLE auth_requests (request TEXT PRIMARY KEY, server TEXT, uid INTEGER, '
-                   'device_code TEXT, expires INTEGER, interval INTEGER, next_poll INTEGER, error TEXT)')
+        db.execute(
+            'CREATE TABLE auth_requests (request TEXT PRIMARY KEY, server TEXT, uid INTEGER, '
+            'device_code TEXT, expires INTEGER, interval INTEGER, next_poll INTEGER, error TEXT)'
+        )
         db.execute('DROP TABLE invitations')
-        db.execute('CREATE TABLE invitations (server TEXT, uid INTEGER, request TEXT UNIQUE, code TEXT UNIQUE, '
-                   'expires INTEGER, resource TEXT, PRIMARY KEY(server, uid, code))')
-        db.execute('INSERT INTO invitations VALUES (?,?,?,?,?,?)',
-                   ('misbot.ru', 10, 'old', 'MIS-old', 123, 'old-resource'))
+        db.execute(
+            'CREATE TABLE invitations (server TEXT, uid INTEGER, request TEXT UNIQUE, code TEXT UNIQUE, '
+            'expires INTEGER, resource TEXT, PRIMARY KEY(server, uid, code))'
+        )
+        db.execute(
+            'INSERT INTO invitations VALUES (?,?,?,?,?,?)',
+            ('misbot.ru', 10, 'old', 'MIS-old', 123, 'old-resource'),
+        )
         db.commit()
         db.close()
         self.bridge = Bridge(self.root / 'bot-config.json', FakeMAS)
         self.assertTrue(self.call('identity')['authenticated'])
         self.assertEqual(len(list(self.bridge.db.execute('PRAGMA table_info(auth_requests)'))), 10)
-        old = self.bridge.db.execute('SELECT code, inviter_name, created_at FROM invitations WHERE request=?',
-                                     ('old',)).fetchone()
-        self.assertEqual((old['code'], old['inviter_name'], old['created_at']), ('MIS-old', None, None))
+        old = self.bridge.db.execute(
+            'SELECT code, inviter_name, created_at FROM invitations WHERE request=?', ('old',)
+        ).fetchone()
+        self.assertEqual(
+            (old['code'], old['inviter_name'], old['created_at']), ('MIS-old', None, None)
+        )
 
     def test_mas_openid_grant_and_inactive_user_checks(self):
         api = MAS({'mas_url': 'https://mas.example', 'client_id': 'test', 'client_secret': 'test'})
@@ -237,16 +301,23 @@ class ControlTests(unittest.TestCase):
             api.device_start()
             self.assertEqual(post.call_args.kwargs['data'], {'scope': 'openid'})
         for flag in ('deactivated_at', 'locked_at', 'legacy_guest'):
-            with self.subTest(flag=flag), patch.object(api, 'api', return_value={
-                'data': {'attributes': {flag: True}}}), self.assertRaises(BotError):
+            with (
+                self.subTest(flag=flag),
+                patch.object(api, 'api', return_value={'data': {'attributes': {flag: True}}}),
+                self.assertRaises(BotError),
+            ):
                 api.active_user('user')
 
     def test_matrix_invitations_require_active_local_account_and_owner(self):
         def matrix(action, mxid='@member:misbot.ru', **extra):
-            return self.bridge.handle({'action': 'matrix_' + action, 'server': 'misbot.ru', 'mxid': mxid, **extra})
+            return self.bridge.handle(
+                {'action': 'matrix_' + action, 'server': 'misbot.ru', 'mxid': mxid, **extra}
+            )
+
         token = matrix('invite', request_id='matrix:$event')
-        saved = self.bridge.db.execute('SELECT uid, inviter_name, created_at FROM invitations WHERE resource=?',
-                                       (token['id'],)).fetchone()
+        saved = self.bridge.db.execute(
+            'SELECT uid, inviter_name, created_at FROM invitations WHERE resource=?', (token['id'],)
+        ).fetchone()
         self.assertEqual((saved['uid'], saved['inviter_name']), ('@member:misbot.ru', 'member'))
         self.assertGreater(saved['created_at'], 0)
         self.assertEqual(token, matrix('invite', request_id='matrix:$event'))
@@ -269,8 +340,10 @@ class ControlTests(unittest.TestCase):
         self.api.tokens[first['id']]['attributes']['revoked_at'] = 'now'
         self.bridge.db.close()
         self.bridge = Bridge(self.root / 'bot-config.json', lambda config: self.api)
-        row = self.bridge.db.execute('SELECT inviter_name, created_at, code FROM invitations WHERE request=?',
-                                     ('telegram:first',)).fetchone()
+        row = self.bridge.db.execute(
+            'SELECT inviter_name, created_at, code FROM invitations WHERE request=?',
+            ('telegram:first',),
+        ).fetchone()
         self.assertEqual(row['inviter_name'], 'member')
         self.assertGreater(row['created_at'], 0)
         self.assertEqual(row['code'], first['attributes']['token'])
@@ -278,16 +351,30 @@ class ControlTests(unittest.TestCase):
     def test_matrix_and_telegram_ownership_cannot_collide(self):
         self.authorize()
         telegram = self.call('invite', request_id='telegram:own')
-        request = {'action': 'matrix_revoke', 'server': 'misbot.ru', 'mxid': '@10:misbot.ru', 'resource': telegram['id']}
+        request = {
+            'action': 'matrix_revoke',
+            'server': 'misbot.ru',
+            'mxid': '@10:misbot.ru',
+            'resource': telegram['id'],
+        }
         with self.assertRaises(BotError):
             self.bridge.handle(request)
 
     def test_real_mas_matrix_identity_cannot_redirect_or_use_foreign_account(self):
         api = MAS({'mas_url': 'https://mas.example', 'client_id': 'test', 'client_secret': 'test'})
-        for value in [None, '@user:foreign.example', '@:misbot.ru', '@x:y:misbot.ru', '@x\n:misbot.ru']:
+        for value in [
+            None,
+            '@user:foreign.example',
+            '@:misbot.ru',
+            '@x:y:misbot.ru',
+            '@x\n:misbot.ru',
+        ]:
             with self.subTest(value=value), self.assertRaises(BotError):
                 api.matrix_user(value, 'misbot.ru')
-        with patch.object(api, 'api', return_value={'data': {'id': 'MAS-USER'}}) as request, patch.object(api, 'active_user') as active:
+        with (
+            patch.object(api, 'api', return_value={'data': {'id': 'MAS-USER'}}) as request,
+            patch.object(api, 'active_user') as active,
+        ):
             api.matrix_user('@name/slash:misbot.ru', 'misbot.ru')
             request.assert_called_once_with('users/by-username/name%2Fslash')
             active.assert_called_once_with('MAS-USER')
@@ -319,19 +406,36 @@ class ControlTests(unittest.TestCase):
 
     def test_untrusted_arguments_rejected(self):
         self.authorize()
-        for value in ['https://matrix.org', '../config', 'matrix.org:8448', '*.matrix.org', '127.0.0.1', 'evil\n.org', '', None]:
+        for value in [
+            'https://matrix.org',
+            '../config',
+            'matrix.org:8448',
+            '*.matrix.org',
+            '127.0.0.1',
+            'evil\n.org',
+            '',
+            None,
+        ]:
             with self.subTest(value=value), self.assertRaises(BotError):
                 self.call('fed_prepare', operation='add', domain=value)
         with self.assertRaises(BotError):
             self.call('run_command', command='arbitrary')
         with self.assertRaises(BotError):
-            self.bridge.handle({'action': 'invite', 'server': 'unmanaged.example', 'uid': 10, 'request_id': 'x'})
+            self.bridge.handle(
+                {'action': 'invite', 'server': 'unmanaged.example', 'uid': 10, 'request_id': 'x'}
+            )
         self.assertEqual(domain('пример.рф'), 'xn--e1afmkfd.xn--p1ai')
 
 
 class IntegrationTests(unittest.TestCase):
     def test_matrix_process_cannot_use_telegram_admin_channel(self):
-        for action in ['servers', 'matrix_identity', 'matrix_invite', 'matrix_tokens', 'matrix_revoke']:
+        for action in [
+            'servers',
+            'matrix_identity',
+            'matrix_invite',
+            'matrix_tokens',
+            'matrix_revoke',
+        ]:
             check_peer(10002, action)
         for action in ['auth_start', 'federation', 'fed_prepare', 'fed_apply', 'invite', 'logout']:
             with self.subTest(action=action), self.assertRaises(BotError):
@@ -342,6 +446,7 @@ class IntegrationTests(unittest.TestCase):
         with self.assertRaises(BotError):
             check_peer(10003, 'servers')
         check_peer(0, 'matrix_invite')
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -1,4 +1,5 @@
 """Small, shared primitives. Never include HTTP bodies or URLs in errors."""
+
 import ipaddress
 import json
 import os
@@ -27,7 +28,9 @@ def domain(value):
     else:
         raise BotError('Нужен домен Matrix сервера, а не IP-адрес.')
     labels = result.split('.')
-    if len(labels) < 2 or any(not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', x) for x in labels):
+    if len(labels) < 2 or any(
+        not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', x) for x in labels
+    ):
         raise BotError('Укажи только домен сервера, без https://, пути и порта.')
     return result
 

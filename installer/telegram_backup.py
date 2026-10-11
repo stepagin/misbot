@@ -1,4 +1,5 @@
 """Protected configuration and consistent SQLite snapshots for a host Telegram bot."""
+
 import hashlib
 import os
 from pathlib import Path
@@ -6,11 +7,20 @@ import shutil
 import sqlite3
 import stat
 
-CONFIG_FILES = ('worker.json', 'bot-config.json', 'bot-policy.json', 'mas-client.json',
-                'misbot-telegram-control.service', 'misbot-telegram-worker.service', 'telegram-source.tar.gz')
+CONFIG_FILES = (
+    'worker.json',
+    'bot-config.json',
+    'bot-policy.json',
+    'mas-client.json',
+    'misbot-telegram-control.service',
+    'misbot-telegram-worker.service',
+    'telegram-source.tar.gz',
+)
 DATABASE_FILES = ('control.sqlite3', 'worker.sqlite3')
-MEMBERS = frozenset(['telegram/config/' + name for name in CONFIG_FILES] +
-                    ['telegram/' + name for name in DATABASE_FILES])
+MEMBERS = frozenset(
+    ['telegram/config/' + name for name in CONFIG_FILES]
+    + ['telegram/' + name for name in DATABASE_FILES]
+)
 
 
 def digest(path):
@@ -21,7 +31,13 @@ def digest(path):
 def regular(path, owner):
     path = Path(path)
     info = path.lstat()
-    if path.resolve() != path or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != owner or info.st_mode & 0o077:
+    if (
+        path.resolve() != path
+        or not stat.S_ISREG(info.st_mode)
+        or info.st_nlink != 1
+        or info.st_uid != owner
+        or info.st_mode & 0o077
+    ):
         raise RuntimeError('Unsafe Telegram backup source')
     return path
 
@@ -47,7 +63,12 @@ def snapshot(root, destination, model):
         return None
     control = root / config['directory']
     worker = Path(config['worker_directory'])
-    if not control.is_relative_to(root) or control.resolve() != control or not worker.is_absolute() or worker.resolve() != worker:
+    if (
+        not control.is_relative_to(root)
+        or control.resolve() != control
+        or not worker.is_absolute()
+        or worker.resolve() != worker
+    ):
         raise RuntimeError('Invalid Telegram backup directories')
     target = destination / 'telegram'
     target.mkdir(mode=0o700)
@@ -55,14 +76,17 @@ def snapshot(root, destination, model):
     for name in CONFIG_FILES:
         if name == 'worker.json' and config.get('worker_container'):
             from telegram_container import paths
+
             _, worker_config, _, _ = paths(root, model)
             source = regular(worker_config, 10001)
         else:
             source = regular(control / name, 0)
         shutil.copyfile(source, target / 'config' / name)
         (target / 'config' / name).chmod(0o600)
-    sources = ((control / 'data/bot-control.sqlite3', 0, 'control.sqlite3'),
-               (worker / 'worker.sqlite3', 10001, 'worker.sqlite3'))
+    sources = (
+        (control / 'data/bot-control.sqlite3', 0, 'control.sqlite3'),
+        (worker / 'worker.sqlite3', 10001, 'worker.sqlite3'),
+    )
     for source, owner, name in sources:
         source = regular(source, owner)
         output = target / name
@@ -72,7 +96,11 @@ def snapshot(root, destination, model):
                 if saved.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
                     raise RuntimeError('Telegram SQLite snapshot not verified')
         output.chmod(0o600)
-    hashes = {str(path.relative_to(destination)): digest(path) for path in target.rglob('*') if path.is_file()}
+    hashes = {
+        str(path.relative_to(destination)): digest(path)
+        for path in target.rglob('*')
+        if path.is_file()
+    }
     return {'format': 1, 'sqlite_snapshot': True, 'sha256': hashes}
 
 
@@ -82,13 +110,19 @@ def verify(temporary, manifest, found):
         if found & MEMBERS:
             raise RuntimeError('Unregistered Telegram backup payload')
         return
-    if metadata.get('format') != 1 or set(metadata.get('sha256', {})) != MEMBERS or not MEMBERS.issubset(found):
+    if (
+        metadata.get('format') != 1
+        or set(metadata.get('sha256', {})) != MEMBERS
+        or not MEMBERS.issubset(found)
+    ):
         raise RuntimeError('Incomplete Telegram backup')
     for member, expected in metadata['sha256'].items():
         path = Path(temporary) / member
         if digest(path) != expected:
             raise RuntimeError('Telegram backup checksum mismatch')
     for name in DATABASE_FILES:
-        with sqlite3.connect((Path(temporary) / 'telegram' / name).as_uri() + '?mode=ro', uri=True) as db:
+        with sqlite3.connect(
+            (Path(temporary) / 'telegram' / name).as_uri() + '?mode=ro', uri=True
+        ) as db:
             if db.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
                 raise RuntimeError('Telegram backup database not verified')

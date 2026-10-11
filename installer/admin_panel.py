@@ -1,4 +1,5 @@
 """Private admin preferences, registration observer and durable message outbox."""
+
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -14,12 +15,23 @@ import releases
 import state_store
 from postgres_setup import literal
 
-ACTIONS = {'panel-status', 'panel-version', 'panel-preferences', 'panel-welcome',
-           'panel-broadcast', 'panel-statistics', 'panel-update', 'panel-outbox', 'panel-ack'}
-DEFAULT_WELCOME = ('Добро пожаловать на сервер {domain}! Здесь можно общаться в личных '
-                   'и групповых чатах, делиться файлами и звонить через Matrix. '
-                   'Личные чаты поддерживают сквозное шифрование. Приглашения: @referral-bot:{domain}. '
-                   'Этот бот присылает новости сервера и не отвечает на сообщения.')
+ACTIONS = {
+    'panel-status',
+    'panel-version',
+    'panel-preferences',
+    'panel-welcome',
+    'panel-broadcast',
+    'panel-statistics',
+    'panel-update',
+    'panel-outbox',
+    'panel-ack',
+}
+DEFAULT_WELCOME = (
+    'Добро пожаловать на сервер {domain}! Здесь можно общаться в личных '
+    'и групповых чатах, делиться файлами и звонить через Matrix. '
+    'Личные чаты поддерживают сквозное шифрование. Приглашения: @referral-bot:{domain}. '
+    'Этот бот присылает новости сервера и не отвечает на сообщения.'
+)
 PREFERENCES = {'updates': True, 'registrations': True, 'statistics': True}
 
 
@@ -53,8 +65,12 @@ class Panel:
             raise RuntimeError('Unsafe panel database')
         data_migrations.migrate(self.root)
         with self.database() as db:
-            for key, value in {**PREFERENCES, 'welcome': DEFAULT_WELCOME, 'enabled_at': int(self.clock()),
-                               'month': datetime.fromtimestamp(self.clock(), timezone.utc).strftime('%Y-%m')}.items():
+            for key, value in {
+                **PREFERENCES,
+                'welcome': DEFAULT_WELCOME,
+                'enabled_at': int(self.clock()),
+                'month': datetime.fromtimestamp(self.clock(), timezone.utc).strftime('%Y-%m'),
+            }.items():
                 db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', (key, json.dumps(value)))
         self.path.chmod(0o600)
 
@@ -70,7 +86,9 @@ class Panel:
 
     def settings(self):
         with self.database() as db:
-            return {row['key']: json.loads(row['value']) for row in db.execute('SELECT * FROM settings')}
+            return {
+                row['key']: json.loads(row['value']) for row in db.execute('SELECT * FROM settings')
+            }
 
     @staticmethod
     def set(db, key, value):
@@ -79,8 +97,10 @@ class Panel:
     @staticmethod
     def enqueue(db, key, recipient, via, body):
         identifier = hashlib.sha256((key + '\0' + recipient).encode()).hexdigest()
-        db.execute('INSERT OR IGNORE INTO outbox(id,recipient,via,body) VALUES (?,?,?,?)',
-                   (identifier, recipient, via, body))
+        db.execute(
+            'INSERT OR IGNORE INTO outbox(id,recipient,via,body) VALUES (?,?,?,?)',
+            (identifier, recipient, via, body),
+        )
 
     def notice(self, key, body):
         with self.database() as db:
@@ -95,29 +115,62 @@ class Panel:
         return ids
 
     def query(self, sql):
-        statement="BEGIN READ ONLY; SET LOCAL statement_timeout='30s';\n"+sql+"\nCOMMIT;"
-        metadata=configuration.read_private_json(self.root/'installation.json')
-        if metadata.get('backend')=='existing-compose':
+        statement = "BEGIN READ ONLY; SET LOCAL statement_timeout='30s';\n" + sql + '\nCOMMIT;'
+        metadata = configuration.read_private_json(self.root / 'installation.json')
+        if metadata.get('backend') == 'existing-compose':
             import tempfile
             import yaml
             from existing_compose import Installation
-            installation=Installation(self.root)
-            config=yaml.safe_load((self.root/installation.model['identity']['synapse_config']).read_text())
-            database=config['database']['args']['database']
-            if database not in installation.databases:raise RuntimeError('Statistics database is outside accepted scope')
+
+            installation = Installation(self.root)
+            config = yaml.safe_load(
+                (self.root / installation.model['identity']['synapse_config']).read_text()
+            )
+            database = config['database']['args']['database']
+            if database not in installation.databases:
+                raise RuntimeError('Statistics database is outside accepted scope')
             with tempfile.TemporaryFile() as incoming:
-                incoming.write(statement.encode());incoming.seek(0)
-                _,raw=installation.pg('psql','-d',database,'-X','-qAt','-v','ON_ERROR_STOP=1','-f','-',incoming=incoming)
+                incoming.write(statement.encode())
+                incoming.seek(0)
+                _, raw = installation.pg(
+                    'psql',
+                    '-d',
+                    database,
+                    '-X',
+                    '-qAt',
+                    '-v',
+                    'ON_ERROR_STOP=1',
+                    '-f',
+                    '-',
+                    incoming=incoming,
+                )
             return json.loads(raw)
         lifecycle.configure(self.root, 'admin-panel')
-        return json.loads(lifecycle.postgres('psql', '-d', 'synapse', '-X', '-qAt',
-            '-v', 'ON_ERROR_STOP=1', '-f', '-', stdin=statement).strip())
+        return json.loads(
+            lifecycle.postgres(
+                'psql',
+                '-d',
+                'synapse',
+                '-X',
+                '-qAt',
+                '-v',
+                'ON_ERROR_STOP=1',
+                '-f',
+                '-',
+                stdin=statement,
+            ).strip()
+        )
 
     def user_page(self, cursor):
         bots = ','.join(literal(value) for value in sorted(self.bot_ids()))
-        return self.query("SELECT coalesce(json_agg(u),'[]') FROM (SELECT name AS mxid, creation_ts AS created, "
-            "deactivated=0 AND is_guest=0 AS active FROM users WHERE name>" + literal(cursor) +
-            " AND name NOT IN (" + bots + ") AND appservice_id IS NULL ORDER BY name LIMIT 500) u;")
+        return self.query(
+            "SELECT coalesce(json_agg(u),'[]') FROM (SELECT name AS mxid, creation_ts AS created, "
+            'deactivated=0 AND is_guest=0 AS active FROM users WHERE name>'
+            + literal(cursor)
+            + ' AND name NOT IN ('
+            + bots
+            + ') AND appservice_id IS NULL ORDER BY name LIMIT 500) u;'
+        )
 
     def observe_users(self):
         preferences = self.settings()
@@ -132,15 +185,26 @@ class Panel:
                     if not mxid.endswith(':' + self.domain):
                         continue
                     known = db.execute('SELECT 1 FROM users WHERE mxid=?', (mxid,)).fetchone()
-                    db.execute('INSERT OR REPLACE INTO users VALUES (?,?,?)',
-                               (mxid, user['created'], int(user['active'])))
-                    if known or not user['active'] or (user['created'] or 0) < preferences['enabled_at']:
+                    db.execute(
+                        'INSERT OR REPLACE INTO users VALUES (?,?,?)',
+                        (mxid, user['created'], int(user['active'])),
+                    )
+                    if (
+                        known
+                        or not user['active']
+                        or (user['created'] or 0) < preferences['enabled_at']
+                    ):
                         continue
                     body = preferences['welcome'].replace('{domain}', self.domain)
                     self.enqueue(db, 'welcome:' + mxid, mxid, 'welcome', body)
                     if preferences['registrations']:
-                        self.enqueue(db, 'registration:' + mxid, owner(self.root), 'admin',
-                                     'Новый пользователь зарегистрировался: ' + mxid)
+                        self.enqueue(
+                            db,
+                            'registration:' + mxid,
+                            owner(self.root),
+                            'admin',
+                            'Новый пользователь зарегистрировался: ' + mxid,
+                        )
             cursor = users[-1]['mxid']
             if len(users) < 500:
                 break
@@ -150,9 +214,13 @@ class Panel:
         if period not in durations:
             raise ValueError('Unknown statistics period')
         end = self.clock() if end is None else end
-        start = (0 if durations[period] is None else end - durations[period]) if start is None else start
+        start = (
+            (0 if durations[period] is None else end - durations[period])
+            if start is None
+            else start
+        )
         bots = ','.join(literal(value) for value in sorted(self.bot_ids()))
-        sql = f'''SELECT json_build_object('messages', (SELECT count(*) FROM events e
+        sql = f"""SELECT json_build_object('messages', (SELECT count(*) FROM events e
             WHERE e.type IN ('m.room.message','m.room.encrypted') AND NOT e.outlier
             AND e.received_ts >= {int(start * 1000)} AND e.received_ts < {int(end * 1000)}
             AND EXISTS (SELECT 1 FROM users u WHERE u.name=e.sender AND u.appservice_id IS NULL)
@@ -163,13 +231,18 @@ class Panel:
                 AND m.membership IN ('join','invite'))),
             'registrations', (SELECT count(*) FROM users WHERE creation_ts >= {int(start)}
                 AND creation_ts < {int(end)} AND is_guest=0 AND appservice_id IS NULL
-                AND name NOT IN ({bots})));'''
-        return {'period': period, 'start_utc': datetime.fromtimestamp(start, timezone.utc).isoformat(),
-                'end_utc': datetime.fromtimestamp(end, timezone.utc).isoformat(), **self.query(sql),
-                'calls': None, 'average_call_seconds': None,
-                'note': 'Сообщения: события обычных и зашифрованных сообщений местных пользователей; '
-                        'комнаты с ботами Misbot исключены. В E2EE невозможно отличить все служебные '
-                        'события от сообщений. Число и длительность звонков MatrixRTC недоступны.'}
+                AND name NOT IN ({bots})));"""
+        return {
+            'period': period,
+            'start_utc': datetime.fromtimestamp(start, timezone.utc).isoformat(),
+            'end_utc': datetime.fromtimestamp(end, timezone.utc).isoformat(),
+            **self.query(sql),
+            'calls': None,
+            'average_call_seconds': None,
+            'note': 'Сообщения: события обычных и зашифрованных сообщений местных пользователей; '
+            'комнаты с ботами Misbot исключены. В E2EE невозможно отличить все служебные '
+            'события от сообщений. Число и длительность звонков MatrixRTC недоступны.',
+        }
 
     def check_releases(self, force=False):
         settings = self.settings()
@@ -182,13 +255,34 @@ class Panel:
         release = releases.latest()
         with self.database() as db:
             self.set(db, 'release', release)
-            if (release and settings['updates'] and releases.minor_update(releases.installed(self.root), release['version'])
-                    and releases.version(release['version']) > releases.version(settings.get('notified_version', '0.0.0'))):
-                self.enqueue(db, 'release:' + release['version'], owner(self.root), 'admin',
-                    'Доступна новая версия Misbot ' + release['version'] + '. Установлена ' + releases.installed(self.root)
-                    + '.\n' + release['notes'] + '\n' + release['url']
-                    + '\nОбновление: '+releases.comparison(self.root,release)['command']
-                    + (' или команда «обновить» в этом чате.' if releases.comparison(self.root,release)['update_supported'] else '.'))
+            if (
+                release
+                and settings['updates']
+                and releases.minor_update(releases.installed(self.root), release['version'])
+                and releases.version(release['version'])
+                > releases.version(settings.get('notified_version', '0.0.0'))
+            ):
+                self.enqueue(
+                    db,
+                    'release:' + release['version'],
+                    owner(self.root),
+                    'admin',
+                    'Доступна новая версия Misbot '
+                    + release['version']
+                    + '. Установлена '
+                    + releases.installed(self.root)
+                    + '.\n'
+                    + release['notes']
+                    + '\n'
+                    + release['url']
+                    + '\nОбновление: '
+                    + releases.comparison(self.root, release)['command']
+                    + (
+                        ' или команда «обновить» в этом чате.'
+                        if releases.comparison(self.root, release)['update_supported']
+                        else '.'
+                    ),
+                )
                 self.set(db, 'notified_version', release['version'])
         return release
 
@@ -207,18 +301,25 @@ class Panel:
                 end = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
                 start = (end - timedelta(days=1)).replace(day=1)
                 result = self.statistics('month', start.timestamp(), end.timestamp())
-                self.notice('monthly:' + start.strftime('%Y-%m'), 'Статистика за ' + start.strftime('%Y-%m')
-                            + '\n' + statistics_text(result))
+                self.notice(
+                    'monthly:' + start.strftime('%Y-%m'),
+                    'Статистика за ' + start.strftime('%Y-%m') + '\n' + statistics_text(result),
+                )
             with self.database() as db:
                 self.set(db, 'month', month)
         from release_update import recover_job, result_notice
+
         recover_job(self.root)
         result_notice(self)
 
     def handle(self, action, argument, event):
         if action == 'panel-status':
-            return {'installed': releases.installed(self.root), 'preferences': self.settings_view(),
-                    'welcome': self.settings()['welcome'], 'update_command': releases.comparison(self.root,None)['command']}
+            return {
+                'installed': releases.installed(self.root),
+                'preferences': self.settings_view(),
+                'welcome': self.settings()['welcome'],
+                'update_command': releases.comparison(self.root, None)['command'],
+            }
         if action == 'panel-version':
             return releases.comparison(self.root, self.check_releases(True))
         if action == 'panel-preferences':
@@ -228,9 +329,15 @@ class Panel:
             with self.database() as db:
                 self.set(db, key, enabled)
                 if not enabled:
-                    family = {'updates': 'Доступна новая версия Misbot %', 'registrations': 'Новый пользователь зарегистрировался:%',
-                              'statistics': 'Статистика за %'}[key]
-                    db.execute("UPDATE outbox SET state='cancelled' WHERE via='admin' AND state='pending' AND body LIKE ?", (family,))
+                    family = {
+                        'updates': 'Доступна новая версия Misbot %',
+                        'registrations': 'Новый пользователь зарегистрировался:%',
+                        'statistics': 'Статистика за %',
+                    }[key]
+                    db.execute(
+                        "UPDATE outbox SET state='cancelled' WHERE via='admin' AND state='pending' AND body LIKE ?",
+                        (family,),
+                    )
             return self.settings_view()
         if action == 'panel-welcome':
             if argument is None:
@@ -246,26 +353,43 @@ class Panel:
                 users = list(db.execute('SELECT mxid FROM users WHERE active=1 ORDER BY mxid'))
                 for user in users:
                     self.enqueue(db, 'broadcast:' + event, user['mxid'], 'welcome', body)
-            return {'queued': len(users), 'message': 'Рассылка поставлена в очередь; отправка ограничена по скорости.'}
+            return {
+                'queued': len(users),
+                'message': 'Рассылка поставлена в очередь; отправка ограничена по скорости.',
+            }
         if action == 'panel-statistics':
             return self.statistics(argument)
         if action == 'panel-update':
             from release_update import queue
+
             return queue(self.root, argument, event)
         if action == 'panel-outbox':
             with self.database() as db:
-                return {'items': [dict(row) for row in db.execute("SELECT id,recipient,via,body FROM outbox "
-                    "WHERE state='pending' AND next_at<=? ORDER BY rowid LIMIT 2", (self.clock(),))]}
+                return {
+                    'items': [
+                        dict(row)
+                        for row in db.execute(
+                            'SELECT id,recipient,via,body FROM outbox '
+                            "WHERE state='pending' AND next_at<=? ORDER BY rowid LIMIT 2",
+                            (self.clock(),),
+                        )
+                    ]
+                }
         if action == 'panel-ack':
             identifier, delivered = argument.get('id'), argument.get('delivered')
             if not isinstance(identifier, str) or not isinstance(delivered, bool):
                 raise ValueError('Invalid delivery receipt')
             with self.database() as db:
                 if delivered:
-                    db.execute("UPDATE outbox SET state='sent' WHERE id=? AND state='pending'", (identifier,))
+                    db.execute(
+                        "UPDATE outbox SET state='sent' WHERE id=? AND state='pending'",
+                        (identifier,),
+                    )
                 else:
-                    db.execute("UPDATE outbox SET attempts=attempts+1,next_at=? WHERE id=? AND state='pending'",
-                               (self.clock() + 300, identifier))
+                    db.execute(
+                        "UPDATE outbox SET attempts=attempts+1,next_at=? WHERE id=? AND state='pending'",
+                        (self.clock() + 300, identifier),
+                    )
             return {'recorded': True}
         raise ValueError('Unknown panel action')
 
@@ -281,5 +405,11 @@ def text(value):
 
 
 def statistics_text(result):
-    return ('Сообщений: ' + str(result['messages']) + '\nРегистраций: ' + str(result['registrations'])
-            + '\nЗвонки: недоступно\nСредняя длительность звонка: недоступно\n' + result['note'])
+    return (
+        'Сообщений: '
+        + str(result['messages'])
+        + '\nРегистраций: '
+        + str(result['registrations'])
+        + '\nЗвонки: недоступно\nСредняя длительность звонка: недоступно\n'
+        + result['note']
+    )

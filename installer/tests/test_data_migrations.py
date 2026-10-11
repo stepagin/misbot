@@ -1,4 +1,5 @@
 """Real old databases, interrupted transactions and verified release updates."""
+
 import hashlib
 import json
 from pathlib import Path
@@ -27,24 +28,28 @@ class DataMigrationTests(unittest.TestCase):
         self.path.parent.mkdir(mode=0o700, parents=True)
         with sqlite3.connect(self.path) as db:
             # Frozen layout of the old runtime, independent of migration SQL.
-            db.executescript('''
+            db.executescript("""
                 CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
                 CREATE TABLE users (mxid TEXT PRIMARY KEY, created INTEGER, active INTEGER);
                 CREATE TABLE outbox (id TEXT PRIMARY KEY, recipient TEXT NOT NULL,
                     via TEXT NOT NULL, body TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending',
                     attempts INTEGER NOT NULL DEFAULT 0, next_at REAL NOT NULL DEFAULT 0);
                 CREATE INDEX outbox_pending ON outbox(state,next_at);
-            ''')
+            """)
             db.execute('INSERT INTO settings VALUES (?,?)', ('welcome', json.dumps('MiXeD Привет')))
             db.execute('INSERT INTO settings VALUES (?,?)', ('notified_version', '"1.1.0"'))
             db.execute('INSERT INTO users VALUES (?,?,?)', ('@alice:fictional.example', 100, 1))
-            db.execute('INSERT INTO outbox VALUES (?,?,?,?,?,?,?)',
-                       ('delivery-id', '@alice:fictional.example', 'welcome', 'MiXeD', 'sent', 1, 0))
+            db.execute(
+                'INSERT INTO outbox VALUES (?,?,?,?,?,?,?)',
+                ('delivery-id', '@alice:fictional.example', 'welcome', 'MiXeD', 'sent', 1, 0),
+            )
 
     def rows(self):
         with sqlite3.connect(self.path) as db:
-            return {table: db.execute('SELECT * FROM ' + table).fetchall()
-                    for table in ('settings', 'users', 'outbox')}
+            return {
+                table: db.execute('SELECT * FROM ' + table).fetchall()
+                for table in ('settings', 'users', 'outbox')
+            }
 
     def test_legacy_rows_and_delivery_markers_survive_repeat(self):
         self.legacy()
@@ -85,8 +90,11 @@ class DataMigrationTests(unittest.TestCase):
                 self.path.unlink(missing_ok=True)
                 self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
                 with sqlite3.connect(self.path) as db:
-                    db.execute('PRAGMA user_version=99' if case == 'version'
-                               else 'CREATE TABLE settings (unexpected TEXT)')
+                    db.execute(
+                        'PRAGMA user_version=99'
+                        if case == 'version'
+                        else 'CREATE TABLE settings (unexpected TEXT)'
+                    )
                 before = self.path.read_bytes()
                 with self.assertRaises(RuntimeError):
                     migrations.check(self.root)
@@ -97,14 +105,25 @@ class DataMigrationTests(unittest.TestCase):
     def test_failure_rolls_back_ddl_history_and_version_together(self):
         self.legacy()
         before = self.rows()
-        broken = ((1, 'admin-panel-v1', (*migrations.MIGRATIONS[0][2],
-                   'CREATE TABLE interrupted (id INTEGER)', 'FICTIONAL INVALID SQL')),)
+        broken = (
+            (
+                1,
+                'admin-panel-v1',
+                (
+                    *migrations.MIGRATIONS[0][2],
+                    'CREATE TABLE interrupted (id INTEGER)',
+                    'FICTIONAL INVALID SQL',
+                ),
+            ),
+        )
         with patch.object(migrations, 'MIGRATIONS', broken):
             with self.assertRaises(sqlite3.Error):
                 migrations.migrate(self.root)
         with sqlite3.connect(self.path) as db:
             self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 0)
-            tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            tables = {
+                row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
             self.assertNotIn('interrupted', tables)
             self.assertNotIn('misbot_migrations', tables)
         self.assertEqual(self.rows(), before)
@@ -113,7 +132,7 @@ class DataMigrationTests(unittest.TestCase):
     def test_abrupt_process_exit_recovers_hot_journal_before_schema_check(self):
         self.legacy()
         before = self.rows()
-        script = '''import os, sqlite3, sys
+        script = """import os, sqlite3, sys
 db = sqlite3.connect(sys.argv[1])
 db.execute('PRAGMA cache_size=1')
 db.execute('BEGIN IMMEDIATE')
@@ -121,7 +140,7 @@ db.execute('CREATE TABLE crashed_transaction (body BLOB)')
 db.execute('INSERT INTO crashed_transaction VALUES (zeroblob(1048576))')
 db.execute('PRAGMA user_version=99')
 os._exit(23)
-'''
+"""
         result = subprocess.run([sys.executable, '-c', script, str(self.path)], timeout=10)
         self.assertEqual(result.returncode, 23)
         self.assertTrue(Path(str(self.path) + '-journal').exists())
@@ -132,12 +151,17 @@ os._exit(23)
     def test_skipping_versions_applies_all_steps_once(self):
         self.legacy()
         steps = (*migrations.MIGRATIONS, (2, 'fixture-v2', ('CREATE TABLE fixture (id INTEGER)',)))
-        with patch.object(migrations, 'MIGRATIONS', steps), patch.object(migrations, 'SCHEMA_VERSION', 2):
+        with (
+            patch.object(migrations, 'MIGRATIONS', steps),
+            patch.object(migrations, 'SCHEMA_VERSION', 2),
+        ):
             self.assertEqual(migrations.migrate(self.root), (0, 2))
             self.assertEqual(migrations.migrate(self.root), (2, 2))
             with sqlite3.connect(self.path) as db:
-                self.assertEqual(db.execute('SELECT version FROM misbot_migrations ORDER BY version').fetchall(),
-                                 [(1,), (2,)])
+                self.assertEqual(
+                    db.execute('SELECT version FROM misbot_migrations ORDER BY version').fetchall(),
+                    [(1,), (2,)],
+                )
 
     def test_published_history_cannot_be_rewritten(self):
         migrations.migrate(self.root)
@@ -153,7 +177,8 @@ os._exit(23)
         self.assertFalse((self.root / 'data').exists())
 
     def test_database_and_parent_symlinks_are_rejected(self):
-        other = self.root / 'other'; other.mkdir()
+        other = self.root / 'other'
+        other.mkdir()
         (self.root / 'data').symlink_to(other, target_is_directory=True)
         with self.assertRaisesRegex(RuntimeError, 'Unsafe'):
             migrations.migrate(self.root)
@@ -162,28 +187,51 @@ os._exit(23)
 
 class ReleaseDataMigrationTests(unittest.TestCase):
     def test_ui_release_updates_previous_versions_without_changing_private_data(self):
-        added={'terminal_views.py','ui_actions.py','third-party-licenses.md'}
-        entries=update.validate_manifest(self.source)[0]
-        (self.root/'secrets').mkdir(mode=0o700)
-        state_store.write_text(self.root/'secrets/fictional.key','FICTIONAL_KEEP_KEY')
-        private_before={name:(self.root/name).read_bytes() for name in ('settings.env','secrets/fictional.key')}
-        for previous in ('1.0.0','1.0.1','1.1.0','1.1.1'):
+        added = {'terminal_views.py', 'ui_actions.py', 'third-party-licenses.md'}
+        entries = update.validate_manifest(self.source)[0]
+        (self.root / 'secrets').mkdir(mode=0o700)
+        state_store.write_text(self.root / 'secrets/fictional.key', 'FICTIONAL_KEEP_KEY')
+        private_before = {
+            name: (self.root / name).read_bytes()
+            for name in ('settings.env', 'secrets/fictional.key')
+        }
+        for previous in ('1.0.0', '1.0.1', '1.1.0', '1.1.1'):
             with self.subTest(previous=previous):
-                info=update.release(self.root);info['version']=previous
-                (self.root/'release.json').write_text(json.dumps(info))
-                for name in added:(self.root/name).unlink(missing_ok=True)
-                (self.root/'SHA256SUMS').write_text(''.join(
-                    hashlib.sha256((self.root/name).read_bytes()).hexdigest()+'  '+name+'\n'
-                    for name in entries if name not in added))
-                with patch.object(update,'update_resource_check'),patch.object(update,'verified_backup'), \
-                        patch.object(update,'run_up',side_effect=self.start),patch.object(update,'refresh_command'):
-                    update.perform_update(self.source,self.root,'apply')
-                    update.perform_update(self.source,self.root,'apply')
-                self.assertEqual(update.release(self.root)['version'],'1.2.0')
-                self.assertEqual(migrations.check(self.root),1)
-                for name in added:self.assertEqual((self.root/name).read_bytes(),entries[name].read_bytes())
-                self.assertEqual(private_before,{name:(self.root/name).read_bytes() for name in private_before})
-                self.assertEqual(json.loads((self.root/'installation.json').read_text())['domain'],'fictional.example')
+                info = update.release(self.root)
+                info['version'] = previous
+                (self.root / 'release.json').write_text(json.dumps(info))
+                for name in added:
+                    (self.root / name).unlink(missing_ok=True)
+                (self.root / 'SHA256SUMS').write_text(
+                    ''.join(
+                        hashlib.sha256((self.root / name).read_bytes()).hexdigest()
+                        + '  '
+                        + name
+                        + '\n'
+                        for name in entries
+                        if name not in added
+                    )
+                )
+                with (
+                    patch.object(update, 'update_resource_check'),
+                    patch.object(update, 'verified_backup'),
+                    patch.object(update, 'run_up', side_effect=self.start),
+                    patch.object(update, 'refresh_command'),
+                ):
+                    update.perform_update(self.source, self.root, 'apply')
+                    update.perform_update(self.source, self.root, 'apply')
+                self.assertEqual(update.release(self.root)['version'], '1.2.0')
+                self.assertEqual(migrations.check(self.root), 1)
+                for name in added:
+                    self.assertEqual((self.root / name).read_bytes(), entries[name].read_bytes())
+                self.assertEqual(
+                    private_before,
+                    {name: (self.root / name).read_bytes() for name in private_before},
+                )
+                self.assertEqual(
+                    json.loads((self.root / 'installation.json').read_text())['domain'],
+                    'fictional.example',
+                )
 
     @classmethod
     def setUpClass(cls):
@@ -191,8 +239,16 @@ class ReleaseDataMigrationTests(unittest.TestCase):
         cls.addClassCleanup(cls.temp.cleanup)
         cls.base = Path(cls.temp.name).resolve()
         archive = cls.base / 'release.tar.gz'
-        subprocess.run([sys.executable, str(Path(__file__).resolve().parents[1] / 'build.py'),
-                        '--output', str(archive)], check=True, stdout=subprocess.DEVNULL)
+        subprocess.run(
+            [
+                sys.executable,
+                str(Path(__file__).resolve().parents[1] / 'build.py'),
+                '--output',
+                str(archive),
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
         with tarfile.open(archive) as package:
             package.extractall(cls.base / 'source', filter='data')
         cls.source = cls.base / 'source/matrix-installer'
@@ -207,34 +263,51 @@ class ReleaseDataMigrationTests(unittest.TestCase):
         info['version'] = '1.0.0'
         (self.root / 'release.json').write_text(json.dumps(info))
         entries = update.validate_manifest(self.source)[0]
-        (self.root / 'SHA256SUMS').write_text(''.join(
-            hashlib.sha256((self.root / name).read_bytes()).hexdigest() + '  ' + name + '\n'
-            for name in entries))
-        state_store.write_json(self.root / 'installation.json', {
-            'domain': 'fictional.example', 'config_format_version': 1, 'databases_initialized': True,
-            'applied_release_version': '1.0.0'})
+        (self.root / 'SHA256SUMS').write_text(
+            ''.join(
+                hashlib.sha256((self.root / name).read_bytes()).hexdigest() + '  ' + name + '\n'
+                for name in entries
+            )
+        )
+        state_store.write_json(
+            self.root / 'installation.json',
+            {
+                'domain': 'fictional.example',
+                'config_format_version': 1,
+                'databases_initialized': True,
+                'applied_release_version': '1.0.0',
+            },
+        )
         state_store.write_text(self.root / 'settings.env', 'FICTIONAL_PRIVATE_SETTINGS')
 
     def start(self, root, log):
         self.assertEqual(migrations.check(root), 1)
         info = json.loads((root / 'installation.json').read_text())
-        info.update(applied_release_version=update.release(root)['version'],
-                    applied_release_revision=update.validate_manifest(root)[1])
+        info.update(
+            applied_release_version=update.release(root)['version'],
+            applied_release_revision=update.validate_manifest(root)[1],
+        )
         state_store.write_json(root / 'installation.json', info)
         return 0
 
     def test_verified_backup_precedes_migration_and_migration_precedes_start(self):
         events = []
+
         def backup(*args):
             self.assertEqual(migrations.check(self.root), 0)
             self.assertFalse((self.root / 'data').exists())
             events.append('backup')
+
         def start(*args):
             events.append('start')
             return self.start(*args)
-        with patch.object(update, 'update_resource_check'), \
-                patch.object(update, 'verified_backup', side_effect=backup), \
-                patch.object(update, 'run_up', side_effect=start), patch.object(update, 'refresh_command'):
+
+        with (
+            patch.object(update, 'update_resource_check'),
+            patch.object(update, 'verified_backup', side_effect=backup),
+            patch.object(update, 'run_up', side_effect=start),
+            patch.object(update, 'refresh_command'),
+        ):
             update.perform_update(self.source, self.root, 'apply')
         self.assertEqual(events, ['backup', 'start'])
         self.assertFalse((self.root / 'update-journal.json').exists())
@@ -245,14 +318,19 @@ class ReleaseDataMigrationTests(unittest.TestCase):
         with sqlite3.connect(path) as db:
             db.execute('PRAGMA user_version=99')
         before = update.validate_manifest(self.root)[1]
-        with patch.object(update, 'verified_backup') as backup, patch.object(update, 'snapshot') as snapshot:
+        with (
+            patch.object(update, 'verified_backup') as backup,
+            patch.object(update, 'snapshot') as snapshot,
+        ):
             with self.assertRaisesRegex(RuntimeError, 'data check failed'):
                 update.perform_update(self.source, self.root, 'apply')
-            backup.assert_not_called(); snapshot.assert_not_called()
+            backup.assert_not_called()
+            snapshot.assert_not_called()
         self.assertEqual(update.validate_manifest(self.root)[1], before)
 
     def test_failed_start_restores_sources_without_erasing_new_data(self):
         calls = []
+
         def start(root, log):
             calls.append(update.release(root)['version'])
             if len(calls) == 1:
@@ -261,47 +339,78 @@ class ReleaseDataMigrationTests(unittest.TestCase):
                 return 1
             self.assertEqual(migrations.check(root), 1)
             return 0
-        with patch.object(update, 'update_resource_check'), patch.object(update, 'verified_backup'), \
-                patch.object(update, 'run_up', side_effect=start), patch.object(update, 'refresh_command'):
+
+        with (
+            patch.object(update, 'update_resource_check'),
+            patch.object(update, 'verified_backup'),
+            patch.object(update, 'run_up', side_effect=start),
+            patch.object(update, 'refresh_command'),
+        ):
             with self.assertRaisesRegex(RuntimeError, 'rollback healthy=True'):
                 update.perform_update(self.source, self.root, 'apply')
         self.assertEqual(calls, [update.release(self.source)['version'], '1.0.0'])
         with sqlite3.connect(self.root / 'data/admin-panel/panel.sqlite') as db:
-            self.assertEqual(db.execute('SELECT value FROM settings WHERE key="welcome"').fetchone()[0],
-                             '"KEEP_NEW_VALUE"')
+            self.assertEqual(
+                db.execute('SELECT value FROM settings WHERE key="welcome"').fetchone()[0],
+                '"KEEP_NEW_VALUE"',
+            )
 
     def test_crash_after_migration_recovers_previous_sources_and_allows_retry(self):
         entries = update.validate_manifest(self.source)[0]
         checkpoint = update.snapshot(self.root, entries, 'interrupted-fixture')
-        update.record_owner(self.root, {'format': 1, 'stage': str(checkpoint.relative_to(self.root)),
-            'candidate_files': sorted(entries), 'component_transition': None})
+        update.record_owner(
+            self.root,
+            {
+                'format': 1,
+                'stage': str(checkpoint.relative_to(self.root)),
+                'candidate_files': sorted(entries),
+                'component_transition': None,
+            },
+        )
         migrations.migrate(self.root)
         with sqlite3.connect(self.root / 'data/admin-panel/panel.sqlite') as db:
             db.execute('INSERT INTO settings VALUES (?,?)', ('notified_version', '"1.1.0"'))
         update.copy_sources(entries, self.root)
-        with patch.object(update, 'run_up', return_value=0), patch.object(update, 'refresh_command'):
+        with (
+            patch.object(update, 'run_up', return_value=0),
+            patch.object(update, 'refresh_command'),
+        ):
             update.recover_update(self.root, self.source)
         self.assertEqual(update.release(self.root)['version'], '1.0.0')
         self.assertEqual(migrations.check(self.root), 1)
-        with patch.object(update, 'update_resource_check'), patch.object(update, 'verified_backup'), \
-                patch.object(update, 'run_up', side_effect=self.start), patch.object(update, 'refresh_command'):
+        with (
+            patch.object(update, 'update_resource_check'),
+            patch.object(update, 'verified_backup'),
+            patch.object(update, 'run_up', side_effect=self.start),
+            patch.object(update, 'refresh_command'),
+        ):
             update.perform_update(self.source, self.root, 'apply')
         with sqlite3.connect(self.root / 'data/admin-panel/panel.sqlite') as db:
-            self.assertEqual(db.execute('SELECT value FROM settings WHERE key="notified_version"').fetchone()[0],
-                             '"1.1.0"')
+            self.assertEqual(
+                db.execute('SELECT value FROM settings WHERE key="notified_version"').fetchone()[0],
+                '"1.1.0"',
+            )
 
     def test_recovery_does_not_start_old_runtime_on_unknown_data(self):
         entries = update.validate_manifest(self.source)[0]
         checkpoint = update.snapshot(self.root, entries, 'unknown-fixture')
-        update.record_owner(self.root, {'format': 1, 'stage': str(checkpoint.relative_to(self.root)),
-            'candidate_files': sorted(entries), 'component_transition': None})
+        update.record_owner(
+            self.root,
+            {
+                'format': 1,
+                'stage': str(checkpoint.relative_to(self.root)),
+                'candidate_files': sorted(entries),
+                'component_transition': None,
+            },
+        )
         migrations.migrate(self.root)
         with sqlite3.connect(self.root / 'data/admin-panel/panel.sqlite') as db:
             db.execute('PRAGMA user_version=99')
         with patch.object(update, 'run_up') as start, patch.object(update, 'restore') as restore:
             with self.assertRaisesRegex(RuntimeError, 'rollback-check failed'):
                 update.recover_update(self.root, self.source)
-            start.assert_not_called(); restore.assert_not_called()
+            start.assert_not_called()
+            restore.assert_not_called()
         self.assertTrue((self.root / 'update-journal.json').exists())
 
     def test_release_110_updates_and_repeats_without_changing_existing_data(self):
@@ -309,21 +418,32 @@ class ReleaseDataMigrationTests(unittest.TestCase):
         info.update(version='1.1.0', data_schema_version=1)
         (self.root / 'release.json').write_text(json.dumps(info))
         entries = update.validate_manifest(self.source)[0]
-        (self.root / 'SHA256SUMS').write_text(''.join(
-            hashlib.sha256((self.root / name).read_bytes()).hexdigest() + '  ' + name + '\n'
-            for name in entries))
+        (self.root / 'SHA256SUMS').write_text(
+            ''.join(
+                hashlib.sha256((self.root / name).read_bytes()).hexdigest() + '  ' + name + '\n'
+                for name in entries
+            )
+        )
         metadata = json.loads((self.root / 'installation.json').read_text())
         metadata['applied_release_version'] = '1.1.0'
         state_store.write_json(self.root / 'installation.json', metadata)
         migrations.migrate(self.root)
         with sqlite3.connect(self.root / 'data/admin-panel/panel.sqlite') as db:
             db.execute('INSERT INTO settings VALUES (?,?)', ('welcome', '"RETAIN_110_VALUE"'))
-        with patch.object(update, 'update_resource_check'), patch.object(update, 'verified_backup'), \
-                patch.object(update, 'run_up', side_effect=self.start), patch.object(update, 'refresh_command'):
+        with (
+            patch.object(update, 'update_resource_check'),
+            patch.object(update, 'verified_backup'),
+            patch.object(update, 'run_up', side_effect=self.start),
+            patch.object(update, 'refresh_command'),
+        ):
             update.perform_update(self.source, self.root, 'apply')
             update.perform_update(self.source, self.root, 'apply')
-        self.assertEqual(update.release(self.root)['version'], update.release(self.source)['version'])
+        self.assertEqual(
+            update.release(self.root)['version'], update.release(self.source)['version']
+        )
         self.assertEqual(migrations.check(self.root), 1)
         with sqlite3.connect(self.root / 'data/admin-panel/panel.sqlite') as db:
-            self.assertEqual(db.execute('SELECT value FROM settings WHERE key="welcome"').fetchone()[0],
-                             '"RETAIN_110_VALUE"')
+            self.assertEqual(
+                db.execute('SELECT value FROM settings WHERE key="welcome"').fetchone()[0],
+                '"RETAIN_110_VALUE"',
+            )

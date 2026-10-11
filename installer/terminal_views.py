@@ -1,4 +1,5 @@
 """Rich presentation for SSH, with a plain fallback and literal user values."""
+
 import os
 import sys
 
@@ -16,8 +17,10 @@ except ImportError:
 def literal(value):
     """Never allow terminal control sequences in labels or configuration values."""
     return ''.join(
-        char if char in '\n\t' or (ord(char) >= 32 and not 127 <= ord(char) <= 159)
-        else '\\x' + format(ord(char), '02x') for char in str(value)
+        char
+        if char in '\n\t' or (ord(char) >= 32 and not 127 <= ord(char) <= 159)
+        else '\\x' + format(ord(char), '02x')
+        for char in str(value)
     )
 
 
@@ -49,8 +52,15 @@ class TerminalView:
         content.append(literal(title), style='bold')
         if subtitle:
             content.append('\n' + literal(subtitle), style='dim')
-        self.console.print(Panel(content, box=box.ROUNDED, border_style='cyan',
-                                 padding=(1, 2), width=min(self.console.width, 100)))
+        self.console.print(
+            Panel(
+                content,
+                box=box.ROUNDED,
+                border_style='cyan',
+                padding=(1, 2),
+                width=min(self.console.width, 100),
+            )
+        )
 
     def details(self, rows):
         if self.compact:
@@ -84,12 +94,20 @@ class TerminalView:
         self.console.print(table)
 
     def wizard_step(self, index, names):
-        self.heading('Первоначальная настройка',
-                     'Шаг ' + str(index + 1) + ' из ' + str(len(names)) + ' · ' + names[index])
+        self.heading(
+            'Первоначальная настройка',
+            'Шаг ' + str(index + 1) + ' из ' + str(len(names)) + ' · ' + names[index],
+        )
         if not self.compact:
-            self.console.print(ProgressBar(total=len(names), completed=index,
-                                           width=min(self.console.width - 2, 60),
-                                           complete_style='cyan', finished_style='cyan'))
+            self.console.print(
+                ProgressBar(
+                    total=len(names),
+                    completed=index,
+                    width=min(self.console.width - 2, 60),
+                    complete_style='cyan',
+                    finished_style='cyan',
+                )
+            )
         if index + 1 < len(names):
             self.message('Далее: ' + names[index + 1], 'dim')
 

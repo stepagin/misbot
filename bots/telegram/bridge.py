@@ -3,6 +3,7 @@
 The Telegram container receives neither MAS admin credentials nor Docker access.
 MAS device authorization and current MAS privileges are checked here, not in the UI.
 """
+
 import argparse
 from datetime import datetime, timezone
 import json
@@ -30,7 +31,13 @@ LOG = logging.getLogger('bridge')
 
 
 def check_peer(uid, action):
-    matrix_actions = {'servers', 'matrix_identity', 'matrix_invite', 'matrix_tokens', 'matrix_revoke'}
+    matrix_actions = {
+        'servers',
+        'matrix_identity',
+        'matrix_invite',
+        'matrix_tokens',
+        'matrix_revoke',
+    }
     if uid == 0:
         return
     if uid == 10002 and action in matrix_actions:
@@ -38,8 +45,6 @@ def check_peer(uid, action):
     if uid == 10001 and action not in matrix_actions - {'servers'}:
         return
     raise BotError('Это действие недоступно этому боту.')
-
-
 
 
 class Bridge:
@@ -51,7 +56,7 @@ class Bridge:
         self.db = sqlite3.connect(self.root / 'data/bot-control.sqlite3', check_same_thread=False)
         os.chmod(self.root / 'data/bot-control.sqlite3', 0o600)
         self.db.row_factory = sqlite3.Row
-        self.db.executescript('''
+        self.db.executescript("""
         CREATE TABLE IF NOT EXISTS invitations (
             server TEXT, uid INTEGER, request TEXT UNIQUE, code TEXT UNIQUE,
             expires INTEGER, resource TEXT, inviter_name TEXT, created_at INTEGER,
@@ -65,14 +70,16 @@ class Bridge:
             id TEXT PRIMARY KEY, server TEXT, uid INTEGER, action TEXT, domain TEXT, expires INTEGER);
         CREATE TABLE IF NOT EXISTS management_jobs (
             id TEXT PRIMARY KEY, server TEXT, uid INTEGER, operation TEXT, state TEXT, result TEXT);
-        ''')
+        """)
         # Never repeat an operation after the control service has restarted.
         self.db.execute("UPDATE management_jobs SET state='interrupted' WHERE state='running'")
         columns = {row['name'] for row in self.db.execute('PRAGMA table_info(auth_requests)')}
         for name in ('user_code', 'verification_uri'):
             if name not in columns:
                 self.db.execute('ALTER TABLE auth_requests ADD COLUMN ' + name + ' TEXT')
-        invitation_columns = {row['name'] for row in self.db.execute('PRAGMA table_info(invitations)')}
+        invitation_columns = {
+            row['name'] for row in self.db.execute('PRAGMA table_info(invitations)')
+        }
         for name, kind in (('inviter_name', 'TEXT'), ('created_at', 'INTEGER')):
             if name not in invitation_columns:
                 self.db.execute('ALTER TABLE invitations ADD COLUMN ' + name + ' ' + kind)
@@ -91,7 +98,9 @@ class Bridge:
 
     def member(self, name, uid):
         self.poll_auths()
-        row = self.db.execute('SELECT * FROM authorizations WHERE server=? AND uid=?', (name, uid)).fetchone()
+        row = self.db.execute(
+            'SELECT * FROM authorizations WHERE server=? AND uid=?', (name, uid)
+        ).fetchone()
         if not row or row['expires'] <= time.time():
             raise BotError('Сначала войди в Misbot: /start.')
         return self.apis[name].active_user(row['user_id'])
@@ -106,27 +115,45 @@ class Bridge:
     def poll_auths(self):
         with self.lock:
             now = int(time.time())
-            rows = self.db.execute('SELECT * FROM auth_requests WHERE expires>? AND next_poll<=? AND error IS NULL', (now, now)).fetchall()
+            rows = self.db.execute(
+                'SELECT * FROM auth_requests WHERE expires>? AND next_poll<=? AND error IS NULL',
+                (now, now),
+            ).fetchall()
             for row in rows:
                 api = self.apis[row['server']]
                 try:
                     status, token = api.device_token(row['device_code'])
                     if status == 200:
                         user = api.device_user(token)
-                        self.db.execute('INSERT OR REPLACE INTO authorizations VALUES (?,?,?,?)',
-                            (row['server'], row['uid'], user['id'], now + 86400))
-                        self.db.execute('DELETE FROM auth_requests WHERE request=?', (row['request'],))
+                        self.db.execute(
+                            'INSERT OR REPLACE INTO authorizations VALUES (?,?,?,?)',
+                            (row['server'], row['uid'], user['id'], now + 86400),
+                        )
+                        self.db.execute(
+                            'DELETE FROM auth_requests WHERE request=?', (row['request'],)
+                        )
                         LOG.info('account authorization completed server=%s', row['server'])
                     elif token.get('error') in ('authorization_pending', 'slow_down'):
                         interval = row['interval'] + (5 if token.get('error') == 'slow_down' else 0)
-                        self.db.execute('UPDATE auth_requests SET interval=?,next_poll=? WHERE request=?',
-                            (interval, now + interval, row['request']))
+                        self.db.execute(
+                            'UPDATE auth_requests SET interval=?,next_poll=? WHERE request=?',
+                            (interval, now + interval, row['request']),
+                        )
                     else:
-                        self.db.execute('UPDATE auth_requests SET error=? WHERE request=?', ('denied', row['request']))
+                        self.db.execute(
+                            'UPDATE auth_requests SET error=? WHERE request=?',
+                            ('denied', row['request']),
+                        )
                 except BotError:
-                    self.db.execute('UPDATE auth_requests SET error=? WHERE request=?', ('denied', row['request']))
+                    self.db.execute(
+                        'UPDATE auth_requests SET error=? WHERE request=?',
+                        ('denied', row['request']),
+                    )
                 except Exception as error:
-                    self.db.execute('UPDATE auth_requests SET next_poll=? WHERE request=?', (now + 15, row['request']))
+                    self.db.execute(
+                        'UPDATE auth_requests SET next_poll=? WHERE request=?',
+                        (now + 15, row['request']),
+                    )
                     LOG.error('device authorization poll failed type=%s', type(error).__name__)
                 self.db.commit()
 
@@ -145,8 +172,10 @@ class Bridge:
             LOG.error('management operation failed type=%s', type(error).__name__)
             result = {'operation': operation, 'ok': False, 'recovery_required': True}
         with self.lock:
-            self.db.execute("UPDATE management_jobs SET state='finished',result=? WHERE id=?",
-                            (json.dumps(result), key))
+            self.db.execute(
+                "UPDATE management_jobs SET state='finished',result=? WHERE id=?",
+                (json.dumps(result), key),
+            )
             self.db.commit()
 
     def management(self, request, name, uid):
@@ -157,12 +186,18 @@ class Bridge:
             raise BotError('Управление службами этого сервера не подключено.')
         action = request['action']
         if action == 'manage_job':
-            row = self.db.execute('SELECT * FROM management_jobs WHERE id=? AND server=? AND uid=?',
-                                  (request.get('job'), name, uid)).fetchone()
+            row = self.db.execute(
+                'SELECT * FROM management_jobs WHERE id=? AND server=? AND uid=?',
+                (request.get('job'), name, uid),
+            ).fetchone()
             if not row:
                 raise BotError('Операция не найдена или принадлежит другому пользователю.')
-            return {'job': row['id'], 'operation': row['operation'], 'state': row['state'],
-                    'result': json.loads(row['result']) if row['result'] else None}
+            return {
+                'job': row['id'],
+                'operation': row['operation'],
+                'state': row['state'],
+                'result': json.loads(row['result']) if row['result'] else None,
+            }
         operation = request.get('operation')
         if action != 'manage_apply' and (operation not in COMMANDS or operation not in enabled):
             raise BotError('Эта команда управления не подключена.')
@@ -175,13 +210,17 @@ class Bridge:
                 raise BotError('Эта операция не требует подтверждения.')
             key = secrets.token_urlsafe(16)
             self.db.execute('DELETE FROM confirmations WHERE expires<?', (int(time.time()),))
-            self.db.execute('INSERT INTO confirmations VALUES (?,?,?,?,?,?)',
-                            (key, name, uid, 'manage:' + operation, '', int(time.time()) + 300))
+            self.db.execute(
+                'INSERT INTO confirmations VALUES (?,?,?,?,?,?)',
+                (key, name, uid, 'manage:' + operation, '', int(time.time()) + 300),
+            )
             self.db.commit()
             return {'confirmation': key, 'operation': operation}
         if action == 'manage_apply':
-            row = self.db.execute('SELECT * FROM confirmations WHERE id=? AND uid=? AND server=?',
-                                  (request.get('confirmation'), uid, name)).fetchone()
+            row = self.db.execute(
+                'SELECT * FROM confirmations WHERE id=? AND uid=? AND server=?',
+                (request.get('confirmation'), uid, name),
+            ).fetchone()
             if not row or row['expires'] <= time.time() or not row['action'].startswith('manage:'):
                 raise BotError('Подтверждение истекло или уже использовано.')
             operation = row['action'].removeprefix('manage:')
@@ -191,10 +230,14 @@ class Bridge:
                 raise BotError('Дождись завершения текущей операции.')
             key = secrets.token_urlsafe(16)
             self.db.execute('DELETE FROM confirmations WHERE id=?', (row['id'],))
-            self.db.execute('INSERT INTO management_jobs VALUES (?,?,?,?,?,NULL)',
-                            (key, name, uid, operation, 'running'))
+            self.db.execute(
+                'INSERT INTO management_jobs VALUES (?,?,?,?,?,NULL)',
+                (key, name, uid, operation, 'running'),
+            )
             self.db.commit()
-            threading.Thread(target=self.management_job, args=(key, config, operation), daemon=True).start()
+            threading.Thread(
+                target=self.management_job, args=(key, config, operation), daemon=True
+            ).start()
             LOG.info('management operation started operation=%s server=%s', operation, name)
             return {'job': key, 'operation': operation, 'state': 'running', 'result': None}
         raise BotError('Неизвестная операция.')
@@ -212,21 +255,46 @@ class Bridge:
             code = 'MIS-' + secrets.token_urlsafe(18)
             created_at = int(time.time())
             expires = created_at + policy['invitation_lifetime_seconds']
-            self.db.execute('INSERT INTO invitations '
+            self.db.execute(
+                'INSERT INTO invitations '
                 '(server,uid,request,code,expires,resource,inviter_name,created_at) '
                 'VALUES (?,?,?,?,?,NULL,?,?)',
-                (name, uid, request_id, code, expires, inviter_name, created_at))
+                (name, uid, request_id, code, expires, inviter_name, created_at),
+            )
             self.db.commit()
-            row = self.db.execute('SELECT * FROM invitations WHERE request=?', (request_id,)).fetchone()
+            row = self.db.execute(
+                'SELECT * FROM invitations WHERE request=?', (request_id,)
+            ).fetchone()
         if row['resource']:
             return api.api('user-registration-tokens/' + row['resource'])['data']
         # Recover a POST whose response was lost without issuing a second token.
-        existing = next((x for x in api.items('user-registration-tokens')
-                         if x['attributes']['token'] == row['code']), None) if recovering else None
-        resource = existing or api.api('user-registration-tokens', method='POST', data={
-            'token': row['code'], 'usage_limit': policy['invitation_usage_limit'],
-            'expires_at': datetime.fromtimestamp(row['expires'], timezone.utc).isoformat()})['data']
-        self.db.execute('UPDATE invitations SET resource=? WHERE request=?', (resource['id'], request_id))
+        existing = (
+            next(
+                (
+                    x
+                    for x in api.items('user-registration-tokens')
+                    if x['attributes']['token'] == row['code']
+                ),
+                None,
+            )
+            if recovering
+            else None
+        )
+        resource = (
+            existing
+            or api.api(
+                'user-registration-tokens',
+                method='POST',
+                data={
+                    'token': row['code'],
+                    'usage_limit': policy['invitation_usage_limit'],
+                    'expires_at': datetime.fromtimestamp(row['expires'], timezone.utc).isoformat(),
+                },
+            )['data']
+        )
+        self.db.execute(
+            'UPDATE invitations SET resource=? WHERE request=?', (resource['id'], request_id)
+        )
         self.db.commit()
         return resource
 
@@ -243,7 +311,14 @@ class Bridge:
             target = backup / p.name
             target.write_bytes(content)
             target.chmod(0o600)
-        command = ['docker', 'compose', '--project-directory', str(root), '-f', str(root / 'compose.yaml')]
+        command = [
+            'docker',
+            'compose',
+            '--project-directory',
+            str(root),
+            '-f',
+            str(root / 'compose.yaml'),
+        ]
         try:
             homeserver = yaml.safe_load(saved[hs])
             homeserver['federation_domain_whitelist'] = domains
@@ -262,27 +337,42 @@ class Bridge:
                 self.restart_healthy(command, cfg['synapse_url'])
             except Exception:
                 LOG.error('federation rollback health check failed')
-            raise BotError('Не удалось применить список. Предыдущая конфигурация восстановлена; обратись к администратору.')
+            raise BotError(
+                'Не удалось применить список. Предыдущая конфигурация восстановлена; обратись к администратору.'
+            )
         LOG.info('federation configuration applied server=%s count=%s', name, len(domains))
 
     def federation_backend(self, name):
-        root=Path(self.config['servers'][name]['stack_root'])
-        if not root.is_absolute() or root.resolve()!=root or root.stat().st_uid!=0 or root.stat().st_mode&0o022:
+        root = Path(self.config['servers'][name]['stack_root'])
+        if (
+            not root.is_absolute()
+            or root.resolve() != root
+            or root.stat().st_uid != 0
+            or root.stat().st_mode & 0o022
+        ):
             raise BotError('Проверь доверенный каталог Misbot через SSH.')
-        source=root/'command_wrapper.py'
-        if source.is_symlink() or source.stat().st_uid!=0 or source.stat().st_mode&0o022:
+        source = root / 'command_wrapper.py'
+        if source.is_symlink() or source.stat().st_uid != 0 or source.stat().st_mode & 0o022:
             raise BotError('Проверь публичный runtime Misbot через SSH.')
-        if str(root) not in sys.path:sys.path.insert(0,str(root))
+        if str(root) not in sys.path:
+            sys.path.insert(0, str(root))
         import command_wrapper
+
         command_wrapper.trusted_installation(root)
-        if json.loads((root/'installation.json').read_text()).get('backend')!='existing-compose':
+        if (
+            json.loads((root / 'installation.json').read_text()).get('backend')
+            != 'existing-compose'
+        ):
             raise BotError('Общий backend Misbot не подключён.')
         import federation
+
         return federation.backend(root)
 
     @staticmethod
     def restart_healthy(command, url):
-        subprocess.run(command + ['restart', 'synapse'], check=True, capture_output=True, timeout=50)
+        subprocess.run(
+            command + ['restart', 'synapse'], check=True, capture_output=True, timeout=50
+        )
         for _ in range(25):
             try:
                 r = requests.get(url.rstrip('/') + '/_matrix/client/versions', timeout=3)
@@ -297,14 +387,30 @@ class Bridge:
         with self.lock:
             action = request.get('action')
             if action == 'servers':
-                return {name: {'lifetime_seconds': p['invitation_lifetime_seconds'],
-                    'usage_limit': p['invitation_usage_limit'], 'registration_required': p['registration_required'],
-                    'federation_enabled': self.config['servers'][name].get('federation_enabled', True),
-                    'management_actions': self.config['servers'][name].get('management_actions', [])}
-                    for name, p in self.policies().items()}
+                return {
+                    name: {
+                        'lifetime_seconds': p['invitation_lifetime_seconds'],
+                        'usage_limit': p['invitation_usage_limit'],
+                        'registration_required': p['registration_required'],
+                        'federation_enabled': self.config['servers'][name].get(
+                            'federation_enabled', True
+                        ),
+                        'management_actions': self.config['servers'][name].get(
+                            'management_actions', []
+                        ),
+                    }
+                    for name, p in self.policies().items()
+                }
             uid = request.get('uid')
-            matrix_action = action in ('matrix_identity', 'matrix_invite', 'matrix_tokens', 'matrix_revoke')
-            if not matrix_action and (not isinstance(uid, int) or isinstance(uid, bool) or uid <= 0):
+            matrix_action = action in (
+                'matrix_identity',
+                'matrix_invite',
+                'matrix_tokens',
+                'matrix_revoke',
+            )
+            if not matrix_action and (
+                not isinstance(uid, int) or isinstance(uid, bool) or uid <= 0
+            ):
                 raise BotError('Недопустимый пользователь Telegram.')
             name, api, policy = self.server(request)
             if action in ('manage_read', 'manage_prepare', 'manage_apply', 'manage_job'):
@@ -321,8 +427,11 @@ class Bridge:
                 except BotError:
                     return {'authenticated': False}
                 attr = user['attributes']
-                return {'authenticated': True, 'username': attr['username'],
-                        'admin': bool(attr.get('admin', attr.get('can_request_admin', False)))}
+                return {
+                    'authenticated': True,
+                    'username': attr['username'],
+                    'admin': bool(attr.get('admin', attr.get('can_request_admin', False))),
+                }
             if action in ('invite', 'tokens', 'revoke') and not matrix_action:
                 user = self.member(name, uid)
             if action == 'invite':
@@ -336,70 +445,126 @@ class Bridge:
                 limit = request.get('limit', 5) if matrix_action else 5
                 if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 20:
                     raise BotError('Недопустимый размер страницы.')
-                pending = self.db.execute('SELECT request FROM invitations WHERE server=? AND uid=? AND resource IS NULL',
-                    (name, uid)).fetchall()
+                pending = self.db.execute(
+                    'SELECT request FROM invitations WHERE server=? AND uid=? AND resource IS NULL',
+                    (name, uid),
+                ).fetchall()
                 for row in pending:
                     self.invite(name, api, policy, uid, row['request'])
                 if matrix_action:
-                    rows = self.db.execute('SELECT resource FROM invitations WHERE server=? AND uid=? AND resource IS NOT NULL '
-                        'ORDER BY rowid DESC', (name, uid)).fetchall()
+                    rows = self.db.execute(
+                        'SELECT resource FROM invitations WHERE server=? AND uid=? AND resource IS NOT NULL '
+                        'ORDER BY rowid DESC',
+                        (name, uid),
+                    ).fetchall()
                     # Filter before pagination. Used invitations remain visible even
                     # after their expiry; explicit revocation always hides them.
                     visible = []
                     for row in rows:
                         item = api.api('user-registration-tokens/' + row['resource'])['data']
                         attr = item['attributes']
-                        expired = attr.get('expires_at') and datetime.fromisoformat(attr['expires_at'].replace('Z', '+00:00')).timestamp() <= time.time()
+                        expired = (
+                            attr.get('expires_at')
+                            and datetime.fromisoformat(
+                                attr['expires_at'].replace('Z', '+00:00')
+                            ).timestamp()
+                            <= time.time()
+                        )
                         if attr.get('revoked_at') or (expired and not attr.get('times_used', 0)):
                             continue
                         visible.append(item)
                         if len(visible) > offset + limit:
                             break
-                    return {'tokens': visible[offset:offset + limit], 'has_more': len(visible) > offset + limit}
-                rows = self.db.execute('SELECT resource FROM invitations WHERE server=? AND uid=? AND resource IS NOT NULL '
-                    'ORDER BY rowid DESC LIMIT 6 OFFSET ?', (name, uid, offset)).fetchall()
-                return {'tokens': [api.api('user-registration-tokens/' + x['resource'])['data'] for x in rows[:5]],
-                    'has_more': len(rows) > 5}
+                    return {
+                        'tokens': visible[offset : offset + limit],
+                        'has_more': len(visible) > offset + limit,
+                    }
+                rows = self.db.execute(
+                    'SELECT resource FROM invitations WHERE server=? AND uid=? AND resource IS NOT NULL '
+                    'ORDER BY rowid DESC LIMIT 6 OFFSET ?',
+                    (name, uid, offset),
+                ).fetchall()
+                return {
+                    'tokens': [
+                        api.api('user-registration-tokens/' + x['resource'])['data']
+                        for x in rows[:5]
+                    ],
+                    'has_more': len(rows) > 5,
+                }
             if action == 'revoke':
                 resource = request.get('resource')
-                own = self.db.execute('SELECT 1 FROM invitations WHERE server=? AND uid=? AND resource=?',
-                                      (name, uid, resource)).fetchone()
+                own = self.db.execute(
+                    'SELECT 1 FROM invitations WHERE server=? AND uid=? AND resource=?',
+                    (name, uid, resource),
+                ).fetchone()
                 if not own:
                     raise BotError('Можно отозвать только своё приглашение.')
                 current = api.api('user-registration-tokens/' + resource)['data']
                 if current['attributes'].get('revoked_at'):
                     return current
-                return api.api('user-registration-tokens/' + resource + '/revoke', method='POST')['data']
+                return api.api('user-registration-tokens/' + resource + '/revoke', method='POST')[
+                    'data'
+                ]
             if action == 'auth_start':
                 now = int(time.time())
-                pending = self.db.execute('SELECT * FROM auth_requests WHERE server=? AND uid=? AND expires>? AND error IS NULL',
-                    (name, uid, now)).fetchone()
+                pending = self.db.execute(
+                    'SELECT * FROM auth_requests WHERE server=? AND uid=? AND expires>? AND error IS NULL',
+                    (name, uid, now),
+                ).fetchone()
                 if pending and pending['user_code'] and pending['verification_uri']:
-                    return {'url': pending['verification_uri'], 'user_code': pending['user_code'],
-                            'expires_in': pending['expires'] - now}
+                    return {
+                        'url': pending['verification_uri'],
+                        'user_code': pending['user_code'],
+                        'expires_in': pending['expires'] - now,
+                    }
                 authorization = api.device_start()
                 key = secrets.token_urlsafe(24)
-                uri = authorization.get('verification_uri_complete', authorization['verification_uri'])
-                self.db.execute('DELETE FROM auth_requests WHERE (uid=? AND server=?) OR expires<?', (uid, name, now))
-                self.db.execute('INSERT INTO auth_requests (request,server,uid,device_code,expires,interval,next_poll,error,user_code,verification_uri) '
+                uri = authorization.get(
+                    'verification_uri_complete', authorization['verification_uri']
+                )
+                self.db.execute(
+                    'DELETE FROM auth_requests WHERE (uid=? AND server=?) OR expires<?',
+                    (uid, name, now),
+                )
+                self.db.execute(
+                    'INSERT INTO auth_requests (request,server,uid,device_code,expires,interval,next_poll,error,user_code,verification_uri) '
                     'VALUES (?,?,?,?,?,?,?,NULL,?,?)',
-                    (key, name, uid, authorization['device_code'], now + authorization['expires_in'],
-                     authorization.get('interval', 5), now + authorization.get('interval', 5), authorization['user_code'], uri))
+                    (
+                        key,
+                        name,
+                        uid,
+                        authorization['device_code'],
+                        now + authorization['expires_in'],
+                        authorization.get('interval', 5),
+                        now + authorization.get('interval', 5),
+                        authorization['user_code'],
+                        uri,
+                    ),
+                )
                 self.db.commit()
-                return {'url': uri,
-                        'user_code': authorization['user_code'], 'expires_in': authorization['expires_in']}
+                return {
+                    'url': uri,
+                    'user_code': authorization['user_code'],
+                    'expires_in': authorization['expires_in'],
+                }
             if action == 'logout':
                 self.db.execute('DELETE FROM authorizations WHERE server=? AND uid=?', (name, uid))
                 self.db.execute('DELETE FROM auth_requests WHERE server=? AND uid=?', (name, uid))
                 self.db.commit()
                 return True
             if action in ('federation', 'fed_prepare', 'fed_apply'):
-                user=self.admin(name, uid)  # Never trust a cached role or a role sent by the container.
+                user = self.admin(
+                    name, uid
+                )  # Never trust a cached role or a role sent by the container.
                 if not self.config['servers'][name].get('federation_enabled', True):
                     raise BotError('Изменение федерации через этого бота не подключено.')
-                adopted=self.config['servers'][name].get('federation_backend')=='misbot'
-                actor='@'+user['attributes']['username']+':'+name if adopted else None
-                current=self.federation_backend(name).operate('servers',actor=actor)['servers'] if adopted else policy['federation_servers']
+                adopted = self.config['servers'][name].get('federation_backend') == 'misbot'
+                actor = '@' + user['attributes']['username'] + ':' + name if adopted else None
+                current = (
+                    self.federation_backend(name).operate('servers', actor=actor)['servers']
+                    if adopted
+                    else policy['federation_servers']
+                )
                 if action == 'federation':
                     return current
                 if action == 'fed_prepare':
@@ -410,21 +575,44 @@ class Bridge:
                     if operation == 'remove' and target == name:
                         raise BotError('Свой сервер остаётся в списке.')
                     key = secrets.token_urlsafe(16)
-                    self.db.execute('DELETE FROM confirmations WHERE expires<?', (int(time.time()),))
-                    self.db.execute('INSERT INTO confirmations VALUES (?,?,?,?,?,?)',
-                        (key, name, uid, operation, target, int(time.time()) + 300))
+                    self.db.execute(
+                        'DELETE FROM confirmations WHERE expires<?', (int(time.time()),)
+                    )
+                    self.db.execute(
+                        'INSERT INTO confirmations VALUES (?,?,?,?,?,?)',
+                        (key, name, uid, operation, target, int(time.time()) + 300),
+                    )
                     self.db.commit()
-                    return {'confirmation': key, 'domain': target, 'operation': operation, 'currently_open': current is None}
-                row = self.db.execute('SELECT * FROM confirmations WHERE id=? AND uid=? AND server=?',
-                    (request.get('confirmation'), uid, name)).fetchone()
-                if not row or row['expires'] <= time.time() or row['action'] not in ('add', 'remove'):
+                    return {
+                        'confirmation': key,
+                        'domain': target,
+                        'operation': operation,
+                        'currently_open': current is None,
+                    }
+                row = self.db.execute(
+                    'SELECT * FROM confirmations WHERE id=? AND uid=? AND server=?',
+                    (request.get('confirmation'), uid, name),
+                ).fetchone()
+                if (
+                    not row
+                    or row['expires'] <= time.time()
+                    or row['action'] not in ('add', 'remove')
+                ):
                     raise BotError('Подтверждение истекло или уже использовано.')
                 if adopted:
                     import federation_service
-                    result=federation_service.queue_job(self.federation_backend(name),{
-                        'action':row['action'],'argument':row['domain'],'actor':actor,
-                        'event_id':'telegram-confirmation:'+row['id']})
-                    self.db.execute('DELETE FROM confirmations WHERE id=?',(row['id'],));self.db.commit()
+
+                    result = federation_service.queue_job(
+                        self.federation_backend(name),
+                        {
+                            'action': row['action'],
+                            'argument': row['domain'],
+                            'actor': actor,
+                            'event_id': 'telegram-confirmation:' + row['id'],
+                        },
+                    )
+                    self.db.execute('DELETE FROM confirmations WHERE id=?', (row['id'],))
+                    self.db.commit()
                     return result
                 domains = list(current or [name])
                 if row['action'] == 'add' and row['domain'] not in domains:
@@ -443,7 +631,9 @@ class Handler(socketserver.StreamRequestHandler):
         self.connection.settimeout(110)
         try:
             request = receive(self.rfile)
-            peer = self.connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize('3i'))
+            peer = self.connection.getsockopt(
+                socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize('3i')
+            )
             _, uid, _ = struct.unpack('3i', peer)
             check_peer(uid, request.get('action'))
             result = self.server.bridge.handle(request)

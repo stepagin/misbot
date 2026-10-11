@@ -4,6 +4,7 @@ Synapse/MAS schemas and Matrix crypto stores are not managed here. Published
 migration IDs and SQL are immutable. Every admitted migration must remain
 compatible with schema 0; incompatible changes need a separate recovery plan.
 """
+
 import argparse
 import hashlib
 import os
@@ -15,16 +16,25 @@ import uuid
 import configuration
 
 SCHEMA_VERSION = 1
-MIGRATIONS = ((1, 'admin-panel-v1', (
-    'CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)',
-    'CREATE TABLE IF NOT EXISTS users (mxid TEXT PRIMARY KEY, created INTEGER, active INTEGER)',
-    "CREATE TABLE IF NOT EXISTS outbox (id TEXT PRIMARY KEY, recipient TEXT NOT NULL, "
-    "via TEXT NOT NULL, body TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', "
-    'attempts INTEGER NOT NULL DEFAULT 0, next_at REAL NOT NULL DEFAULT 0)',
-    'CREATE INDEX IF NOT EXISTS outbox_pending ON outbox(state,next_at)',
-)),)
-TABLES = {'settings': ('key', 'value'), 'users': ('mxid', 'created', 'active'),
-          'outbox': ('id', 'recipient', 'via', 'body', 'state', 'attempts', 'next_at')}
+MIGRATIONS = (
+    (
+        1,
+        'admin-panel-v1',
+        (
+            'CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)',
+            'CREATE TABLE IF NOT EXISTS users (mxid TEXT PRIMARY KEY, created INTEGER, active INTEGER)',
+            'CREATE TABLE IF NOT EXISTS outbox (id TEXT PRIMARY KEY, recipient TEXT NOT NULL, '
+            "via TEXT NOT NULL, body TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', "
+            'attempts INTEGER NOT NULL DEFAULT 0, next_at REAL NOT NULL DEFAULT 0)',
+            'CREATE INDEX IF NOT EXISTS outbox_pending ON outbox(state,next_at)',
+        ),
+    ),
+)
+TABLES = {
+    'settings': ('key', 'value'),
+    'users': ('mxid', 'created', 'active'),
+    'outbox': ('id', 'recipient', 'via', 'body', 'state', 'attempts', 'next_at'),
+}
 
 
 def fingerprint(migration):
@@ -32,16 +42,22 @@ def fingerprint(migration):
 
 
 def validate_registry():
-    if ([item[0] for item in MIGRATIONS] != list(range(1, SCHEMA_VERSION + 1))
-            or len({item[1] for item in MIGRATIONS}) != len(MIGRATIONS)):
+    if [item[0] for item in MIGRATIONS] != list(range(1, SCHEMA_VERSION + 1)) or len(
+        {item[1] for item in MIGRATIONS}
+    ) != len(MIGRATIONS):
         raise RuntimeError('Release migration history must have unique sequential versions and IDs')
 
 
 def database_path(root):
     root = Path(root)
-    for name in ('data', 'data/admin-panel', 'data/admin-panel/panel.sqlite',
-                 'data/admin-panel/panel.sqlite-journal', 'data/admin-panel/panel.sqlite-wal',
-                 'data/admin-panel/panel.sqlite-shm'):
+    for name in (
+        'data',
+        'data/admin-panel',
+        'data/admin-panel/panel.sqlite',
+        'data/admin-panel/panel.sqlite-journal',
+        'data/admin-panel/panel.sqlite-wal',
+        'data/admin-panel/panel.sqlite-shm',
+    ):
         path = root / name
         if path.is_symlink():
             raise RuntimeError('Unsafe Misbot data path; retain the update checkpoint')
@@ -55,9 +71,13 @@ def database_path(root):
 def inspect_database(db):
     version = db.execute('PRAGMA user_version').fetchone()[0]
     if not 0 <= version <= SCHEMA_VERSION:
-        raise RuntimeError('Unknown Misbot data schema; obtain a compatible release before updating')
+        raise RuntimeError(
+            'Unknown Misbot data schema; obtain a compatible release before updating'
+        )
     if db.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
-        raise RuntimeError('Misbot database integrity check failed; retain data and checked backups')
+        raise RuntimeError(
+            'Misbot database integrity check failed; retain data and checked backups'
+        )
     tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     for table, columns in TABLES.items():
         if table in tables:
@@ -69,9 +89,15 @@ def inspect_database(db):
     if version:
         if 'misbot_migrations' not in tables:
             raise RuntimeError('Missing Misbot migration history; retain the update checkpoint')
-        rows = db.execute('SELECT version,id,digest FROM misbot_migrations ORDER BY version').fetchall()
-        expected = [(number, name, fingerprint(item)) for item in MIGRATIONS
-                    for number, name, _ in (item,) if number <= version]
+        rows = db.execute(
+            'SELECT version,id,digest FROM misbot_migrations ORDER BY version'
+        ).fetchall()
+        expected = [
+            (number, name, fingerprint(item))
+            for item in MIGRATIONS
+            for number, name, _ in (item,)
+            if number <= version
+        ]
         if rows != expected:
             raise RuntimeError('Misbot migration history differs from the release; retain data')
     elif 'misbot_migrations' in tables:
@@ -128,16 +154,20 @@ def migrate(root, checkpoint=None):
             db.execute('BEGIN IMMEDIATE')
             before = inspect_database(db)
             if before < SCHEMA_VERSION:
-                db.execute('CREATE TABLE IF NOT EXISTS misbot_migrations '
-                           '(version INTEGER PRIMARY KEY, id TEXT NOT NULL, digest TEXT NOT NULL)')
+                db.execute(
+                    'CREATE TABLE IF NOT EXISTS misbot_migrations '
+                    '(version INTEGER PRIMARY KEY, id TEXT NOT NULL, digest TEXT NOT NULL)'
+                )
                 for migration in MIGRATIONS:
                     number, identifier, statements = migration
                     if number <= before:
                         continue
                     for statement in statements:
                         db.execute(statement)
-                    db.execute('INSERT INTO misbot_migrations VALUES (?,?,?)',
-                               (number, identifier, fingerprint(migration)))
+                    db.execute(
+                        'INSERT INTO misbot_migrations VALUES (?,?,?)',
+                        (number, identifier, fingerprint(migration)),
+                    )
                     db.execute('PRAGMA user_version=' + str(number))
             inspect_database(db)
             db.commit()
@@ -175,4 +205,6 @@ if __name__ == '__main__':
         main()
     except (OSError, sqlite3.Error, RuntimeError):
         # SQLite errors may include SQL/data. The private data are never echoed.
-        raise SystemExit('Misbot data migration failed; retain data and update checkpoints') from None
+        raise SystemExit(
+            'Misbot data migration failed; retain data and update checkpoints'
+        ) from None

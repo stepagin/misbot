@@ -3,6 +3,7 @@
 
 The built-in job token is read from the environment, never commands/logs.
 """
+
 import argparse
 import json
 import os
@@ -24,7 +25,9 @@ class Error(RuntimeError):
 class APIError(Error):
     def __init__(self, status):
         self.status = status
-        super().__init__('GitHub API returned HTTP ' + str(status) + '; check CI permissions privately')
+        super().__init__(
+            'GitHub API returned HTTP ' + str(status) + '; check CI permissions privately'
+        )
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -34,20 +37,29 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 class GitHub:
     def __init__(self, repository, token):
-        if (not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repository)
-                or any(part in ('.', '..') for part in repository.split('/')) or not token):
+        if (
+            not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repository)
+            or any(part in ('.', '..') for part in repository.split('/'))
+            or not token
+        ):
             raise Error('Configure GITHUB_REPOSITORY and the job GH_TOKEN')
         self.repository = repository
         self.token = token
         self.opener = urllib.request.build_opener(NoRedirect(), urllib.request.ProxyHandler({}))
 
     def call(self, path, payload=None, method=None):
-        request = urllib.request.Request('https://api.github.com/repos/' + self.repository + path,
+        request = urllib.request.Request(
+            'https://api.github.com/repos/' + self.repository + path,
             data=json.dumps(payload).encode() if payload is not None else None,
-            method=method or ('POST' if payload is not None else 'GET'), headers={
-                'Authorization': 'Bearer ' + self.token, 'Accept': 'application/vnd.github+json',
-                'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28',
-                'User-Agent': 'Misbot-release-ci'})
+            method=method or ('POST' if payload is not None else 'GET'),
+            headers={
+                'Authorization': 'Bearer ' + self.token,
+                'Accept': 'application/vnd.github+json',
+                'Content-Type': 'application/json',
+                'X-GitHub-Api-Version': '2022-11-28',
+                'User-Agent': 'Misbot-release-ci',
+            },
+        )
         try:
             with self.opener.open(request, timeout=30) as response:
                 payload = response.read(4 * 1024 * 1024 + 1)
@@ -57,7 +69,9 @@ class GitHub:
         except urllib.error.HTTPError as error:
             raise APIError(error.code) from None
         except (urllib.error.URLError, OSError, ValueError):
-            raise Error('GitHub request failed; retry the pipeline after checking connectivity') from None
+            raise Error(
+                'GitHub request failed; retry the pipeline after checking connectivity'
+            ) from None
 
 
 def release_version(branch='', root=ROOT):
@@ -91,16 +105,20 @@ def open_pr(api, branch, sha, number):
     if existing:
         result = existing[0]
     else:
-        body = ('Release Misbot ' + number + '.\n\n'
-                'Validation: installer, Matrix bots, Telegram, deployment, source manifest '
-                'and deterministic release archive.\n\n'
-                'Data migrations run automatically after a verified backup. '
-                'Review compatibility and recovery before merging.\n\n'
-                'Merging this PR creates tag `' + number + '` on the merge commit. '
-                'GitHub Actions then publishes the verified installer and checksum.')
+        body = (
+            'Release Misbot ' + number + '.\n\n'
+            'Validation: installer, Matrix bots, Telegram, deployment, source manifest '
+            'and deterministic release archive.\n\n'
+            'Data migrations run automatically after a verified backup. '
+            'Review compatibility and recovery before merging.\n\n'
+            'Merging this PR creates tag `' + number + '` on the merge commit. '
+            'GitHub Actions then publishes the verified installer and checksum.'
+        )
         try:
-            result = api.call('/pulls', {'title': 'Release Misbot ' + number,
-                                       'head': branch, 'base': base, 'body': body})
+            result = api.call(
+                '/pulls',
+                {'title': 'Release Misbot ' + number, 'head': branch, 'base': base, 'body': body},
+            )
         except APIError as error:
             if error.status != 422:
                 raise
@@ -136,9 +154,15 @@ def publish_tag(api, branch, sha, number):
     # This endpoint finds the PR for this exact merge/squash/rebase commit, so
     # unrelated default-branch pushes cannot release the version in the file.
     prs = api.call('/commits/' + sha + '/pulls?per_page=100')
-    matching = [pr for pr in prs if pr.get('merged_at') and pr.get('merge_commit_sha') == sha
-                and pr['base']['ref'] == base and pr['head']['ref'] == 'release/' + number
-                and (pr['head'].get('repo') or {}).get('full_name', '').lower() == api.repository.lower()]
+    matching = [
+        pr
+        for pr in prs
+        if pr.get('merged_at')
+        and pr.get('merge_commit_sha') == sha
+        and pr['base']['ref'] == base
+        and pr['head']['ref'] == 'release/' + number
+        and (pr['head'].get('repo') or {}).get('full_name', '').lower() == api.repository.lower()
+    ]
     if not matching:
         print('No merged release PR at this commit; no tag created')
         return None
@@ -153,8 +177,9 @@ def publish_tag(api, branch, sha, number):
             raise Error('Release tag already points to another commit; it will not be moved')
         print('Release tag already exists:', number)
         return number
-    annotated = api.call('/git/tags', {'tag': number, 'message': 'Misbot ' + number,
-                                     'object': sha, 'type': 'commit'})
+    annotated = api.call(
+        '/git/tags', {'tag': number, 'message': 'Misbot ' + number, 'object': sha, 'type': 'commit'}
+    )
     try:
         api.call('/git/refs', {'ref': 'refs/tags/' + number, 'sha': annotated['sha']})
     except APIError as error:
@@ -188,6 +213,10 @@ if __name__ == '__main__':
     try:
         main()
     except (Error, OSError, ValueError, KeyError) as error:
-        message = str(error) if isinstance(error, Error) else 'Check release metadata and protected CI variables'
+        message = (
+            str(error)
+            if isinstance(error, Error)
+            else 'Check release metadata and protected CI variables'
+        )
         print('Release automation failed:', message, file=sys.stderr)
         sys.exit(1)

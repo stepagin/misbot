@@ -1,4 +1,5 @@
 """Validate and extract private backup payloads without trusting tar paths."""
+
 import hashlib
 import json
 import os
@@ -12,8 +13,10 @@ def add_tree(tar, source, arcname, recursive=True):
     """Write independent regular payloads, without following source links."""
     source = Path(source)
     observed = source.lstat()
-    if (stat.S_ISSOCK(observed.st_mode) and
-            str(PurePosixPath(arcname)) == 'data/referral-control/bot-run/control.sock'):
+    if (
+        stat.S_ISSOCK(observed.st_mode)
+        and str(PurePosixPath(arcname)) == 'data/referral-control/bot-run/control.sock'
+    ):
         # The control service recreates this IPC endpoint; it has no payload.
         return
     if stat.S_ISDIR(observed.st_mode):
@@ -23,13 +26,19 @@ def add_tree(tar, source, arcname, recursive=True):
                 add_tree(tar, child, str(PurePosixPath(arcname) / child.name))
         return
     if not stat.S_ISREG(observed.st_mode):
-        raise RuntimeError('Backup source contains a symlink or special file; no outside data copied. Retain the installation and inspect the managed directories privately before retrying the original backup command')
+        raise RuntimeError(
+            'Backup source contains a symlink or special file; no outside data copied. Retain the installation and inspect the managed directories privately before retrying the original backup command'
+        )
     descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(descriptor, 'rb') as incoming:
         actual = os.fstat(incoming.fileno())
-        if (not stat.S_ISREG(actual.st_mode) or
-                (actual.st_dev, actual.st_ino) != (observed.st_dev, observed.st_ino)):
-            raise RuntimeError('Backup source changed while opening a file; retain existing copies and retry when writers and configuration edits are stopped')
+        if not stat.S_ISREG(actual.st_mode) or (actual.st_dev, actual.st_ino) != (
+            observed.st_dev,
+            observed.st_ino,
+        ):
+            raise RuntimeError(
+                'Backup source changed while opening a file; retain existing copies and retry when writers and configuration edits are stopped'
+            )
         member = tar.gettarinfo(str(source), arcname=arcname, fileobj=incoming)
         # A killed S3 publication can leave original and scratch sharing an inode.
         # Both must remain recoverable even when one TarInfo would be a hardlink.
@@ -46,9 +55,14 @@ def extract(archive, destination, owners=False):
         seen = set()
         for member in members:
             path = PurePosixPath(member.name)
-            if (path.is_absolute() or '..' in path.parts or '\\' in member.name
-                    or member.name in seen or not path.parts
-                    or not (member.isdir() or member.isfile())):
+            if (
+                path.is_absolute()
+                or '..' in path.parts
+                or '\\' in member.name
+                or member.name in seen
+                or not path.parts
+                or not (member.isdir() or member.isfile())
+            ):
                 raise RuntimeError('Unsafe or duplicate backup member; no files extracted')
             seen.add(member.name)
             target = destination.joinpath(*path.parts)
@@ -56,8 +70,10 @@ def extract(archive, destination, owners=False):
                 raise RuntimeError('Backup destination escapes its private directory')
             if target.exists() or target.is_symlink():
                 raise RuntimeError('Backup extraction requires an empty destination')
-            if owners and (member.uid not in (0, 999, 991, 10001, 10002, 10003, 65532)
-                    or member.gid not in (0, 999, 991, 10001, 10002, 10003, 65532)):
+            if owners and (
+                member.uid not in (0, 999, 991, 10001, 10002, 10003, 65532)
+                or member.gid not in (0, 999, 991, 10001, 10002, 10003, 65532)
+            ):
                 raise RuntimeError('Unexpected numeric owner in backup; inspect privately')
         # All member paths and types are checked before writing any member.
         for member in members:
@@ -70,6 +86,7 @@ def extract(archive, destination, owners=False):
                     shutil.copyfileobj(source, output)
             if owners:
                 import os
+
                 os.chown(target, member.uid, member.gid)
                 target.chmod(member.mode & 0o777)
             else:
@@ -89,8 +106,12 @@ def verify_snapshot(directory):
         if not {'backup-format.json', 'mode.txt'}.issubset(digests):
             raise RuntimeError('Backup metadata lacks checksums')
     for name, digest in digests.items():
-        if (not isinstance(name, str) or PurePosixPath(name).name != name
-                or name in ('', '.', '..') or '\\' in name):
+        if (
+            not isinstance(name, str)
+            or PurePosixPath(name).name != name
+            or name in ('', '.', '..')
+            or '\\' in name
+        ):
             raise RuntimeError('Unsafe checksum filename')
         with (snapshot / name).open('rb') as source:
             if hashlib.file_digest(source, 'sha256').hexdigest() != digest:

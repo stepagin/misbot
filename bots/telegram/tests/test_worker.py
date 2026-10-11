@@ -14,9 +14,17 @@ from worker import Bot, Health
 class WorkerTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.bot = Bot({'token': 'test', 'username': 'test', 'server_name': 'misbot.ru'}, self.tmp.name)
+        self.bot = Bot(
+            {'token': 'test', 'username': 'test', 'server_name': 'misbot.ru'}, self.tmp.name
+        )
         self.bot.telegram = Mock(return_value={'message_id': 1})
-        self.policy = {'misbot.ru': {'usage_limit': 1, 'lifetime_seconds': 604800, 'registration_required': False}}
+        self.policy = {
+            'misbot.ru': {
+                'usage_limit': 1,
+                'lifetime_seconds': 604800,
+                'registration_required': False,
+            }
+        }
 
     def tearDown(self):
         self.bot.db.close()
@@ -24,8 +32,14 @@ class WorkerTests(unittest.TestCase):
 
     @staticmethod
     def message(chat=123, sender=123, chat_type='private'):
-        return {'update_id': 1, 'message': {'text': '/start', 'from': {'id': sender},
-                'chat': {'id': chat, 'type': chat_type}}}
+        return {
+            'update_id': 1,
+            'message': {
+                'text': '/start',
+                'from': {'id': sender},
+                'chat': {'id': chat, 'type': chat_type},
+            },
+        }
 
     def control(self, request):
         if request['action'] == 'servers':
@@ -45,7 +59,9 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(method, 'sendMessage')
         self.assertEqual(payload['chat_id'], 123)
         buttons = payload['reply_markup']['inline_keyboard']
-        self.assertEqual([row[0]['callback_data'] for row in buttons], ['invite', 'tokens|0', 'federation'])
+        self.assertEqual(
+            [row[0]['callback_data'] for row in buttons], ['invite', 'tokens|0', 'federation']
+        )
         self.assertNotIn('/server', payload['text'])
         self.assertLess(len(payload['text']), 180)
 
@@ -58,36 +74,53 @@ class WorkerTests(unittest.TestCase):
 
     def test_imported_stack_menu_has_management_and_hides_federation(self):
         self.identity = {'authenticated': True, 'username': 'operator', 'admin': True}
-        self.policy['misbot.ru'].update(federation_enabled=False,
-            management_actions=['status', 'check', 'start', 'backup'])
+        self.policy['misbot.ru'].update(
+            federation_enabled=False, management_actions=['status', 'check', 'start', 'backup']
+        )
         with patch('worker.bridge_call', side_effect=self.control):
             self.bot.process(self.message())
         buttons = self.bot.telegram.call_args.args[1]['reply_markup']['inline_keyboard']
-        self.assertEqual([row[0]['callback_data'] for row in buttons],
-            ['invite', 'tokens|0', 'manage|status', 'manage|check', 'manage|start', 'manage|backup'])
+        self.assertEqual(
+            [row[0]['callback_data'] for row in buttons],
+            [
+                'invite',
+                'tokens|0',
+                'manage|status',
+                'manage|check',
+                'manage|start',
+                'manage|backup',
+            ],
+        )
 
     def test_management_write_only_prepares_confirmation(self):
         self.identity = {'authenticated': True, 'username': 'operator', 'admin': True}
+
         def control(request):
             if request['action'] == 'manage_prepare':
                 self.assertEqual(request['operation'], 'backup')
                 return {'confirmation': 'fictional-confirmation', 'operation': 'backup'}
             return self.control(request)
+
         update = self.message()
         update['message']['text'] = '/backup'
         with patch('worker.bridge_call', side_effect=control):
             self.bot.process(update)
         payload = self.bot.telegram.call_args.args[1]
         self.assertIn('временно остановятся', payload['text'])
-        self.assertEqual(payload['reply_markup']['inline_keyboard'][0][0]['callback_data'],
-                         'manage_apply|fictional-confirmation')
+        self.assertEqual(
+            payload['reply_markup']['inline_keyboard'][0][0]['callback_data'],
+            'manage_apply|fictional-confirmation',
+        )
 
     def test_guest_start_and_direct_invite_request_only_offer_login(self):
         self.identity = {'authenticated': False}
         for command in ('/start', '/invite', '/tokens', '/federation', 'revoke|test'):
             update = self.message()
             update['message']['text'] = command
-            with self.subTest(command=command), patch('worker.bridge_call', side_effect=self.control):
+            with (
+                self.subTest(command=command),
+                patch('worker.bridge_call', side_effect=self.control),
+            ):
                 self.bot.process(update)
             payload = self.bot.telegram.call_args.args[1]
             buttons = payload['reply_markup']['inline_keyboard']
@@ -109,19 +142,37 @@ class WorkerTests(unittest.TestCase):
 
     def test_invitation_code_is_monospace_and_copy_button_has_plain_code(self):
         code = 'MIS-example_<&>'
-        item = {'id': 'test', 'attributes': {'token': code, 'valid': True, 'expires_at': '2026-10-04T00:00:00Z',
-                'times_used': 0, 'usage_limit': 1}}
+        item = {
+            'id': 'test',
+            'attributes': {
+                'token': code,
+                'valid': True,
+                'expires_at': '2026-10-04T00:00:00Z',
+                'times_used': 0,
+                'usage_limit': 1,
+            },
+        }
         self.bot.token_message(123, 'misbot.ru', item)
         method, payload = self.bot.telegram.call_args.args
         self.assertEqual(payload['parse_mode'], 'HTML')
         self.assertIn('<code>MIS-example_&lt;&amp;&gt;</code>', payload['text'])
-        self.assertEqual(payload['reply_markup']['inline_keyboard'][0][0]['copy_text']['text'], code)
+        self.assertEqual(
+            payload['reply_markup']['inline_keyboard'][0][0]['copy_text']['text'], code
+        )
         self.assertIn('До: 04.10.2026 03:00 МСК', payload['text'])
         self.assertNotIn('Код подходит', payload['text'])
 
     def test_expiration_converts_across_year_boundary(self):
-        item = {'id': 'test', 'attributes': {'token': 'MIS-test', 'valid': False,
-                'expires_at': '2026-12-31T23:30:00Z', 'times_used': 1, 'usage_limit': 1}}
+        item = {
+            'id': 'test',
+            'attributes': {
+                'token': 'MIS-test',
+                'valid': False,
+                'expires_at': '2026-12-31T23:30:00Z',
+                'times_used': 1,
+                'usage_limit': 1,
+            },
+        }
         self.bot.token_message(123, 'misbot.ru', item)
         self.assertIn('До: 01.01.2027 02:30 МСК', self.bot.telegram.call_args.args[1]['text'])
 
@@ -143,8 +194,11 @@ class WorkerTests(unittest.TestCase):
         handler.send_response = Mock()
         handler.send_header = Mock()
         handler.end_headers = Mock()
-        handler.server = SimpleNamespace(bot=SimpleNamespace(
-            last_poll_success=time.monotonic() if last_poll is None else last_poll))
+        handler.server = SimpleNamespace(
+            bot=SimpleNamespace(
+                last_poll_success=time.monotonic() if last_poll is None else last_poll
+            )
+        )
         with patch('worker.bridge_call', side_effect=error, return_value={'misbot.ru': {}}):
             handler.do_GET()
         return handler.send_response.call_args.args[0], handler.wfile.getvalue()
