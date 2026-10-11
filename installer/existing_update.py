@@ -39,6 +39,54 @@ def sources(folder):
     return entries, revision
 
 
+def homepage_paths(installation):
+    site = Path(installation.model['features']['site_directory'])
+    info = site.stat()
+    if (not site.is_absolute() or site.resolve() != site or
+            not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022):
+        raise Error('Небезопасный каталог лендинга; source update не подтверждён.')
+    paths = {name: site / name for name in ('index.html', 'site.css')}
+    for path in paths.values():
+        info = command_wrapper.regular(path)
+        if info.st_uid != 0 or info.st_mode & 0o022:
+            raise Error('Небезопасные файлы лендинга; source update не подтверждён.')
+    return paths
+
+
+def checkpoint_homepage(installation, folder):
+    """Only the standard landing follows the release; local themes stay local."""
+    if not installation.model.get('features', {}).get('enabled'):
+        return None
+    features = installation.control / 'features'
+    theme = features / 'site-template'
+    if theme.exists() or theme.is_symlink():
+        return None
+    if json.loads((features / 'site.json').read_text())['HOMEPAGE_MODE'] != 'landing':
+        return None
+    from existing_features import Homepage
+    page = Homepage(installation.root)
+    saved = private_directory(folder / 'homepage-before')
+    files = {}
+    for name, path in homepage_paths(installation).items():
+        command_wrapper.atomic(saved / name, path.read_bytes(), 0o600)
+        files[name] = {'sha256': digest(saved / name),
+                       'mode': stat.S_IMODE(path.stat().st_mode)}
+    save(saved / 'files.json', files)
+    return page
+
+
+def restore_homepage(installation, folder):
+    saved = folder / 'homepage-before'
+    if not saved.exists():
+        return
+    files = json.loads((saved / 'files.json').read_text())
+    paths = homepage_paths(installation)
+    if set(files) != set(paths) or any(digest(saved / name) != files[name]['sha256'] for name in paths):
+        raise Error('Checkpoint лендинга повреждён; сохраните source update.')
+    for name, path in paths.items():
+        command_wrapper.atomic(path, (saved / name).read_bytes(), files[name]['mode'])
+
+
 def restore(installation):
     path = installation.control / 'source-update.json'
     if not path.exists():
@@ -65,6 +113,7 @@ def restore(installation):
             if digest(target) != record['files'][name]:
                 raise Error('Новый source файл изменён; сохраните checkpoint.')
             target.unlink()
+    restore_homepage(installation, folder)
     if (folder / 'telegram-public-before').exists():
         from existing_features import Features
         Features(installation.root).refresh_telegram(
@@ -120,7 +169,7 @@ def apply(installation, source):
         if not selected.get('remote', {}).get('verified'):
             installation.verify()
     emit('existing_source_backup', verified=True, reused=reused,
-         scope='public sources only; configuration, images and database data preserved')
+         scope='public sources and standard landing; configuration, images and database data preserved')
     entries = {**entries, 'SHA256SUMS': source / 'SHA256SUMS'}
     changes = {name: p for name, p in entries.items()
                if not (installation.root / name).exists() or digest(installation.root / name) != digest(p)}
@@ -133,6 +182,7 @@ def apply(installation, source):
         return
     folder = private_directory(installation.control / 'source-updates' / uuid.uuid4().hex)
     worker_image = telegram_container.prepare_update(installation, entries, folder) if worker_changed else None
+    page = checkpoint_homepage(installation, folder)
     before = {}
     for name in changes:
         target = installation.root / name
@@ -163,6 +213,11 @@ def apply(installation, source):
         if installation.model.get('features',{}).get('enabled') and installation.model['features'].get('telegram_runtime'):
             from existing_features import Features
             Features(installation.root).refresh_telegram(installation.model['features'],folder)
+        if page is not None:
+            markup, stylesheet = page.assets(page.proposed({}))
+            paths = homepage_paths(installation)
+            for name, data in (('index.html', markup), ('site.css', stylesheet)):
+                command_wrapper.atomic(paths[name], data, 0o644)
         journal.unlink()
     except BaseException:
         update.run_data_migrations(source, installation.root, candidate, 'rollback-check')

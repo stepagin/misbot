@@ -30,7 +30,8 @@ def links(model):
             'homeserver':'https://matrix.'+model['DOMAIN']}
 
 
-def render(model, public_links=None, template=None):
+def render(model, public_links=None, template=None, source=None):
+    source=Path(source) if source is not None else Path(__file__).parent
     model=schema.validate(model,preview=True);urls=public_links or links(model);escape=lambda value:html.escape(value,quote=True)
     if public_links is not None:
         if set(public_links)!=set(links(model)):
@@ -45,10 +46,14 @@ def render(model, public_links=None, template=None):
               if model['REGISTRATION_TOKEN_REQUIRED']=='true' else 'Создайте учётную запись через кнопку «Зарегистрироваться».')
     support=('<a href="'+escape(model['SITE_SUPPORT_URL'])+'">Связаться с поддержкой</a>') if model['SITE_SUPPORT_URL'] else ''
     if template is None:
-        template=(Path(__file__).parent/'site/index.html').read_text(encoding='utf-8')
+        template=(source/'site/index.html').read_text(encoding='utf-8')
     values={'NAME':escape(model['SITE_NAME'] or model['DOMAIN']),'DESCRIPTION':escape(model['SITE_DESCRIPTION']),
             'LOGIN':escape(urls['login']),'REGISTER':registration,'CLIENT':escape(urls['client']),
             'HOMESERVER':escape(model['DOMAIN']),'NOTE':escape(note),'SUPPORT':support}
+    if '@@SETUPURL@@' in template:
+        url=json.loads((source/'release.json').read_text())['homepage_setup_url']
+        values['SETUPURL']=escape(schema.field_value('HOMEPAGE_URL',url))
+        if not url:raise RuntimeError('Не задана ссылка подключения своего сервера в release.json.')
     return re.sub(r'@@([A-Z]+)@@',lambda match:values[match[1]],template)
 
 

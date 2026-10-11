@@ -1,5 +1,6 @@
 """Local invariants; no Docker daemon, external credentials, DNS or server required."""
 import hashlib
+import html
 import importlib.util
 import json
 from pathlib import Path
@@ -323,6 +324,11 @@ class GeneratorTests(unittest.TestCase):
         synapse=yaml.safe_load((self.root/'config/homeserver.yaml').read_text())
         livekit=yaml.safe_load((self.root/'config/livekit.yaml').read_text())
         caddy=(self.root/'config/Caddyfile').read_text()
+        landing=(self.root/'public/site/index.html').read_text()
+        setup_url=json.loads((BUNDLE/'release.json').read_text())['homepage_setup_url']
+        self.assertIn('href="'+html.escape(setup_url,quote=True)+'"',landing)
+        self.assertIn('Подключить свой сервер',landing)
+        self.assertNotIn('@@SETUPURL@@',landing)
         self.assertEqual(len(compose['services']),12)
         self.assertEqual(synapse['server_name'],'chat.example.org')
         self.assertEqual(synapse['federation_domain_whitelist'],['misbot.ru'])

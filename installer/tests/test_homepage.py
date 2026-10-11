@@ -23,6 +23,36 @@ class HomepageTests(unittest.TestCase):
         state_store.write_text(self.root/'config/Caddyfile',self.legacy)
         self.backend=homepage.Backend(self.root,validator=lambda path:None,activate=lambda:None,verify=lambda model:None,attempts=1)
     def tearDown(self):self.temp.cleanup()
+    def test_setup_link_follows_release_metadata_and_escapes_query(self):
+        source=self.root/'source';(source/'site').mkdir(parents=True)
+        (source/'site/index.html').write_bytes((Path(homepage.__file__).parent/'site/index.html').read_bytes())
+        model={'DOMAIN':'fictional.example.org','REGISTRATION_TOKEN_REQUIRED':'true'}
+        for url in ('https://github.com/stepagin/misbot',
+                    'https://code.example.org/project?from=site&version=next'):
+            with self.subTest(url=url):
+                (source/'release.json').write_text(json.dumps({'homepage_setup_url':url}))
+                page=homepage.render(model,source=source)
+                self.assertIn('href="'+url.replace('&','&amp;')+'"',page)
+                self.assertIn('Подключить свой сервер',page)
+                self.assertIn('код приглашения',page)
+                self.assertIn('https://web.fictional.example.org/#/login',page)
+                self.assertIn('https://web.fictional.example.org/#/register',page)
+                self.assertNotIn('@@SETUPURL@@',page)
+
+    def test_setup_link_rejects_empty_unsafe_or_non_https_release_url(self):
+        for url in ('','http://code.example.org/','javascript:alert(1)',
+                    'https://user:password@code.example.org/'):
+            with self.subTest(url=url):
+                state_store.write_json(self.root/'release.json',{'homepage_setup_url':url})
+                with self.assertRaises(RuntimeError):
+                    homepage.render({'DOMAIN':'fictional.example.org'},
+                                    template='<a href="@@SETUPURL@@">Setup</a>',source=self.root)
+
+    def test_old_custom_template_needs_no_new_release_metadata(self):
+        page=homepage.render({'DOMAIN':'fictional.example.org'},
+                             template='<h1>@@NAME@@</h1>',source=self.root)
+        self.assertEqual(page,'<h1>fictional.example.org</h1>')
+
     def test_injection_registration_and_support(self):
         model={'DOMAIN':'fictional.example.org','SITE_NAME':'<script>alert("x")</script>','SITE_DESCRIPTION':'<img onerror=alert(1)>','SITE_SUPPORT_URL':'https://help.example.net/'}
         page=homepage.render(model)

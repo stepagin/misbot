@@ -100,7 +100,7 @@ class FeatureTests(unittest.TestCase):
                 path=theme/name;path.write_text(content);path.chmod(0o600)
             page=object.__new__(features.Homepage);page.folder=base
             page.plan={'web_url':'https://chat.fictional.example.org/'}
-            page.installation=SimpleNamespace(state={'domain':'matrix.fictional.example.org'})
+            page.installation=SimpleNamespace(root=base,state={'domain':'matrix.fictional.example.org'})
             lstat=Path.lstat
             def root_stat(path,*args,**kwargs):
                 info=lstat(path,*args,**kwargs)

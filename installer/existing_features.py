@@ -137,7 +137,7 @@ class Homepage:
         import homepage
         folder=self.folder/'site-template'
         if not folder.exists() and not folder.is_symlink():
-            return (homepage.render(model,self.links()).encode(),
+            return (homepage.render(model,self.links(),source=self.installation.root).encode(),
                     (self.installation.root/'site/site.css').read_bytes())
         info=folder.lstat()
         if (folder.resolve()!=folder.absolute() or not stat.S_ISDIR(info.st_mode)
@@ -150,7 +150,8 @@ class Homepage:
                     or info.st_mode&0o077 or info.st_size>limit):
                 raise Error('Файлы шаблона должны быть root-only; превышен размер или небезопасный путь.')
             contents.append(path.read_text(encoding='utf-8'))
-        return homepage.render(model,self.links(),template=contents[0]).encode(),contents[1].encode()
+        return homepage.render(model,self.links(),template=contents[0],
+                               source=self.installation.root).encode(),contents[1].encode()
 
     def proposed(self, changes):
         import homepage
