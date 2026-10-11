@@ -209,7 +209,28 @@ def release(source):
             'source-and-configuration', 'source-configuration-and-approved-components'):
         fail('Unexpected installer release family or update scope')
     version(info.get('version'))
+    schema = info.get('data_schema_version', 0)
+    if type(schema) is not int or schema < 0:
+        fail('Invalid release data schema version')
     return info
+
+
+def run_data_migrations(source, root, candidate, action, checkpoint=None):
+    if not candidate.get('data_schema_version'):
+        return
+    entries, _ = validate_manifest(source)
+    if 'data_migrations.py' not in entries:
+        fail('Release lacks its declared data migration implementation')
+    command = [sys.executable, str(source / 'data_migrations.py'), action,
+        '--directory', str(root), '--expected-schema', str(candidate['data_schema_version'])]
+    if checkpoint is not None:
+        command.extend(['--checkpoint', str(checkpoint)])
+    result = subprocess.run(command,
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        **state_store.child_process_options())
+    if result.returncode:
+        fail('Misbot data ' + action + ' failed; retain data and update checkpoints. '
+             'Do not start an older runtime on an unknown schema')
 
 
 def state(root, require_sources=True):
@@ -332,7 +353,8 @@ def update_resource_check(root, entries):
     # below but not assumed to compress for this admission check.
     payload = sum(path.stat().st_size for path in entries.values())
     data = sum(path.stat().st_size for name in SNAPSHOT_DIRS + (
-        'data/synapse', 'data/referral-bot', 'data/referral-control')
+        'data/synapse', 'data/referral-bot', 'data/referral-control',
+        'data/federation-bot', 'data/federation', 'data/admin-panel')
         for path in (root / name).rglob('*') if path.is_file() and not path.is_symlink())
     import lifecycle
     lifecycle.configure(root, 'update-resources')
@@ -370,8 +392,9 @@ def refresh_command(root):
     if result.returncode:fail('Command refresh failed; check owned wrapper permissions/conflict without deleting data')
 
 
-def apply_changes(root, folder, entries, candidate, revision, component_transition=None):
+def apply_changes(root, folder, entries, candidate, revision, component_transition=None, migration_source=None):
     try:
+        run_data_migrations(migration_source or Path(__file__).resolve().parent, root, candidate, 'apply', folder)
         changed = copy_sources(entries, root)
         raise_if_interrupted()
         if run_up(root, folder / 'apply.log'):
@@ -386,6 +409,7 @@ def apply_changes(root, folder, entries, candidate, revision, component_transiti
         refresh_command(root)
         return changed
     except BaseException:
+        run_data_migrations(migration_source or Path(__file__).resolve().parent, root, candidate, 'rollback-check')
         if component_transition:
             component_rollback_guard(root, folder, component_transition)
         previous = validate_manifest(folder)[0] if (folder / 'SHA256SUMS').is_file() else {}
@@ -418,7 +442,7 @@ def main():
     with state_store.operation_guard(root):
         if args.action == 'recover':
             validate_manifest(source)
-            recover_update(root)
+            recover_update(root, source)
         else:
             perform_update(source, root, args.action)
 
@@ -429,7 +453,7 @@ def record_owner(root, record):
     os.environ['MATRIX_INSTALLER_UPDATE_STAGE'] = record['stage']
 
 
-def recover_update(root):
+def recover_update(root, trusted_source=None):
     journal = root / 'update-journal.json'
     if not journal.is_file() or journal.is_symlink():
         fail('No private interrupted-update journal exists; use update or up instead')
@@ -454,6 +478,11 @@ def recover_update(root):
             or '..' in Path(name).parts for name in names):
         fail('Unsafe update recovery source inventory')
     record_owner(root, record)
+    if trusted_source is not None:
+        run_data_migrations(trusted_source, root, release(trusted_source), 'rollback-check')
+    else:
+        import data_migrations
+        data_migrations.check(root)
     component_rollback_guard(root, folder, record.get('component_transition'))
     restore(root, folder, dict.fromkeys(set(names) | set(entries)))
     if run_up(root, folder / 'recovery.log'):
@@ -495,6 +524,7 @@ def perform_update(source, root, action):
         component_runtime(root, transition['from'])
     if source == root:
         fail('Run update from a newly extracted release, not from the installation directory')
+    run_data_migrations(source, root, candidate, 'check')
     update_resource_check(root, entries)
     lock_dir = root / 'stages'
     lock_dir.mkdir(exist_ok=True)
@@ -509,7 +539,7 @@ def perform_update(source, root, action):
         verified_backup(source, root, saved)
         record_owner(root, {'format': 1, 'stage': str(saved.relative_to(root)),
             'candidate_files': sorted(entries), 'component_transition': transition})
-        changed = apply_changes(root, saved, entries, candidate, revision, transition)
+        changed = apply_changes(root, saved, entries, candidate, revision, transition, source)
         (root / 'update-journal.json').unlink()
         log = saved / 'apply.log'
         print('release_applied', candidate['version'])

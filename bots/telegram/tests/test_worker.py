@@ -2,6 +2,8 @@ import io
 from pathlib import Path
 import sys
 import tempfile
+import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
@@ -53,6 +55,32 @@ class WorkerTests(unittest.TestCase):
             self.bot.process(self.message())
         buttons = self.bot.telegram.call_args.args[1]['reply_markup']['inline_keyboard']
         self.assertEqual([row[0]['callback_data'] for row in buttons], ['invite', 'tokens|0'])
+
+    def test_imported_stack_menu_has_management_and_hides_federation(self):
+        self.identity = {'authenticated': True, 'username': 'operator', 'admin': True}
+        self.policy['misbot.ru'].update(federation_enabled=False,
+            management_actions=['status', 'check', 'start', 'backup'])
+        with patch('worker.bridge_call', side_effect=self.control):
+            self.bot.process(self.message())
+        buttons = self.bot.telegram.call_args.args[1]['reply_markup']['inline_keyboard']
+        self.assertEqual([row[0]['callback_data'] for row in buttons],
+            ['invite', 'tokens|0', 'manage|status', 'manage|check', 'manage|start', 'manage|backup'])
+
+    def test_management_write_only_prepares_confirmation(self):
+        self.identity = {'authenticated': True, 'username': 'operator', 'admin': True}
+        def control(request):
+            if request['action'] == 'manage_prepare':
+                self.assertEqual(request['operation'], 'backup')
+                return {'confirmation': 'fictional-confirmation', 'operation': 'backup'}
+            return self.control(request)
+        update = self.message()
+        update['message']['text'] = '/backup'
+        with patch('worker.bridge_call', side_effect=control):
+            self.bot.process(update)
+        payload = self.bot.telegram.call_args.args[1]
+        self.assertIn('временно остановятся', payload['text'])
+        self.assertEqual(payload['reply_markup']['inline_keyboard'][0][0]['callback_data'],
+                         'manage_apply|fictional-confirmation')
 
     def test_guest_start_and_direct_invite_request_only_offer_login(self):
         self.identity = {'authenticated': False}
@@ -108,13 +136,15 @@ class WorkerTests(unittest.TestCase):
         self.assertIn('<code>ABCD-EFGH</code>', payload['text'])
 
     @staticmethod
-    def health_reply(error=None):
+    def health_reply(error=None, last_poll=None):
         handler = Health.__new__(Health)
         handler.path = '/health'
         handler.wfile = io.BytesIO()
         handler.send_response = Mock()
         handler.send_header = Mock()
         handler.end_headers = Mock()
+        handler.server = SimpleNamespace(bot=SimpleNamespace(
+            last_poll_success=time.monotonic() if last_poll is None else last_poll))
         with patch('worker.bridge_call', side_effect=error, return_value={'misbot.ru': {}}):
             handler.do_GET()
         return handler.send_response.call_args.args[0], handler.wfile.getvalue()
@@ -128,6 +158,10 @@ class WorkerTests(unittest.TestCase):
 
     def test_health_checks_control_socket_before_success(self):
         self.assertEqual(self.health_reply(), (200, b'{"ok":true}'))
+
+    def test_health_rejects_absent_or_stale_telegram_polling(self):
+        for last_poll in (0, time.monotonic() - 100):
+            self.assertEqual(self.health_reply(last_poll=last_poll), (503, b'{"ok":false}'))
 
 
 if __name__ == '__main__':

@@ -62,7 +62,7 @@ def operation_help(command):
             'archive':'/root/misbot-backup.tar.gz','sha256':'ARCHIVE_SHA256','public-ip':'203.0.113.20',
             'confirm':'source-stopped' if command.backend=='restore-activate' else 'target-stopped',
             'object':'backup/example/object.enc','output':'/root/verified-backup.tar.gz',
-            'server':'example.org','room':'!fictional:example.org','request':'MB-0123456789abcdef0123456789abcdef','enabled':'false'}
+            'tag':'admin-panel','server':'example.org','room':'!fictional:example.org','request':'MB-0123456789abcdef0123456789abcdef','enabled':'false'}
     if command.backend.startswith('vault-'):sample['config']='/root/misbot-vault.env'
     if command.backend=='database-external':sample['config']='/root/misbot-postgres.env'
     if command.backend.startswith('backup-'):sample['config']='/root/misbot-backup-s3.env'
@@ -76,6 +76,21 @@ def operation_help(command):
 
 
 def help_text(topic=''):
+    if command_wrapper.default_backend()=='existing-compose':
+        supported=[c for c in vocabulary.COMMANDS if c.backend in vocabulary.EXISTING_BACKENDS]
+        if topic in vocabulary.BY_PATH:
+            command=vocabulary.BY_PATH[topic]
+            if command.backend not in vocabulary.EXISTING_BACKENDS:
+                raise InputError('Команда не поддерживается для подключённого существующего Compose-стека. Выполните misbot help.')
+            if command.backend=='restore-check':
+                print('Проверить AES-GCM архив и восстановить дампы в новые временные БД с их последующим удалением.');return
+            operation_help(command);return
+        print('Misbot — управление существующим Compose-стеком. Конфигурация, identity и версии сохраняются.')
+        found=[c for c in supported if not topic or c.path.startswith(topic+' ')]
+        if topic and not found:raise InputError('Область не поддерживается для существующего стека. Выполните misbot help.')
+        for command in found:print('  misbot '+command.path+' — '+command.purpose)
+        print('  misbot version\nКопии этого режима зашифрованы; recovery key хранится отдельно. Подробно: existing-compose.md.')
+        return
     if topic in vocabulary.BY_PATH:
         operation_help(vocabulary.BY_PATH[topic]);return
     if not topic:
@@ -118,6 +133,8 @@ def parse(argv):
     if command.backend=='s3-check':
         parser.add_argument('--read-only',action='store_true')
         parser.add_argument('--catalog-directory')
+    if command.backend=='remove':parser.add_argument('--backup-config')
+    if command.backend=='admin-bot-set':parser.add_argument('--administrator')
     if command.backend in ('homepage-check','homepage-apply'):
         for name in ('mode','url','name','description','support-url'):parser.add_argument('--'+name)
     args=parser.parse_args(remaining[len(words):])
@@ -134,6 +151,55 @@ def plan(command,options,values,source=None):
         root=command_wrapper.default_directory()
         if root is None and (source/'installation.json').is_file():root=source
         if root is None and command.backend in ('init','restore','restore-local'):root=Path('/opt/matrix-stack')
+    if root is not None and (root/'installation.json').is_file():
+        command_wrapper.trusted_installation(root)
+        if json.loads((root/'installation.json').read_text()).get('backend')=='existing-compose':
+            if command.backend not in vocabulary.EXISTING_BACKENDS:
+                raise InputError('Команда не поддерживается для существующего Compose-стека. Настройки и данные сохранены; выполните misbot help.')
+            if command.backend=='release-check':
+                return ['/usr/bin/python3',str(root/'releases.py'),'--directory',str(root)]
+            if command.backend.startswith('admin-bot-'):
+                args=['/usr/bin/python3',str(root/'admin_identity.py'),command.backend[10:],'--directory',str(root)]
+                for name in ('tag','administrator'):
+                    if values.get(name):args+=['--'+name,values[name]]
+                return args
+            if command.backend.startswith('wrapper-'):
+                return ['/usr/bin/python3',str(root/'command_wrapper.py'),command.backend[8:],'--directory',str(root)]
+            if command.backend.startswith('federation-'):
+                action=command.backend[11:]
+                arguments=[values[name] for name in command.arguments]
+                if action=='room-invite':arguments=[json.dumps({'server':values['server'],'room':values['room']})]
+                return ['/usr/bin/python3',str(root/'federation.py'),'--directory',str(root),action,*arguments]
+            if command.backend.startswith('features-'):
+                return ['/usr/bin/python3',str(root/'existing_features.py'),'--directory',str(root),command.backend,
+                        *(['--config',values['config']] if command.backend=='features-enable' else [])]
+            if command.backend.startswith('homepage-'):
+                args=['/usr/bin/python3',str(root/'existing_features.py'),'--directory',str(root),command.backend]
+                for name in ('mode','url','name','description','support_url'):
+                    if values.get(name) is not None:args+=['--'+name.replace('_','-'),values[name]]
+                return args
+            if command.backend in ('backup-schedule','backup-schedule-local','backup-schedule-status','backup-schedule-disable'):
+                args=['/usr/bin/python3',str(root/'existing_schedule.py'),'--directory',str(root),command.backend]
+                for name in command.arguments:args+=['--'+name,values[name]]
+                return args
+            if command.backend in ('update','update-recover'):
+                if not options.source:
+                    raise InputError('Для update укажите --source PATH к доверенному распакованному комплекту.')
+                candidate = Path(options.source)
+                if not candidate.is_absolute() or candidate.resolve()!=candidate:
+                    raise InputError('--source требует абсолютный каталог без symlink.')
+                info=command_wrapper.regular(candidate/'existing_update.py')
+                if info.st_uid!=0 or info.st_mode & 0o022:
+                    raise InputError('Source updater должен принадлежать root без чужой записи.')
+                return ['/usr/bin/python3',str(candidate/'existing_update.py'),'--directory',str(root),
+                        '--source',str(candidate),command.backend]
+            args=['/usr/bin/python3',str(root/'existing_compose.py'),'--directory',str(root),command.backend]
+            for name in command.arguments:
+                args+=['--'+name,values[name]]
+            for name in ('json','read_only'):
+                if values.get(name):args+=['--'+name.replace('_','-')]
+            if values.get('catalog_directory'):args+=['--catalog-directory',values['catalog_directory']]
+            return args
     if command.backend in ('s3-check','s3-cleanup'):
         if root is not None:
             if not root.is_absolute() or root==Path('/') or root.resolve()!=root:
@@ -156,18 +222,26 @@ def plan(command,options,values,source=None):
         backend=source
         if (source/'command.json').is_file():
             if root is None:raise InputError('До init: sudo python3 misbot.py ui из распакованного комплекта.')
-            command_wrapper.trusted_installation(root);backend=root
+            command_wrapper.trusted_runtime(root);backend=root
         return ['/usr/bin/python3',str(backend/'terminal_ui.py'),*(['--directory',str(root)] if root else [])]
+    if command.backend.startswith('features-'):
+        raise InputError('Этот раздел предназначен для подключённого существующего Compose-стека; обычная установка уже содержит компоненты.')
+    if command.backend=='storage-status':
+        if root is None:raise InputError('Укажите --directory PATH.')
+        command_wrapper.trusted_installation(root)
+        return ['/bin/bash',str(root/'install.sh'),'status',str(root)]
     if root is None and not command.installed:root=Path('/opt/matrix-stack')
     if root is None:raise InputError('Установка не выбрана. Укажите --directory PATH; сначала выполните config init из распакованного комплекта.')
     if not root.is_absolute() or root==Path('/') or root.resolve()!=root:
         raise InputError('Нужен абсолютный каталог установки без symlinks и переходов ..')
-    if command.installed:command_wrapper.trusted_installation(root)
+    if command.installed:
+        if command.backend=='remove':command_wrapper.trusted_runtime(root)
+        else:command_wrapper.trusted_installation(root)
     backend=Path(options.source) if options.source else (root if command.installed else source)
     if (source/'command.json').is_file() and not command.installed:
         backend=command_wrapper.default_directory()
         if backend is None:raise InputError('До настройки используйте python3 misbot.py из распакованного комплекта.')
-        command_wrapper.trusted_installation(backend)
+        command_wrapper.trusted_runtime(backend)
     if command.backend in ('update','update-recover'):
         if options.source is None:
             if not (source/'command.json').is_file() and source!=root:backend=source
@@ -181,6 +255,17 @@ def plan(command,options,values,source=None):
             raise InputError('Распакованный комплект должен принадлежать root и быть защищён от записи другими пользователями.')
         if json.loads((backend/'release.json').read_text()).get('family')!=command_wrapper.FAMILY:
             raise InputError('Чужой комплект обновления.')
+    if command.backend=='remove':
+        args=['/usr/bin/python3',str(root/'remove_server.py'),'--directory',str(root)]
+        if values.get('backup_config'):args+=['--backup-config',values['backup_config']]
+        return args
+    if command.backend.startswith('admin-bot-'):
+        args=['/usr/bin/python3',str(root/'admin_identity.py'),command.backend[10:],'--directory',str(root)]
+        for name in ('tag','administrator'):
+            if values.get(name):args+=['--'+name,values[name]]
+        return args
+    if command.backend in ('release-check','release-update'):
+        return ['/usr/bin/python3',str(root/('releases.py' if command.backend=='release-check' else 'release_update.py')),'--directory',str(root)]
     if command.backend.startswith('wrapper-'):
         return ['/usr/bin/python3',str(root/'command_wrapper.py'),command.backend[8:],'--directory',str(root)]
     if command.backend.startswith('configuration-'):

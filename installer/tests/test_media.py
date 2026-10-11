@@ -51,7 +51,7 @@ class MediaOperationTests(unittest.TestCase):
     def test_recovery_uses_saved_local_settings_without_contacting_s3(self):
         folder=self.root/'stages/media-transfers/fixture'
         folder.mkdir(parents=True)
-        original={'domain':'chat.example.org','media_mode':'local','databases_initialized':True}
+        original={'domain':'chat.example.org','media_mode':'local','databases_initialized':True,'mas_issuer':'https://mas.chat.example.org/'}
         (folder/'installation.json').write_text(json.dumps(original))
         (folder/'settings.env').write_text('DOMAIN=chat.example.org\nMEDIA_MODE=local\n')
         (self.root/'installation.json').write_text(json.dumps({**original,'media_transition_pending':True,'media_transition_dir':'stages/media-transfers/fixture'}))

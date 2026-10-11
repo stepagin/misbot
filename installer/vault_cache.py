@@ -20,7 +20,7 @@ import state_store
 FIELDS = {'VAULT_ADDR', 'VAULT_KV_MOUNT', 'VAULT_SECRET_PATH', 'VAULT_ROLE_ID_FILE',
           'VAULT_SECRET_ID_FILE', 'VAULT_CA_FILE'}
 LIMIT = 1024 * 1024
-RECOVERY_IDS = {0, 991, 999, 10001, 10002, 65532}
+RECOVERY_IDS = {0, 991, 999, 10001, 10002, 10003, 65532}
 
 
 def private_bytes(path):
@@ -120,7 +120,8 @@ def secret_files(root):
     names = (['settings/'+p.name for p in (root/'settings').iterdir()] if (root/'settings').is_dir() else ['settings.env']) + [ 'config/mas-signing.pem', 'config/mas-defaults.yaml',
              'config/referral-bot.json', 'config/external-postgres-owner.json',
              'data/referral-bot/cross-signing.json',
-             'config/federation-bot.json','data/federation-bot/cross-signing.json','data/federation/identity.pem',
+             'config/federation-bot.json','config/welcome-bot.json','config/admin-panel-identity.json',
+             'data/federation-bot/welcome/cross-signing.json','data/federation-bot/cross-signing.json','data/federation/identity.pem',
              'data/synapse/' + metadata['domain'] + '.signing.key']
     names += [str(path.relative_to(root)) for path in (root / 'secrets').rglob('*') if path.is_file() or path.is_symlink()]
     return sorted(name for name in names if (root / name).exists() or (root / name).is_symlink())

@@ -1,6 +1,7 @@
 """Small, shared primitives. Never include HTTP bodies or URLs in errors."""
 import ipaddress
 import json
+import os
 import re
 import socket
 from pathlib import Path
@@ -50,7 +51,8 @@ def receive(stream):
     return json.loads(data)
 
 
-def bridge_call(request, path='/run/control/control.sock', timeout=100):
+def bridge_call(request, path=None, timeout=100):
+    path = path or os.environ.get('MISBOT_CONTROL_SOCKET', '/run/control/control.sock')
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
         client.settimeout(timeout)
         client.connect(path)

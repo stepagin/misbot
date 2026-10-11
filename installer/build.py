@@ -13,6 +13,10 @@ parser.add_argument('--output', type=Path, default=root.parent / 'dist/matrix-in
 parser.add_argument('--check', action='store_true', help='verify that SHA256SUMS matches the current source files')
 args = parser.parse_args()
 names = [
+    'LICENSE',
+    'data_migrations.py', 'data-migrations.md', 'release-notes.md',
+    'admin_panel.py','releases.py','release_update.py','remove_server.py','admin_identity.py','admin-panel.md',
+    'existing_compose.py','existing_s3.py','existing_update.py','existing_features.py','existing_schedule.py','misbot_s3_provider.py','existing-compose.md','telegram_backup.py',
     'homepage.py','homepage.md','site/index.html','site/site.css','configuration-examples/site.env.example',
     'federation.py','federation_runtime.py','federation_protocol.py','federation_service.py',
     'federation_admin_api.py','federation_matrix_api.py','federation.md','misbot-api.openapi.json',
@@ -27,11 +31,13 @@ names = [
     'referral-control/requirements.txt', 'referral-control/provision.py',
 ]
 sources = {name: root / name for name in names}
+sources['LICENSE'] = root.parent / 'LICENSE'
 # Only named public source files enter the archive. The installed layout still
 # has referral-bot/ and referral-control/, without duplicate files in Git.
 source_names = {
     'referral-bot': ['Dockerfile','package.json','package-lock.json','main.js','logic.js','signing.js'],
-    'referral-control': ['bridge.py','common.py','mas.py'],
+    'referral-control': ['bridge.py','common.py','mas.py','control.py'],
+    'telegram-bot': ['worker.py','common.py','README.md'],
 }
 for destination,files in source_names.items():
     source = root.parent / 'bots' / ('matrix-referral' if destination == 'referral-bot' else 'telegram')
@@ -39,9 +45,9 @@ for destination,files in source_names.items():
         target = destination + '/' + name
         names.append(target)
         sources[target] = source / name
-for name in ('Dockerfile','main.js','logic.js','package.json','package-lock.json','signing.js'):
+for name in ('Dockerfile','main.js','logic.js','welcome.js','package.json','package-lock.json','signing.js'):
     target='federation-bot/'+name;names.append(target)
-    sources[target]=root.parent/'bots'/('matrix-federation' if name in ('Dockerfile','main.js','logic.js') else 'matrix-referral')/name
+    sources[target]=root.parent/'bots'/('matrix-federation' if name in ('Dockerfile','main.js','logic.js','welcome.js') else 'matrix-referral')/name
 payloads = {name: sources[name].read_bytes() for name in names}
 manifest = ''.join(hashlib.sha256(payloads[name]).hexdigest() + '  ' + name + '\n'
                    for name in names).encode()

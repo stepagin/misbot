@@ -15,7 +15,10 @@ args=parser.parse_args()
 root=Path(args.directory)
 metadata=json.loads((root/'installation.json').read_text())
 domain=metadata['domain']
-mas='https://mas.'+domain
+import configuration,configuration_schema
+model=configuration.load(root,True)
+configuration.assert_auth_identity(root,model,metadata)
+mas='https://'+configuration_schema.mas_host(model)
 tests=[
     ('discovery','https://'+domain+'/.well-known/matrix/client',200),
     ('federation','https://'+domain+'/.well-known/matrix/server',200),

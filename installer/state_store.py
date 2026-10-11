@@ -167,6 +167,12 @@ def inherited_operation_descriptor(root):
 
 
 def assert_update_allowed(root, allow_restore_generation=False, allow_federation=False, allow_configuration=False, allow_homepage=False):
+    reject_existing_backend(root)
+    if (Path(root)/'remove-journal.json').exists():
+        raise RuntimeError('Удаление сервера прервано: sudo misbot remove; запуск и другие изменения запрещены.')
+    state_path=Path(root)/'installation.json'
+    if state_path.exists() and json.loads(state_path.read_text()).get('decommissioned'):
+        raise RuntimeError('Сервер удалён частично. Для полного удаления повторите sudo misbot remove.')
     if not allow_homepage and ((Path(root)/'homepage-transition.json').exists() or (Path(root)/'homepage-transition.json').is_symlink()):
         raise RuntimeError('Главная страница требует восстановления: sudo misbot --directory '+shlex.quote(str(root))+' homepage recover; прежние файлы и checkpoint сохраните')
     if not allow_federation and (Path(root)/"federation-transition.json").exists():
@@ -330,6 +336,12 @@ def assert_backup_allowed(root):
             + str(Path(root) / 'install.sh') + ' backup-recover. Keep data, secrets and backup files')
 
 
+def reject_existing_backend(root):
+    path = Path(root) / 'installation.json'
+    if path.is_file() and json.loads(path.read_text()).get('backend') == 'existing-compose':
+        raise RuntimeError('Existing Compose installations must use misbot; portable generation and lifecycle operations are disabled')
+
+
 @contextmanager
 def operation_guard(root):
     """Serialize mutations; admit only descendants of the current owning process.
@@ -338,6 +350,7 @@ def operation_guard(root):
     does not make an otherwise empty destination unusable. Never unlink a busy lock.
     """
     root = Path(root).resolve()
+    reject_existing_backend(root)
     descriptor = os.open(operation_lock_path(root), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     acquired = False
     previous = {key: os.environ.get(key) for key in

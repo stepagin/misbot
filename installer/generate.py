@@ -69,7 +69,14 @@ state_path = root / 'installation.json'
 if not input_domain and not state_path.exists():
     parser.error('--domain is required for the first initialization; use init example.org')
 if root.exists() and any(root.iterdir()) and not state_path.exists():
-    parser.error('Refusing to overwrite an unrelated nonempty directory')
+    try:
+        __import__('command_wrapper').trusted_runtime(root)
+        import update
+        source_entries,_=update.validate_manifest(root)
+        allowed={Path(name).parts[0] for name in source_entries}|{'SHA256SUMS','.misbot-empty.json','__pycache__'}
+        if any(path.name not in allowed for path in root.iterdir()):raise RuntimeError('Unexpected retained data')
+    except (OSError,ValueError,RuntimeError):
+        parser.error('Refusing to overwrite an unrelated nonempty directory')
 os.umask(0o077)
 root.mkdir(parents=True, exist_ok=True)
 operation_guard = state_store.operation_guard(root)
@@ -98,6 +105,7 @@ if state.get('config_format_version', 1) not in (1,2):
 
 def save_state():
     state_store.write_json(state_path,state)
+    (root/'.misbot-empty.json').unlink(missing_ok=True)
 
 selected_domain = input_domain or state.get('domain')
 if not selected_domain:
@@ -115,6 +123,11 @@ except configuration_schema.InvalidConfiguration as error:
     fail(str(error),error.code)
 if domain_name(settings.get('DOMAIN','')) != domain:
     fail('Changing DOMAIN is not supported; create a new installation')
+mas_domain=configuration_schema.mas_host(settings)
+try:
+    configuration.assert_auth_identity(root,settings,state)
+except RuntimeError as error:
+    fail(str(error),'mas_identity_changed')
 database_mode=settings.get('POSTGRES_MODE','local')
 media_mode=settings.get('MEDIA_MODE','local')
 if database_mode not in ('local','external') or media_mode not in ('local','s3'):
@@ -200,7 +213,7 @@ subnet=str(network)
 if state.get('network_committed') and state.get('subnet') and state['subnet']!=subnet:
     fail('Changing the installed Docker subnet is not supported')
 vault_cache.mark_dirty(root)
-state.update(domain=domain,subnet=subnet,preview=args.preview)
+state.update(domain=domain,subnet=subnet,preview=args.preview,mas_issuer='https://'+mas_domain+'/')
 save_state()
 lock=json.loads((Path(__file__).parent/'versions.json').read_text())
 images,resolved=lock['tags'],lock['digests']
@@ -353,7 +366,7 @@ if not args.preview:
     os.chown(config / 'mas-signing.pem', 65532, 65532)
 
 mas = {
-    'http': {'public_base': f'https://mas.{domain}/', 'issuer': f'https://mas.{domain}/',
+    'http': {'public_base': f'https://{mas_domain}/', 'issuer': f'https://{mas_domain}/',
         'listeners': [{'name': 'web', 'resources': [{'name': r} for r in
             ['discovery', 'human', 'oauth', 'graphql', 'assets', 'adminapi', 'health']],
             'binds': [{'host': '0.0.0.0', 'port': 8080}]}]},
@@ -411,7 +424,7 @@ if has_proxy:
     proxy_url = 'socks5h://' + proxy_url.split('://', 1)[1]
     if '\n' in proxy_url or '\r' in proxy_url:
         raise ValueError('SOCKS5_CONFIG must be a single line')
-    bypass = f'localhost,127.0.0.1,::1,synapse,mas,postgres,jwt,livekit,caddy,{domain},.{domain},google.com,.google.com,googleapis.com,.googleapis.com,googleusercontent.com,.googleusercontent.com'
+    bypass = f'localhost,127.0.0.1,::1,synapse,mas,postgres,jwt,livekit,caddy,{domain},.{domain},{mas_domain},google.com,.google.com,googleapis.com,.googleapis.com,googleusercontent.com,.googleusercontent.com'
     proxy_file = root / 'mas-proxy.env'
     state_store.write_text(proxy_file, f'HTTPS_PROXY={proxy_url}\nNO_PROXY={bypass}\n')
     proxy_file.chmod(0o600)
@@ -463,7 +476,7 @@ dump('livekit.yaml', {'port': 7880, 'rtc': {'tcp_port': 7881, 'udp_port': 7882,
     "CREATE DATABASE mas OWNER mas ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C' TEMPLATE template0;\n")
 
 discovery = {'m.homeserver': {'base_url': f'https://matrix.{domain}'},
-    'org.matrix.msc2965.authentication': {'issuer': f'https://mas.{domain}/', 'account': f'https://mas.{domain}/account/'},
+    'org.matrix.msc2965.authentication': {'issuer': f'https://{mas_domain}/', 'account': f'https://{mas_domain}/account/'},
     'org.matrix.msc4143.rtc_foci': [{'type': 'livekit', 'livekit_service_url': f'https://rtc.{domain}/livekit/jwt'}]}
 (public / 'well-known-client.json').write_text(json.dumps(discovery))
 (public / 'well-known-server.json').write_text(json.dumps({'m.server': f'matrix.{domain}:443'}))
@@ -476,6 +489,9 @@ web = {'default_server_config': {'m.homeserver': {'base_url': f'https://matrix.{
     'room_directory': {'servers': list(dict.fromkeys([domain,*federation_servers]))}}
 (public / 'web-config.json').write_text(json.dumps(web, indent=2))
 
+mas_site=('' if mas_domain in (domain,'matrix.'+domain) else mas_domain+' {\n    reverse_proxy mas:8080\n}\n')
+matrix_routes=('    @matrix_api path /_matrix/* /_synapse/*\n    handle @matrix_api {\n        reverse_proxy synapse:8008\n    }\n'
+               if mas_domain=='matrix.'+domain else '')
 (config / 'Caddyfile').write_text('''{
     acme_ca https://acme-v02.api.letsencrypt.org/directory
     cert_issuer acme {
@@ -530,13 +546,11 @@ matrix.@DOMAIN@ {
         header Content-Type application/json
         respond `{ "errcode": "M_UNRECOGNIZED", "error": "Native OAuth authentication required" }` 404
     }
-    handle {
-        reverse_proxy synapse:8008
+@MATRIX_ROUTES@    handle {
+        reverse_proxy @MATRIX_UPSTREAM@
     }
 }
-mas.@DOMAIN@ {
-    reverse_proxy mas:8080
-}
+@MAS_SITE@
 web.@DOMAIN@ {
     encode zstd gzip
     reverse_proxy web:8080
@@ -559,7 +573,8 @@ rtc.@DOMAIN@ {
 turn.@DOMAIN@ {
     respond "TURN endpoint" 200
 }
-'''.replace('@DOMAIN@', domain).replace('@SUBNET@', subnet))
+'''.replace('@MATRIX_ROUTES@',matrix_routes).replace('@MATRIX_UPSTREAM@','mas:8080' if mas_domain=='matrix.'+domain else 'synapse:8008')
+   .replace('@MAS_SITE@',mas_site).replace('@DOMAIN@', domain).replace('@SUBNET@', subnet))
 homepage.write_assets(root,settings)
 state_store.write_text(config/'Caddyfile',homepage.replace_route((config/'Caddyfile').read_text(),settings))
 (config / 'haproxy.cfg').write_text('''global

@@ -14,6 +14,7 @@ from unittest.mock import patch
 import yaml
 
 BUNDLE=Path(__file__).resolve().parents[1]
+sys.path.insert(0,str(BUNDLE))
 
 
 class GeneratorTests(unittest.TestCase):
@@ -21,7 +22,7 @@ class GeneratorTests(unittest.TestCase):
         for action in ('version','--version'):
             result=subprocess.run(['bash',str(BUNDLE/'install.sh'),action],capture_output=True,text=True)
             self.assertEqual(result.returncode,0,result.stderr)
-            self.assertEqual(result.stdout.strip(),'Misbot 1.0.0')
+            self.assertEqual(result.stdout.strip(),'Misbot 1.1.0')
 
     def test_known_provider_pair_code_translates_to_safe_full_path_continuation(self):
         import lifecycle
@@ -51,7 +52,9 @@ class GeneratorTests(unittest.TestCase):
             self.assertFalse(any('.server-access' in p or p.endswith('.env') or
                 '/tests/' in p or '/verification/' in p or '/evidence/' in p or
                 'SYNAPSE_INSTALLER_' in p or p.endswith('live-test.js') for p in names))
-            self.assertEqual(json.loads(archive.extractfile('matrix-installer/release.json').read())['version'], '1.0.0')
+            self.assertEqual(json.loads(archive.extractfile('matrix-installer/release.json').read())['version'], '1.1.0')
+            self.assertEqual(archive.extractfile('matrix-installer/LICENSE').read(),
+                             (BUNDLE.parent/'LICENSE').read_bytes())
             manifest=archive.extractfile('matrix-installer/SHA256SUMS').read().decode()
             self.assertEqual({'matrix-installer/'+line.split('  ',1)[1] for line in manifest.splitlines()},
                              names-{'matrix-installer/SHA256SUMS'})
@@ -87,6 +90,27 @@ class GeneratorTests(unittest.TestCase):
 
     def initialize(self):
         self.invoke('--domain','chat.example.org','--initialize-env')
+
+    def test_full_removal_preserves_bundle_and_can_initialize_a_new_domain(self):
+        import remove_server
+        import state_store
+        self.initialize()
+        package=Path(self.temp.name)/'installer.tar.gz'
+        subprocess.run([sys.executable,str(BUNDLE/'build.py'),'--output',str(package)],check=True,stdout=subprocess.DEVNULL)
+        with tarfile.open(package) as archive:
+            for member in archive.getmembers():
+                relative=Path(member.name).relative_to('matrix-installer')
+                target=self.root/relative;target.parent.mkdir(parents=True,exist_ok=True)
+                target.write_bytes(archive.extractfile(member).read());target.chmod(0o600)
+        record={'format':1,'domain':'chat.example.org','directory':str(self.root),
+                'local':dict.fromkeys(remove_server.LOCAL,True),'s3':[],
+                'external_database':False,'vault':False,'completed':[]}
+        with patch.object(remove_server,'remove_containers'),patch.object(remove_server,'host_cleanup'):
+            remove_server.execute(self.root,record,[],stop=lambda:None)
+        self.invoke('--domain','new.example.org','--initialize-env')
+        self.assertEqual(json.loads((self.root/'installation.json').read_text())['domain'],'new.example.org')
+        self.assertFalse((self.root/'.misbot-empty.json').exists())
+        self.assertTrue((self.root/'remove_server.py').exists())
 
     def test_initial_domain_typo_or_missing_domain_does_not_poison_retry_directory(self):
         for domain in ('https://fictional.invalid','127.0.0.1',None):
@@ -128,6 +152,45 @@ class GeneratorTests(unittest.TestCase):
                         "SET log_error_verbosity='terse';","SET log_min_error_statement='panic';"):
             self.assertLess(sql.index(control),password)
         self.assertEqual((self.root/'secrets').stat().st_mode&0o777,0o700)
+
+    def test_custom_mas_domain_keeps_credentials_and_routes_shared_matrix_host(self):
+        import configuration,state_store
+        self.invoke('--domain','chat.example.org','--initialize-env','--preview')
+        state_store.write_text(self.root/'config/mas-signing.pem','FICTIONAL_SIGNING_KEY')
+        before=self.fingerprints()
+        for host in ('auth.example.net','matrix.chat.example.org','chat.example.org'):
+            with self.subTest(host=host):
+                configuration.patch(self.root,{'MAS_DOMAIN':host})
+                self.invoke('--preview')
+                mas=yaml.safe_load((self.root/'config/mas.yaml').read_text())
+                discovery=json.loads((self.root/'public/well-known-client.json').read_text())
+                self.assertEqual(mas['http']['issuer'],'https://'+host+'/')
+                self.assertEqual(discovery['org.matrix.msc2965.authentication']['issuer'],mas['http']['issuer'])
+                caddy=(self.root/'config/Caddyfile').read_text()
+                self.assertEqual(caddy.count('\n'+host+' {'),1)
+                self.assertNotIn('\nmas.chat.example.org {',caddy)
+                self.assertIn('reverse_proxy mas:8080',caddy)
+                self.assertIn('reverse_proxy synapse:8008',caddy)
+                if host=='matrix.chat.example.org':self.assertIn('@matrix_api path /_matrix/* /_synapse/*',caddy)
+                self.assertEqual(self.fingerprints(),before)
+
+    def test_initialized_mas_issuer_change_fails_before_runtime_or_secrets_written(self):
+        import configuration,state_store
+        self.invoke('--domain','chat.example.org','--initialize-env','--preview')
+        state_store.write_text(self.root/'config/mas-signing.pem','FICTIONAL_SIGNING_KEY')
+        configuration.patch(self.root,{'MAS_DOMAIN':'auth.example.net'})
+        self.invoke('--preview')
+        metadata=json.loads((self.root/'installation.json').read_text())
+        metadata['databases_initialized']=True
+        state_store.write_json(self.root/'installation.json',metadata)
+        paths=('config/mas.yaml','config/homeserver.yaml','compose.yaml','installation.json')
+        saved={name:(self.root/name).read_bytes() for name in paths};keys=self.fingerprints()
+        env=self.root/'settings.env'
+        state_store.write_text(env,env.read_text().replace('MAS_DOMAIN=auth.example.net','MAS_DOMAIN=other.example.net'))
+        result=self.invoke('--preview',ok=False)
+        self.assertIn('MAS issuer is immutable',result.stderr)
+        self.assertEqual({name:(self.root/name).read_bytes() for name in paths},saved)
+        self.assertEqual(self.fingerprints(),keys)
 
     def test_first_source_seed_preserves_initialized_secrets(self):
         self.initialize()

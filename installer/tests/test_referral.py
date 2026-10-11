@@ -65,6 +65,24 @@ class ReferralTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,'occupied'):module.provision(self.control,self.api)
         self.assertEqual(self.api.sessions,{})
         self.assertEqual(len(self.api.users),1)
+    def test_admin_and_welcome_identities_use_fixed_separate_devices_and_sessions(self):
+        for options,tag,device in (({'federation':True},'admin-panel','MATRIX-FEDERATION-01'),
+                                  ({'welcome':True},'server-guide','MATRIX-WELCOME-01')):
+            with self.subTest(tag=tag):
+                api=API()
+                first=module.provision(self.control,api,**options)
+                second=module.provision(self.control,api,**options)
+                self.assertEqual(first,second);self.assertEqual(len(api.sessions),1)
+                self.assertEqual(first['config']['user_id'],'@'+tag+':chat.example.org')
+                self.assertEqual(first['config']['device_id'],device)
+                self.assertNotIn('urn:mas:admin',first['metadata']['scope'])
+                with self.assertRaisesRegex(RuntimeError,'immutable'):
+                    module.provision(self.control,api,username='renamed-bot',**options)
+    def test_saved_legacy_admin_tag_is_reused_without_creating_a_new_account(self):
+        first=module.provision(self.control,self.api,federation=True,username='federation-bot')
+        second=module.provision(self.control,self.api,federation=True)
+        self.assertEqual(first,second);self.assertEqual(len(self.api.users),1)
+        self.assertEqual(second['config']['user_id'],'@federation-bot:chat.example.org')
     def test_inactive_bot_or_admin_role_is_not_repurposed(self):
         module.provision(self.control,self.api)
         self.api.active=False

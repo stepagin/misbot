@@ -12,7 +12,7 @@ class UITests(unittest.TestCase):
     def initialized_ui(self,folder,step=7,reader=None):
         import configuration,state_store
         root=Path(folder)/'target';root.mkdir(mode=0o700)
-        state_store.write_json(root/'installation.json',{'domain':'example.org','databases_initialized':True,'config_format_version':2})
+        state_store.write_json(root/'installation.json',{'domain':'example.org','databases_initialized':True,'config_format_version':2,'mas_issuer':'https://mas.example.org/'})
         configuration.write_model(root,{'DOMAIN':'example.org'})
         interface=ui.UI(root,draft=Path(folder)/'draft.json',reader=reader)
         interface.step=step;interface.model={'DOMAIN':'stale.example.org'}
@@ -53,7 +53,7 @@ class UITests(unittest.TestCase):
             def run(command,**kwargs):
                 calls.append(command)
                 if command=='start':
-                    state_store.write_json(root/'installation.json',{'domain':'example.org','databases_initialized':True,'config_format_version':2})
+                    state_store.write_json(root/'installation.json',{'domain':'example.org','databases_initialized':True,'config_format_version':2,'mas_issuer':'https://mas.example.org/'})
                     return 1
                 return 0
             with patch('sys.stdout',new=io.StringIO()),patch.object(interface,'run',side_effect=run),patch.object(interface,'finish'):
@@ -137,7 +137,7 @@ raise SystemExit(interface.wizard())
                 os.write(master,(value+'\n').encode())
             try:
                 for marker,value in [('DOMAIN:','bad://name'),('DOMAIN:','example.org'),('абсолютный путь',str(target)),
-                        ('PUBLIC_IP','8.8.8.8'),('ACME_EMAIL:',''),('MEDIA_MODE [local]:',''),
+                        ('MAS_DOMAIN:',''),('PUBLIC_IP','8.8.8.8'),('ACME_EMAIL:',''),('MEDIA_MODE [local]:',''),
                         ('Подключить GOOGLE?','да'),('GOOGLE_CLIENT_ID:','FICTIONAL_ID'),('GOOGLE_CLIENT_SECRET:','FICTIONAL_HIDDEN_SECRET'),
                         ('Подключить TELEGRAM?','нет'),('INVITATION_LIFETIME_SECONDS [604800]:',''),
                         ('Настроить внешние копии','отложить'),('применить. Назад','назад'),

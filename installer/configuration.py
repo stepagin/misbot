@@ -132,8 +132,29 @@ def snapshot(root,folder):
 def export_text(root):return serialize(load(root))
 
 
+def assert_auth_identity(root,model,metadata):
+    if not any(metadata.get(key) for key in ('databases_initialized','storage_committed','restore_pending')):
+        return
+    expected=metadata.get('mas_issuer')
+    path=Path(root)/'config/mas.yaml'
+    if path.exists() or path.is_symlink():
+        try:
+            import yaml
+            if not stat.S_ISREG(path.lstat().st_mode):raise ValueError()
+            issuer=yaml.safe_load(path.read_text()).get('http',{}).get('issuer')
+            if not isinstance(issuer,str) or not issuer or (expected and expected!=issuer):raise ValueError()
+            expected=issuer
+        except ImportError:
+            raise RuntimeError('Missing local dependency: install python3-yaml, then retry config validate') from None
+        except (OSError,ValueError,AttributeError,yaml.YAMLError):
+            raise RuntimeError('Runtime MAS issuer does not match its saved identity; retain original files and backups') from None
+    if not expected or expected!='https://'+schema.mas_host(model)+'/':
+        raise RuntimeError('MAS issuer is immutable after database initialization; restore the original MAS_DOMAIN before applying')
+
+
 def assert_identity(root,model,metadata):
     if metadata.get('domain')!=model['DOMAIN']:raise RuntimeError('Configuration domain differs from immutable Matrix identity')
+    assert_auth_identity(root,model,metadata)
     path=Path(root)/'config/homeserver.yaml'
     if path.exists() or path.is_symlink():
         try:
@@ -165,6 +186,7 @@ def recover(root,rollback=False):
             elif (old/'settings').exists():model,_=load_bundle(old/'settings',True,record.get('preview',False))
             else:raise RuntimeError('No previous configuration exists; retain the initial journal and use config recover')
             if metadata.get('domain') and metadata['domain']!=model['DOMAIN']:raise RuntimeError('Previous configuration belongs to another Matrix identity')
+            assert_auth_identity(root,model,metadata)
             if (root/'settings').exists():
                 directory(root/'settings')
                 if any(p.name not in allowed_names for p in (root/'settings').iterdir()):raise RuntimeError('Unknown active configuration files; retain them privately before rollback')
@@ -184,6 +206,7 @@ def recover(root,rollback=False):
         else:
             model,backup=load_bundle(stage/'next',True,record.get('preview',False))
             if metadata.get('domain') and metadata['domain']!=model['DOMAIN']:raise RuntimeError('Configuration identity differs from the installation; keep checkpoints')
+            assert_auth_identity(root,model,metadata)
             target=directory(root/'settings')
             for name in record.get('old_files',[]):
                 if name not in record['files']:(target/name).unlink(missing_ok=True)
@@ -205,6 +228,7 @@ def write_model(root,values,backup=None,preview=False):
         if (root/'installation.json').exists():
             metadata=read_private_json(root/'installation.json')
             if metadata.get('domain') and metadata['domain']!=model['DOMAIN']:raise RuntimeError('DOMAIN/server_name are immutable; restore the original field before applying')
+            assert_auth_identity(root,model,metadata)
         if (root/'settings.env').exists():
             if (root/'settings').exists():raise RuntimeError('Both configuration formats exist; retain files and resolve the configuration checkpoint before applying')
             # Existing format remains authoritative until explicit migration.
@@ -260,6 +284,7 @@ def apply_settings(root,changes):
     with state_store.operation_guard(root):
         state_store.assert_update_allowed(root)
         before=load(root,True);proposed=dict(before);proposed.update(changes);schema.validate(proposed)
+        assert_identity(root,proposed,read_private_json(root/'installation.json'))
         lifecycle.configure(root,'configuration-apply')
         lifecycle.ownership_check()
         lifecycle.backup();lifecycle.restore_check()
@@ -286,7 +311,7 @@ def main():
             if args.action=='validate':
                 metadata=read_private_json(args.directory/'installation.json')
                 model=load(args.directory,True,metadata.get('preview',False))
-                if model['DOMAIN']!=metadata['domain']:raise schema.InvalidConfiguration(args.directory,'DOMAIN','identity','верните неизменяемый домен установки')
+                assert_identity(args.directory,model,metadata)
                 print(json.dumps({'stage':'configuration','status':'ready','format':2 if (args.directory/'settings').exists() else 1}));return 0
             if args.action=='migrate':result=migrate(args.directory)
             elif args.action in ('recover','rollback'):result=recover(args.directory,args.action=='rollback')
@@ -295,7 +320,7 @@ def main():
                 state_store.assert_update_allowed(args.directory)
                 metadata=read_private_json(args.directory/'installation.json')
                 model=load(args.directory,True,metadata.get('preview',False))
-                if metadata.get('domain')!=model['DOMAIN']:raise RuntimeError('Matrix identity cannot be changed')
+                assert_identity(args.directory,model,metadata)
                 lifecycle.configure(args.directory,'configuration-apply');lifecycle.ownership_check()
                 if metadata.get('databases_initialized'):lifecycle.backup();lifecycle.restore_check()
                 else:snapshot(args.directory,directory(args.directory/'stages/configuration'/secrets.token_hex(16)))

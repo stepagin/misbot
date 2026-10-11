@@ -148,14 +148,14 @@ class UI:
             text('Проверка Linux amd64, systemd, памяти, диска и портов. Ошибку исправьте и повторите; шаг не пропускается.')
             preflight.system_check(self.root)
         elif index==2:
-            self.field('PUBLIC_IP');self.field('ACME_EMAIL')
+            self.field('MAS_DOMAIN');self.field('PUBLIC_IP');self.field('ACME_EMAIL')
             domain=self.model['DOMAIN'];ip=self.model.get('PUBLIC_IP')
-            text('Создайте A на VPS для: '+', '.join(p+domain for p in ('','matrix.','mas.','admin.','web.','rtc.','turn.'))+'. Удалите AAAA; отключите CDN proxy. Порты описаны в README.')
+            text('Создайте A на VPS для: '+', '.join(schema.public_hosts(self.model))+'. Удалите AAAA; отключите CDN proxy. Порты описаны в README.')
             if not ip:
                 addresses=preflight.resolve(domain,__import__('socket').AF_INET)
                 if len(addresses)!=1:raise RuntimeError('DOMAIN не имеет одного A. Исправьте DNS или PUBLIC_IP; повторите этот шаг.')
                 ip=next(iter(addresses))
-            preflight.dns_check(domain,ip);preflight.caa_check(domain)
+            preflight.dns_check(domain,ip,self.model.get('MAS_DOMAIN',''));preflight.caa_check(domain,self.model.get('MAS_DOMAIN',''))
             preflight.network_check(self.root,self.model.get('DOCKER_SUBNET','172.30.50.0/24'))
             text('DNS/CAA/система проверены автоматически. До запуска свободные порты проверяются backend.')
         elif index==3:

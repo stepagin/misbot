@@ -74,9 +74,9 @@ def resolve(host, family, timeout=10):
     return result[0]
 
 
-def dns_check(domain, public_ip):
-    for prefix in ('', 'matrix.', 'mas.', 'admin.', 'web.', 'rtc.', 'turn.'):
-        host = prefix + domain
+def dns_check(domain, public_ip, mas_domain=''):
+    from configuration_schema import public_hosts
+    for host in public_hosts({'DOMAIN':domain,'MAS_DOMAIN':mas_domain}):
         actual = resolve(host, socket.AF_INET)
         if actual != {public_ip}:
             raise RuntimeError('DNS for ' + host + ': expected only A=' + public_ip +
@@ -85,7 +85,7 @@ def dns_check(domain, public_ip):
                 'then retry install.sh preflight and install.sh up in the same directory.')
         if resolve(host, socket.AF_INET6):
             raise RuntimeError('DNS for ' + host + ': unexpected AAAA. This deployment uses IPv4; '
-                'remove AAAA for the seven hosts, wait for DNS caches, then retry install.sh preflight.')
+                'remove AAAA for managed hosts, wait for DNS caches, then retry install.sh preflight.')
 
 
 def caa_query(host):
@@ -118,12 +118,12 @@ def caa_query(host):
     return records
 
 
-def caa_check(domain):
+def caa_check(domain, mas_domain=''):
     # RFC 8659: chase aliases in each query, then climb the original name tree
     # until the first nonempty CAA RRset, excluding the DNS root.
     cache = {}
-    for prefix in ('', 'matrix.', 'mas.', 'admin.', 'web.', 'rtc.', 'turn.'):
-        host = prefix + domain
+    from configuration_schema import public_hosts
+    for host in public_hosts({'DOMAIN':domain,'MAS_DOMAIN':mas_domain}):
         current = host
         records = []
         while current:
@@ -150,8 +150,8 @@ def system_check(root):
         raise RuntimeError('This installer requires a Linux amd64 VPS; use a compatible test machine')
     memory = int(next(line.split()[1] for line in Path('/proc/meminfo').read_text().splitlines()
                       if line.startswith('MemTotal:')))
-    if memory < 900000:
-        raise RuntimeError('Less than about 1 GiB RAM; choose a larger VPS before continuing')
+    if memory < 1800000:
+        raise RuntimeError('Less than about 2 GiB RAM; choose a larger VPS before continuing')
     disk_target=Path(root)
     while not disk_target.exists():disk_target=disk_target.parent
     free = shutil.disk_usage(disk_target).free
@@ -309,6 +309,7 @@ def check(root):
     metadata = json.loads((root / 'installation.json').read_text())
     values=__import__('configuration').load(root,True,metadata.get('preview',False))
     if values['DOMAIN']!=metadata['domain']:raise RuntimeError('DOMAIN differs from immutable Matrix identity; restore the original field')
+    __import__('configuration').assert_auth_identity(root,values,metadata)
     domain = metadata['domain']
     public_ip = values.get('PUBLIC_IP')
     if not public_ip:
@@ -324,11 +325,11 @@ def check(root):
     if not address.is_global or address.version != 4:
         raise RuntimeError('PUBLIC_IP must be a public IPv4 address')
     system_check(root)
-    dns_check(domain, public_ip)
-    caa_check(domain)
+    dns_check(domain, public_ip, values.get('MAS_DOMAIN',''))
+    caa_check(domain, values.get('MAS_DOMAIN',''))
     network_check(root, values.get('DOCKER_SUBNET', '172.30.50.0/24'))
     proxy_check(values)
-    return {'check': 'preflight', 'passed': True, 'hosts': 7}
+    return {'check': 'preflight', 'passed': True, 'hosts': len(__import__('configuration_schema').public_hosts(values))}
 
 
 if __name__ == '__main__':
