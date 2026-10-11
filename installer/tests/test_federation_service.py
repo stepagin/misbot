@@ -1,6 +1,7 @@
 """Real narrow Unix HTTP/RPC listeners, isolated fake installation and peers."""
 import http.client
 import hashlib
+import contextlib
 import json
 import multiprocessing
 import os
@@ -32,9 +33,11 @@ class ServiceTests(unittest.TestCase):
             state_store.write_json(root/'installation.json',metadata)
             federation.setup(root,{'domain':domain})
             original=federation.Backend
+            class IsolatedBackend(original):
+                def guard(self):return contextlib.nullcontext()
             def worker():
                 signal.signal(signal.SIGTERM,signal.SIG_DFL)
-                with patch.object(federation,'Backend',side_effect=lambda p:original(p,admission=False)),\
+                with patch.object(federation,'backend',side_effect=lambda p:IsolatedBackend(p,admission=False)),\
                      patch.object(federation_runtime,'validate'),patch.object(federation_service.lifecycle,'configure'):
                     federation_service.serve(root)
             inode=None
