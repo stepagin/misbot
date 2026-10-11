@@ -17,6 +17,7 @@ import configuration_schema as schema
 import cli_commands
 import state_store
 from terminal_views import TerminalView, literal
+from terminal_diagnostics import check_summary, parse_checks
 import ui_actions
 
 
@@ -63,6 +64,7 @@ class UI:
         self.reader = reader
         self.runner = runner
         self.view = view or TerminalView()
+        self.check_results = []
         self.explicit_draft = draft is not None
         self.draft = Path(draft) if self.explicit_draft else self.draft_path(self.root)
         self.model = {}
@@ -334,6 +336,9 @@ class UI:
         if self.runner:
             with self.view.busy(label):
                 return self.runner(args)
+        capture = path == 'check'
+        if capture:
+            self.check_results = []
         # Run in the same foreground process group. Ctrl+C reaches backend;
         # wait for it to finish before displaying recovery or accepting changes.
         child = subprocess.Popen(
@@ -341,12 +346,21 @@ class UI:
             stdin=None
             if path in ('users invitation show', 'credentials admin show', 'update latest')
             else subprocess.DEVNULL,
+            **(
+                {'stdout': subprocess.PIPE, 'stderr': subprocess.STDOUT, 'text': True}
+                if capture
+                else {}
+            ),
         )
         try:
             if path in ('users invitation show', 'credentials admin show', 'update latest'):
                 self.view.message(label)
                 return child.wait()
             with self.view.busy(label):
+                if capture:
+                    output, _ = child.communicate()
+                    self.check_results = parse_checks(output)
+                    return child.returncode
                 return child.wait()
         except (KeyboardInterrupt, state_store.OperationInterrupted):
             if child.poll() is None:
@@ -356,16 +370,18 @@ class UI:
             )
             while child.poll() is None:
                 try:
-                    child.wait(timeout=1)
+                    if capture:
+                        child.communicate(timeout=1)
+                    else:
+                        child.wait(timeout=1)
                 except subprocess.TimeoutExpired:
                     pass
                 except (KeyboardInterrupt, state_store.OperationInterrupted):
                     pass
-            self.view.message(
-                'Проверьте sudo misbot --directory '
-                + shlex.quote(str(self.root))
-                + ' status; не удаляйте lock/checkpoints.'
-            )
+            if capture:
+                output, _ = child.communicate()
+                self.check_results = parse_checks(output)
+            self.view.message(self.continuation())
             return 130
 
     def s3_form(self, purpose):
@@ -871,11 +887,60 @@ class UI:
         return 0
 
     def continuation(self):
-        return (
-            'Далее: sudo misbot --directory '
-            + shlex.quote(str(self.root))
-            + ' status. Продолжение указано в результате проверки.'
-        )
+        if (self.root / 'homepage-transition.json').exists():
+            return 'Меню: «Продолжить прерванную операцию» → «Сайт после прерывания».'
+        return 'Меню: «Состояние и работа сервера» → «Показать состояние».'
+
+    def check_result(self, code):
+        results = self.check_results
+        while True:
+            self.view.heading('Проверить доступность')
+            if code == 0:
+                self.view.message('Доступность подтверждена.', 'green')
+            elif code == 130:
+                self.view.message('Проверка прервана.', 'yellow')
+            else:
+                self.view.message('Доступность не подтверждена (код ' + str(code) + ').', 'red')
+            self.view.message(check_summary(results, code))
+            dns = next((row for row in results if row.key == 'dns'), None)
+            if dns:
+                self.view.message('DNS: ' + ('проверка пройдена.' if dns.passed else dns.message))
+            first = next((row for row in results if not row.passed and row is not dns), None)
+            if first:
+                self.view.message(first.label + ': ' + first.message, 'yellow')
+            inventory = next(
+                (row for row in results if row.key == 'service_inventory' and not row.passed), None
+            )
+            if inventory and inventory is not first:
+                self.view.message(
+                    'Не все службы созданы или готовы.' if self.view.compact else inventory.message,
+                    'yellow',
+                )
+            if code:
+                self.view.message(self.continuation())
+                if not (self.root / 'homepage-transition.json').exists():
+                    self.view.message(
+                        'После исправления: «Запустить сервер», затем «Проверить доступность».'
+                    )
+            if not self.view.fullscreen:
+                for row in results:
+                    self.view.message(row.label + ': ' + row.message)
+                return
+            if self.choose('Результат проверки', [('1', 'Показать подробности', '')]) == '0':
+                return
+            while True:
+                self.view.heading('Подробности проверки доступности')
+                choice = self.choose(
+                    'Проверки и службы',
+                    [(str(i), row.label, row.message) for i, row in enumerate(results, 1)],
+                    keep_hints=True,
+                )
+                if choice == '0':
+                    break
+                row = results[int(choice) - 1]
+                self.view.heading(row.label)
+                self.view.message(row.message)
+                self.pause('Enter — вернуться к проверкам')
 
     def available_actions(self, group):
         return [
@@ -1008,6 +1073,9 @@ class UI:
             code = self.run(command.path, **args)
         finally:
             self.root = previous
+        if command.path == 'check':
+            self.check_result(code)
+            return code
         self.view.result(item.title, code, self.continuation())
         if command.backend in ('update', 'release-update') and code == 0:
             self.view.message(
@@ -1051,7 +1119,8 @@ class UI:
                     self.task_menu(item.path[1:])
                 else:
                     self.execute(item)
-                    self.pause('Enter — вернуться к меню')
+                    if item.path != 'check':
+                        self.pause('Enter — вернуться к меню')
             except (Back, Cancel, KeyboardInterrupt):
                 self.view.message('Ввод отменён.')
                 return

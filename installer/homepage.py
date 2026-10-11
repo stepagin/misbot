@@ -233,6 +233,21 @@ class Backend:
         lifecycle.configure(self.root, 'homepage')
         lifecycle.ownership_check()
 
+    def initial_launch_incomplete(self):
+        """Only the native bootstrap before public services permits local rollback."""
+        metadata = config.read_private_json(self.root / 'installation.json')
+        if (
+            metadata.get('backend') == 'existing-compose'
+            or metadata.get('applied_release_version')
+            or metadata.get('databases_initialized') is not True
+            or metadata.get('federation_seeded') is not True
+            or metadata.get('welcome_crypto_initialized')
+        ):
+            return False
+        import lifecycle
+
+        return not any(row['Service'] == 'tls-router' for row in lifecycle.service_rows())
+
     def paths(self):
         for path in (
             self.root / 'config',
@@ -303,6 +318,13 @@ class Backend:
 
     def apply(self, changes):
         self.ready()
+        if self.initial_launch_incomplete():
+            raise RuntimeError(
+                'Первоначальный запуск ещё не завершён. Сначала продолжите установку '
+                'через «Состояние и работа сервера» → «Запустить сервер»; '
+                'настройки сайта не изменены.'
+            )
+
         self.paths()
         model = self.proposed(changes)
         before = config.load(self.root, True)
@@ -354,6 +376,13 @@ class Backend:
         ):
             raise RuntimeError('Небезопасный checkpoint; сохраните его приватно')
         stage = self.root / journal['stage']
+        incomplete = self.initial_launch_incomplete()
+        if incomplete and not rollback:
+            raise RuntimeError(
+                'Первоначальный запуск не завершён. В разделе «Сайт после прерывания» '
+                'выберите «Вернуть прежний сайт», затем «Запустить сервер». '
+                'Checkpoint и данные сохранены.'
+            )
         if (self.root / 'configuration-transition.json').exists():
             config.recover(self.root, rollback=rollback)
         if rollback:
@@ -377,6 +406,16 @@ class Backend:
                 self.root / 'config/Caddyfile', config.read_private(stage / 'next-caddy')
             )
         self.validator(self.root / 'config/Caddyfile')
+        if incomplete:
+            # Restore the saved files, without starting services or claiming HTTPS works.
+            path.unlink()
+            return {
+                'stage': 'homepage',
+                'status': 'rolled_back',
+                'restart': 'not started',
+                'public_checks': 'deferred',
+                'next_action': 'up',
+            }
         self.activate()
         # Recovery is complete only after real routes are verified.
         observed = dict(model)

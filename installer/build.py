@@ -62,6 +62,7 @@ names = [
     'configuration_schema.py',
     'terminal_ui.py',
     'terminal_views.py',
+    'terminal_diagnostics.py',
     'ui_actions.py',
     'registration.py',
     'registration_api.py',

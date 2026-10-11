@@ -245,7 +245,11 @@ def wait(check, attempts=60, service='service'):
 def dns_check():
     metadata = state()
     referral.validate_saved(ROOT, metadata)
-    preflight.dns_check(metadata['domain'], metadata['public_ip'])
+    try:
+        preflight.dns_check(metadata['domain'], metadata['public_ip'])
+    except (RuntimeError, OSError):
+        emit('dns', passed=False, failure_code='dns_validation')
+        raise
     emit('dns', hosts=7, passed=True)
 
 
@@ -1000,18 +1004,38 @@ def check():
             **{
                 key: value
                 for key, value in record.items()
-                if key in ('status', 'expected', 'passed', 'error_type', 'tls', 'failures')
+                if key
+                in ('status', 'expected', 'passed', 'error_type', 'failure_code', 'tls', 'failures')
             },
         )
-    if result.returncode:
-        raise RuntimeError('Public checks failed; see the check records above')
     rows = service_rows()
     for row in rows:
         emit('service', name=row['Service'], state=row['State'], health=row.get('Health', ''))
     expected = (10 if external_database() else 11) + (1 if state().get('federation_seeded') else 0)
-    if len(rows) != expected or any(
-        row['State'] != 'running' or row.get('Health', '') not in ('', 'healthy') for row in rows
-    ):
+    services_ready = len(rows) == expected and all(
+        row['State'] == 'running' and row.get('Health', '') in ('', 'healthy') for row in rows
+    )
+    required = {
+        'synapse',
+        'mas',
+        'jwt',
+        'livekit',
+        'web',
+        'admin',
+        'caddy',
+        'tls-router',
+        'referral-control',
+        'referral-bot',
+    }
+    if not external_database():
+        required.add('postgres')
+    if state().get('federation_seeded'):
+        required.add('federation-bot')
+    missing = sorted(required - {row['Service'] for row in rows})
+    emit('service_inventory', passed=services_ready and not missing, missing=missing)
+    if result.returncode:
+        raise RuntimeError('Public checks failed; see the check records above')
+    if missing or not services_ready:
         raise RuntimeError('Not all expected containers are ready')
     referral.validate_saved(ROOT, state())
     __import__('federation_runtime').validate(ROOT, state())

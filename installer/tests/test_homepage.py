@@ -231,6 +231,90 @@ class HomepageTests(unittest.TestCase):
         self.assertFalse((self.root / 'homepage-transition.json').exists())
         self.assertEqual((secret / 'index.html').read_text(), 'FICTIONAL_PRIVATE_MARKER')
 
+    def test_partial_bootstrap_site_rollback_restores_files_without_starting_services(self):
+        import lifecycle
+
+        before = config.load(self.root, True)
+        self.backend.activate = lambda: (_ for _ in ()).throw(state_store.OperationInterrupted())
+        with patch.object(self.backend, 'ready'), state_store.operation_guard(self.root):
+            with self.assertRaises(state_store.OperationInterrupted):
+                self.backend.apply({'SITE_NAME': 'Pending candidate'})
+        state_store.write_json(
+            self.root / 'installation.json',
+            {
+                'domain': 'fictional.example.org',
+                'config_format_version': 2,
+                'databases_initialized': True,
+                'mas_issuer': 'https://mas.fictional.example.org/',
+                'federation_seeded': True,
+            },
+        )
+        with (
+            patch.object(
+                lifecycle, 'service_rows', return_value=[{'Service': 'synapse', 'State': 'running'}]
+            ),
+            patch.object(self.backend, 'activate') as activate,
+            patch.object(self.backend, 'verify') as verify,
+            state_store.operation_guard(self.root),
+        ):
+            with self.assertRaisesRegex(RuntimeError, 'Вернуть прежний сайт'):
+                self.backend.recover()
+            self.assertTrue((self.root / 'homepage-transition.json').exists())
+            result = self.backend.recover(rollback=True)
+            self.assertEqual(result['status'], 'rolled_back')
+            self.assertEqual(result['public_checks'], 'deferred')
+            self.assertEqual(self.backend.recover(rollback=True)['status'], 'unchanged')
+            activate.assert_not_called()
+            verify.assert_not_called()
+        self.assertFalse((self.root / 'homepage-transition.json').exists())
+        self.assertEqual(config.load(self.root, True), before)
+        self.assertEqual((self.root / 'config/Caddyfile').read_text(), self.legacy)
+        state_store.assert_update_allowed(self.root)
+
+    def test_initial_bootstrap_gate_never_applies_to_existing_or_previously_started_proxy(self):
+        import lifecycle
+
+        base = {
+            'domain': 'fictional.example.org',
+            'databases_initialized': True,
+            'federation_seeded': True,
+        }
+        for changes, rows in (
+            ({'backend': 'existing-compose'}, []),
+            ({'applied_release_version': '1.1.0'}, []),
+            ({'welcome_crypto_initialized': True}, []),
+            ({}, [{'Service': 'tls-router', 'State': 'exited'}]),
+        ):
+            with self.subTest(changes=changes, rows=rows):
+                state_store.write_json(self.root / 'installation.json', {**base, **changes})
+                with patch.object(lifecycle, 'service_rows', return_value=rows):
+                    self.assertFalse(self.backend.initial_launch_incomplete())
+
+    def test_site_changes_are_rejected_before_checkpoint_during_partial_installation(self):
+        import lifecycle
+
+        state_store.write_json(
+            self.root / 'installation.json',
+            {
+                'domain': 'fictional.example.org',
+                'databases_initialized': True,
+                'mas_issuer': 'https://mas.fictional.example.org/',
+                'federation_seeded': True,
+            },
+        )
+        with (
+            patch.object(lifecycle, 'configure'),
+            patch.object(lifecycle, 'ownership_check'),
+            patch.object(lifecycle, 'service_rows', return_value=[]),
+            state_store.operation_guard(self.root),
+        ):
+            self.backend.ready()  # Read-only validation remains available before launch.
+            with self.assertRaisesRegex(RuntimeError, 'Первоначальный запуск'):
+                self.backend.apply({'SITE_NAME': 'Must not publish'})
+        self.assertFalse((self.root / 'homepage-transition.json').exists())
+        self.assertEqual(config.load(self.root, True)['SITE_NAME'], '')
+        self.assertEqual((self.root / 'config/Caddyfile').read_text(), self.legacy)
+
     def test_update_failure_restores_site_settings_and_assets(self):
         import update
 
