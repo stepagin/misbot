@@ -9,11 +9,13 @@ import sqlite3
 import time
 
 import configuration
+import configuration_schema
 import data_migrations
 import lifecycle
 import releases
 import state_store
 from postgres_setup import literal
+from welcome_message import DEFAULT_WELCOME, WelcomeContext
 
 ACTIONS = {
     'panel-status',
@@ -26,12 +28,6 @@ ACTIONS = {
     'panel-outbox',
     'panel-ack',
 }
-DEFAULT_WELCOME = (
-    'Добро пожаловать на сервер {domain}! Здесь можно общаться в личных '
-    'и групповых чатах, делиться файлами и звонить через Matrix. '
-    'Личные чаты поддерживают сквозное шифрование. Приглашения: @referral-bot:{domain}. '
-    'Этот бот присылает новости сервера и не отвечает на сообщения.'
-)
 PREFERENCES = {'updates': True, 'registrations': True, 'statistics': True}
 
 
@@ -108,11 +104,40 @@ class Panel:
 
     def bot_ids(self):
         ids = {'@referral-bot:' + self.domain, '@server-guide:' + self.domain}
-        for name in ('federation-bot.json', 'welcome-bot.json'):
+        for name in ('referral-bot.json', 'federation-bot.json', 'welcome-bot.json'):
             path = self.root / 'config' / name
             if path.exists():
                 ids.add(json.loads(path.read_text())['user_id'])
         return ids
+
+    def welcome_text(self, template):
+        server_name = self.domain
+        if '{server_name}' in template:
+            metadata = configuration.read_private_json(self.root / 'installation.json')
+            if metadata.get('backend') == 'existing-compose':
+                site = self.root / '.misbot/features/site.json'
+                values = (
+                    configuration.read_private_json(site)
+                    if site.exists() or site.is_symlink()
+                    else {}
+                )
+                fallback = metadata.get('existing', {}).get('features', {}).get('primary_domain')
+                server_name = values.get('SITE_NAME') or fallback or self.domain
+            elif any(
+                path.exists() or path.is_symlink()
+                for path in (self.root / 'settings', self.root / 'settings.env')
+            ):
+                server_name = configuration.load(self.root).get('SITE_NAME') or self.domain
+            server_name = configuration_schema.field_value('SITE_NAME', server_name)
+        referral_mxid = '@referral-bot:' + self.domain
+        if '{referral_url}' in template:
+            config = self.root / 'config/referral-bot.json'
+            if config.exists() or config.is_symlink():
+                referral_mxid = json.loads(config.read_text())['user_id']
+        administrator_mxid = owner(self.root) if '{administrator_url}' in template else ''
+        return WelcomeContext(self.domain, server_name, referral_mxid, administrator_mxid).render(
+            template
+        )
 
     def query(self, sql):
         statement = "BEGIN READ ONLY; SET LOCAL statement_timeout='30s';\n" + sql + '\nCOMMIT;'
@@ -195,7 +220,7 @@ class Panel:
                         or (user['created'] or 0) < preferences['enabled_at']
                     ):
                         continue
-                    body = preferences['welcome'].replace('{domain}', self.domain)
+                    body = self.welcome_text(preferences['welcome'])
                     self.enqueue(db, 'welcome:' + mxid, mxid, 'welcome', body)
                     if preferences['registrations']:
                         self.enqueue(

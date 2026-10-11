@@ -22,6 +22,7 @@ names = [
     'data-migrations.md',
     'release-notes.md',
     'admin_panel.py',
+    'welcome_message.py',
     'releases.py',
     'release_update.py',
     'remove_server.py',

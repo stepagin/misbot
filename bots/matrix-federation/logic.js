@@ -242,7 +242,9 @@ class FederationBot {
         if (text === "изменить приветствие") {
             this.store.setValue(key, { kind: "welcome", created: Date.now() });
             await reply(
-                "Пришлите новое приветствие. Можно использовать {domain}. Отмена: «отмена»."
+                "Пришлите новое приветствие. Подстановки: {server_name} — название сервера, " +
+                    "{domain} — Matrix-домен, {referral_url} — ссылка на реферального бота, " +
+                    "{administrator_url} — ссылка на администратора. Отмена: «отмена»."
             );
             return;
         }

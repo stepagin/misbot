@@ -10,12 +10,24 @@ import admin_panel
 import releases
 import release_update
 import state_store
+from welcome_message import DEFAULT_WELCOME
+
+EXPECTED_WELCOME = (
+    'Привет! Добро пожаловать в example.org.\n\n'
+    'Я — серверный помощник. В этот чат будут приходить новости и объявления сервера.\n\n'
+    'Чтобы пригласить друга, открой реферального бота и отправь команду «пригласить». '
+    'Он выдаст код для регистрации.\n'
+    'https://matrix.to/#/@referral-bot:example.org\n\n'
+    'Я на сообщения не отвечаю. Если нужна помощь, напиши администратору:\n'
+    'https://matrix.to/#/@matrix-admin:example.org'
+)
 
 
 class PanelTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
+        (self.root / 'config').mkdir(mode=0o700)
         self.now = 2000000000
         state_store.write_json(
             self.root / 'installation.json',
@@ -42,6 +54,7 @@ class PanelTests(unittest.TestCase):
         items = self.pending()
         self.assertEqual(len(items), 2)
         self.assertEqual({i['via'] for i in items}, {'admin', 'welcome'})
+        self.assertEqual(next(i['body'] for i in items if i['via'] == 'welcome'), EXPECTED_WELCOME)
         self.assertIn('@alice:example.org', next(i['body'] for i in items if i['via'] == 'admin'))
         for item in items:
             self.panel.handle('panel-ack', {'id': item['id'], 'delivered': True}, None)
@@ -49,6 +62,124 @@ class PanelTests(unittest.TestCase):
         restarted.user_page = self.panel.user_page
         restarted.observe_users()
         self.assertEqual(restarted.handle('panel-outbox', None, None)['items'], [])
+
+    def test_default_uses_portable_site_name_and_saved_bot_and_owner_in_both_config_formats(self):
+        for split in (False, True):
+            with self.subTest(split=split):
+                if split:
+                    (self.root / 'settings.env').unlink()
+                    (self.root / 'settings').mkdir(mode=0o700)
+                    state_store.write_text(
+                        self.root / 'settings/server.env', 'DOMAIN=example.org\n'
+                    )
+                    state_store.write_text(
+                        self.root / 'settings/site.env', 'SITE_NAME=Наш сервер\n'
+                    )
+                else:
+                    state_store.write_text(
+                        self.root / 'settings.env', 'DOMAIN=example.org\nSITE_NAME=Наш сервер\n'
+                    )
+                state_store.write_json(
+                    self.root / 'config/referral-bot.json',
+                    {'user_id': '@invitations:example.org', 'access_token': 'FICTIONAL_SECRET'},
+                )
+                state_store.write_json(
+                    self.root / 'config/admin-panel-identity.json',
+                    {'administrator_mxid': '@owner:example.org'},
+                )
+                self.assertEqual(
+                    self.panel.welcome_text(DEFAULT_WELCOME),
+                    EXPECTED_WELCOME.replace('в example.org.', 'в Наш сервер.')
+                    .replace('@referral-bot:', '@invitations:')
+                    .replace('@matrix-admin:', '@owner:'),
+                )
+
+    def test_adopted_display_name_is_separate_from_matrix_identity(self):
+        state_store.write_json(
+            self.root / 'installation.json',
+            {
+                'domain': 'matrix.example.org',
+                'backend': 'existing-compose',
+                'existing': {'features': {'primary_domain': 'example.org'}},
+            },
+        )
+        state_store.write_json(
+            self.root / 'config/referral-bot.json', {'user_id': '@referral-bot:matrix.example.org'}
+        )
+        # Legacy owner configuration remains supported before identity.json exists.
+        state_store.write_json(
+            self.root / 'config/federation-bot.json',
+            {'administrator_mxids': ['@owner:matrix.example.org']},
+        )
+        panel = admin_panel.Panel(self.root, lambda: self.now)
+        expected = EXPECTED_WELCOME.replace(':example.org', ':matrix.example.org').replace(
+            '@matrix-admin:', '@owner:'
+        )
+        self.assertEqual(panel.welcome_text(DEFAULT_WELCOME), expected)
+        site = self.root / '.misbot/features/site.json'
+        site.parent.mkdir(mode=0o700, parents=True)
+        for name, title in [('Наш сервер', 'Наш сервер'), ('', 'example.org')]:
+            state_store.write_json(site, {'SITE_NAME': name})
+            self.assertEqual(
+                panel.welcome_text(DEFAULT_WELCOME),
+                expected.replace('в example.org.', 'в ' + title + '.'),
+            )
+
+    def test_custom_edit_survives_restart_and_does_not_rewrite_queued_greetings(self):
+        self.users = [{'mxid': '@alice:example.org', 'created': self.now, 'active': True}]
+        self.panel.observe_users()
+        queued = self.pending()
+        custom = 'Привет, MiXeD! {domain}\n{"data": 1}\n{unknown}'
+        self.assertEqual(self.panel.handle('panel-welcome', custom, '$w'), {'saved': True})
+        restarted = admin_panel.Panel(self.root, lambda: self.now)
+        self.assertEqual(restarted.handle('panel-welcome', None, '$show'), {'text': custom})
+        self.assertEqual(self.pending(), queued)
+        self.assertEqual(
+            restarted.welcome_text(custom), 'Привет, MiXeD! example.org\n{"data": 1}\n{unknown}'
+        )
+
+    def test_substituted_values_are_not_treated_as_more_template_fields(self):
+        state_store.write_text(
+            self.root / 'settings.env', 'DOMAIN=example.org\nSITE_NAME=Наш {domain}\n'
+        )
+        self.assertEqual(
+            self.panel.welcome_text('{server_name} / {domain}'), 'Наш {domain} / example.org'
+        )
+
+    def test_invalid_referral_identity_keeps_registration_retryable_without_messages(self):
+        path = self.root / 'config/referral-bot.json'
+        state_store.write_json(path, {'user_id': 'FICTIONAL_SECRET'})
+        self.users = [{'mxid': '@alice:example.org', 'created': self.now, 'active': True}]
+        with self.assertRaisesRegex(RuntimeError, '^Invalid local welcome identity$'):
+            self.panel.observe_users()
+        self.assertEqual(self.pending(), [])
+        state_store.write_json(path, {'user_id': '@referral-bot:example.org'})
+        self.panel.observe_users()
+        self.assertEqual(len(self.pending()), 2)
+
+    def test_invalid_owner_identity_is_not_exposed_in_the_message_or_error(self):
+        state_store.write_json(
+            self.root / 'config/admin-panel-identity.json',
+            {'administrator_mxid': 'FICTIONAL_SECRET'},
+        )
+        with self.assertRaisesRegex(RuntimeError, '^Invalid local welcome identity$'):
+            self.panel.welcome_text(DEFAULT_WELCOME)
+
+    def test_saved_referral_identity_is_excluded_from_registration_and_statistics(self):
+        state_store.write_json(
+            self.root / 'config/referral-bot.json', {'user_id': '@invitations:example.org'}
+        )
+        statements = []
+
+        def query(sql):
+            statements.append(sql)
+            return [] if 'json_agg' in sql else {'messages': 0, 'registrations': 0}
+
+        self.panel.query = query
+        self.panel.user_page('')
+        self.panel.statistics('day')
+        for sql in statements:
+            self.assertIn('@invitations:example.org', sql)
 
     def test_registration_off_does_not_disable_custom_welcome(self):
         self.panel.handle('panel-preferences', {'key': 'registrations', 'enabled': False}, '$p')

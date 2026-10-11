@@ -117,6 +117,7 @@ class GeneratorTests(unittest.TestCase):
             self.assertIn('THE SOFTWARE IS PROVIDED "AS IS"', licenses)
             self.assertIn('matrix-installer/terminal_views.py', names)
             self.assertIn('matrix-installer/ui_actions.py', names)
+            self.assertIn('matrix-installer/welcome_message.py', names)
             manifest = archive.extractfile('matrix-installer/SHA256SUMS').read().decode()
             self.assertEqual(
                 {'matrix-installer/' + line.split('  ', 1)[1] for line in manifest.splitlines()},
@@ -470,6 +471,14 @@ class GeneratorTests(unittest.TestCase):
 
     def test_render_uses_seven_domains_and_private_network(self):
         self.invoke('--domain', 'chat.example.org', '--preview')
+        import admin_panel
+
+        panel = admin_panel.Panel(self.root)
+        self.assertEqual(panel.settings()['welcome'], admin_panel.DEFAULT_WELCOME)
+        self.assertIn(
+            'Привет! Добро пожаловать в chat.example.org.',
+            panel.welcome_text(panel.settings()['welcome']),
+        )
         compose = yaml.safe_load((self.root / 'compose.yaml').read_text())
         synapse = yaml.safe_load((self.root / 'config/homeserver.yaml').read_text())
         livekit = yaml.safe_load((self.root / 'config/livekit.yaml').read_text())

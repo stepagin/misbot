@@ -219,6 +219,8 @@ test("welcome editing preserves text case and recognizes mixed-case cancellation
             content: { msgtype: "m.text", body }
         });
     await send("ИзМеНиТь ПрИвЕтСтВиЕ");
+    for (const field of ["{domain}", "{server_name}", "{referral_url}", "{administrator_url}"])
+        assert.ok(x.sent.at(-1).includes(field));
     await send("Добро пожаловать на {domain}! Matrix ID: @Alice:example.org");
     const welcome = x.calls.find((c) => c.action === "panel-welcome");
     assert.equal(welcome.argument, "Добро пожаловать на {domain}! Matrix ID: @Alice:example.org");
