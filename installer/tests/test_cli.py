@@ -137,6 +137,19 @@ class CommandTests(unittest.TestCase):
                 misbot.plan(cmd, opts, values, source=BUNDLE),
                 ['/usr/bin/python3', str(BUNDLE / 'terminal_ui.py'), '--directory', str(root)],
             )
+            cmd, opts, values = misbot.parse(['ui', '--plain', '--directory', str(root)])
+            self.assertEqual(
+                misbot.plan(cmd, opts, values, source=BUNDLE),
+                [
+                    '/usr/bin/python3',
+                    str(BUNDLE / 'terminal_ui.py'),
+                    '--directory',
+                    str(root),
+                    '--plain',
+                ],
+            )
+            with self.assertRaises(misbot.InputError):
+                misbot.parse(['status', '--plain'])
 
     def test_actual_help_from_other_working_directory(self):
         with tempfile.TemporaryDirectory() as folder:

@@ -2,6 +2,7 @@
 
 import os
 import sys
+from contextlib import contextmanager
 
 try:
     from rich import box
@@ -26,10 +27,30 @@ def literal(value):
 
 class TerminalView:
     def __init__(self, console=None, plain=False):
-        self.console = console
+        self.console = None if plain else console
+        self.fullscreen = False
+        self.screen_used = False
         if console is None and Console is not None and not plain:
             if sys.stdout.isatty() and os.environ.get('TERM', '') != 'dumb':
                 self.console = Console(markup=False, highlight=False, emoji=False)
+
+    @contextmanager
+    def screen(self):
+        if (
+            self.console is None
+            or not self.console.is_terminal
+            or os.environ.get('TERM', '') in ('', 'dumb')
+            or 'NO_COLOR' in os.environ
+        ):
+            yield
+            return
+        with self.console.screen(hide_cursor=False):
+            self.fullscreen = self.console.is_alt_screen
+            self.screen_used = self.fullscreen
+            try:
+                yield
+            finally:
+                self.fullscreen = False
 
     @property
     def compact(self):
@@ -43,6 +64,8 @@ class TerminalView:
             self.console.print(Text(value, style=style), overflow='fold')
 
     def heading(self, title, subtitle=''):
+        if self.fullscreen:
+            self.console.clear(home=True)
         if self.compact:
             self.message('\n' + title, 'bold cyan')
             if subtitle:
@@ -58,7 +81,7 @@ class TerminalView:
                 box=box.ROUNDED,
                 border_style='cyan',
                 padding=(1, 2),
-                width=min(self.console.width, 100),
+                width=self.console.width if self.fullscreen else min(self.console.width, 100),
             )
         )
 

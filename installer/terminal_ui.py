@@ -95,6 +95,10 @@ class UI:
     def ask(self, label, default='', secret=False):
         return question(label, default, secret, self.reader)
 
+    def pause(self, label='Enter — продолжить'):
+        if self.view.fullscreen:
+            self.ask(label)
+
     def installation(self):
         path = self.root / 'installation.json'
         return json.loads(path.read_text()) if path.exists() else {}
@@ -743,9 +747,6 @@ class UI:
         ]
         if 8 <= self.step <= 9 and self.initialized():
             self.use_active_configuration()
-        self.view.message(
-            'Misbot — мастер SSH. Команды ввода: назад, отмена, сохранить и выйти. Enter сохраняет default/существующий секрет.'
-        )
         while self.step < len(names):
             if self.step < 8 and self.initialized():
                 self.use_active_configuration()
@@ -753,6 +754,11 @@ class UI:
                 self.save()
             self.view.wizard_step(self.step, names)
             self.view.message('Установка: ' + str(self.root), 'dim')
+            self.view.message(
+                'Назад: «назад» · Выход: «сохранить и выйти» или «отмена». '
+                'Enter сохраняет текущее значение.',
+                'dim',
+            )
             try:
                 self.setup_step(self.step)
             except Back:
@@ -802,6 +808,10 @@ class UI:
             self.step += 1
             self.save()
         self.view.message('Мастер завершён. Управление: sudo misbot ui')
+        try:
+            self.pause('Enter — закрыть мастер')
+        except (Back, Cancel, SaveExit):
+            pass
         return 0
 
     def continuation(self):
@@ -947,6 +957,10 @@ class UI:
             self.view.message(
                 'Обновление применено. Откройте sudo misbot ui заново, чтобы использовать новый интерфейс.'
             )
+            try:
+                self.pause('Enter — закрыть мастер')
+            except (Back, Cancel, SaveExit):
+                pass
             raise SaveExit()
         if command.backend in ('restore', 'restore-local') and code == 0:
             self.view.message(
@@ -981,6 +995,7 @@ class UI:
                     self.task_menu(item.path[1:])
                 else:
                     self.execute(item)
+                    self.pause('Enter — вернуться к меню')
             except (Back, Cancel, KeyboardInterrupt):
                 self.view.message('Ввод отменён.')
                 return
@@ -1050,6 +1065,7 @@ class UI:
                 'Сейчас используется простой вывод. Rich: sudo apt-get install python3-rich. Для оформления нужен терминал с TERM, отличным от dumb.'
             )
         self.view.message('Системные пакеты и их зависимости сохраняют собственные лицензии.')
+        self.pause()
 
     def edit_fields(self, title, keys):
         before = {key: self.model[key] for key in keys}
@@ -1165,6 +1181,7 @@ class UI:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--directory', type=Path)
+    parser.add_argument('--plain', action='store_true')
     args = parser.parse_args()
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         print(
@@ -1175,7 +1192,20 @@ def main():
     if os.geteuid() != 0:
         print('Выполните sudo misbot ui; автоматически пароль не запрашивается.', file=sys.stderr)
         return 77
-    ui = UI(args.directory)
+    ui = UI(args.directory, view=TerminalView(plain=args.plain))
+    with ui.view.screen():
+        code = interaction(ui)
+    if ui.view.screen_used:
+        text(
+            'Мастер закрыт. Продолжение: sudo python3 '
+            + shlex.quote(str(ui.source / 'misbot.py'))
+            + ' ui --directory '
+            + shlex.quote(str(ui.root))
+        )
+    return code
+
+
+def interaction(ui):
     if (ui.root / 'installation.json').exists():
         import command_wrapper
 

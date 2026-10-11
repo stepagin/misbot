@@ -70,7 +70,7 @@ ADOPTED = Route(
     'existing_compose.py',
     argument_style=ArgumentStyle.NAMED,
     optional_values=('catalog_directory',),
-    flags=('json', 'read_only'),
+    flags=('json', 'read_only', 'plain'),
 )
 FEATURES = Route('existing_features.py', argument_style=ArgumentStyle.NAMED)
 ADOPTED_HOMEPAGE = Route(
@@ -310,6 +310,7 @@ COMMANDS = [
         purpose='Открыть русский SSH-мастер или меню; нужен TTY.',
         installed=False,
         existing=ADOPTED,
+        switches=('plain',),
     ),
     Command(
         'config init',

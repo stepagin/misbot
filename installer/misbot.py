@@ -319,6 +319,7 @@ def plan(command, options, values, source=None):
             '/usr/bin/python3',
             str(backend / 'terminal_ui.py'),
             *(['--directory', str(root)] if root else []),
+            *(['--plain'] if values.get('plain') else []),
         ]
     if command.backend.startswith('features-'):
         raise InputError(

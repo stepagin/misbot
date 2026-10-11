@@ -1102,7 +1102,7 @@ class Installation:
         path.unlink()
         emit('existing_media_s3', passed=True, **result)
 
-    def ui(self):
+    def ui(self, plain=False):
         if not sys.stdin.isatty() or not sys.stdout.isatty():
             raise Error('SSH-меню требует TTY: sudo misbot ui.')
         import terminal_ui
@@ -1120,7 +1120,14 @@ class Installation:
         try:
             for number in previous:
                 signal.signal(number, interrupted_ui)
-            return terminal_ui.UI(directory=self.root, source=self.root).menu()
+            interface = terminal_ui.UI(
+                directory=self.root, source=self.root, view=terminal_ui.TerminalView(plain=plain)
+            )
+            with interface.view.screen():
+                code = interface.menu()
+            if interface.view.screen_used:
+                print('Мастер закрыт. ' + interface.continuation())
+            return code
         except (EOFError, terminal_ui.state_store.OperationInterrupted):
             print('Ввод прерван. Повторите sudo misbot ui; проверьте misbot status.')
             return 130
@@ -1193,6 +1200,7 @@ def main():
     parser.add_argument('--catalog-directory', type=Path)
     parser.add_argument('--read-only', action='store_true')
     parser.add_argument('--json', action='store_true')
+    parser.add_argument('--plain', action='store_true')
     args = parser.parse_args()
     if os.geteuid() != 0:
         emit('existing_operation', passed=False, reason='root_required')
@@ -1211,7 +1219,7 @@ def main():
             'backup': installation.backup,
             'backup-recover': installation.recover,
             'restore-check': installation.verify,
-            'ui': installation.ui,
+            'ui': lambda: installation.ui(plain=args.plain),
             'storage-status': installation.storage_status,
             'media-recover': installation.recover_media,
             'media-s3': lambda: installation.connect_media(args.config),

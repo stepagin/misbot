@@ -6,6 +6,7 @@ import io
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import tarfile
@@ -29,15 +30,60 @@ class ExistingTests(unittest.TestCase):
 
         installation = existing.Installation.__new__(existing.Installation)
         installation.root = Path('/opt/fictional-stack')
-        with (
-            patch('sys.stdin.isatty', return_value=True),
-            patch('sys.stdout.isatty', return_value=True),
-            patch.object(terminal_ui, 'UI') as factory,
-        ):
-            factory.return_value.menu.return_value = 130
-            self.assertEqual(installation.ui(), 130)
-        factory.assert_called_once_with(directory=installation.root, source=installation.root)
-        factory.return_value.menu.assert_called_once()
+        for plain in (False, True):
+            with (
+                self.subTest(plain=plain),
+                patch('sys.stdin.isatty', return_value=True),
+                patch('sys.stdout.isatty', return_value=True),
+                patch.object(terminal_ui, 'TerminalView') as view,
+                patch.object(terminal_ui, 'UI') as factory,
+            ):
+                view.return_value.screen_used = False
+                factory.return_value.view = view.return_value
+                factory.return_value.menu.return_value = 130
+                self.assertEqual(installation.ui(plain=plain), 130)
+            view.assert_called_once_with(plain=plain)
+            view.return_value.screen.assert_called_once()
+            factory.assert_called_once_with(
+                directory=installation.root, source=installation.root, view=view.return_value
+            )
+            factory.return_value.menu.assert_called_once()
+
+    def test_existing_ui_restores_screen_and_signal_handlers_after_failure(self):
+        import terminal_ui
+        import terminal_views
+
+        if terminal_views.Console is None:
+            self.skipTest('Rich is an optional rendering dependency')
+        installation = existing.Installation.__new__(existing.Installation)
+        installation.root = Path('/opt/fictional-stack')
+        signals = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+        handlers = {number: signal.getsignal(number) for number in signals}
+        for failure in (RuntimeError('fictional failure'), state_store.OperationInterrupted()):
+            with self.subTest(failure=type(failure).__name__):
+                output = io.StringIO()
+                view = terminal_views.TerminalView(
+                    console=terminal_views.Console(file=output, force_terminal=True)
+                )
+                with (
+                    patch('sys.stdout', new=output),
+                    patch('sys.stdin.isatty', return_value=True),
+                    patch('sys.stdout.isatty', return_value=True),
+                    patch.dict(os.environ, {'TERM': 'xterm'}, clear=True),
+                    patch.object(terminal_ui, 'TerminalView', return_value=view),
+                    patch.object(terminal_ui, 'UI') as factory,
+                ):
+                    factory.return_value.view = view
+                    factory.return_value.menu.side_effect = failure
+                    if isinstance(failure, state_store.OperationInterrupted):
+                        self.assertEqual(installation.ui(), 130)
+                    else:
+                        with self.assertRaises(RuntimeError):
+                            installation.ui()
+                self.assertIn('\x1b[?1049h', output.getvalue())
+                self.assertIn('\x1b[?1049l', output.getvalue())
+                self.assertFalse(view.fullscreen)
+                self.assertEqual({number: signal.getsignal(number) for number in signals}, handlers)
 
     def fixture(self, base):
         root = base / 'installation'
@@ -127,6 +173,18 @@ class ExistingTests(unittest.TestCase):
                 command, options, values = misbot.parse([*arguments, '--directory', str(root)])
                 planned = misbot.plan(command, options, values, source=BUNDLE)
                 self.assertEqual(planned[1], str(root / 'existing_compose.py'))
+            command, options, values = misbot.parse(['ui', '--plain', '--directory', str(root)])
+            self.assertEqual(
+                misbot.plan(command, options, values, source=BUNDLE),
+                [
+                    '/usr/bin/python3',
+                    str(root / 'existing_compose.py'),
+                    '--directory',
+                    str(root),
+                    'ui',
+                    '--plain',
+                ],
+            )
             self.assertIn('FICTIONAL_SECRET', (root / 'synapse/config.yaml').read_text())
 
     def test_public_help_never_reads_private_installation(self):
