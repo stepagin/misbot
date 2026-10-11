@@ -119,19 +119,34 @@ class UI:
             return command.backend in cli_commands.EXISTING_BACKENDS
         return not command.backend.startswith('features-')
 
-    def choose(self, title, choices, exit_label='Назад', aliases=None):
+    def choose(self, title, choices, exit_label='Назад', aliases=None, keep_hints=False):
         choices = list(choices) + [('0', exit_label, '')]
-        self.view.options(title, choices)
-        self.view.footer(exit_label)
         valid = {item[0] for item in choices}
+        snapshot = self.view.snapshot()
+        page = 0
+        warning = ''
         while True:
+            self.view.redraw(snapshot)
+            if warning:
+                self.view.message(warning, 'yellow')
+            pages, show_hints = self.view.choice_pages(title, choices, exit_label, keep_hints)
+            page = min(page, len(pages) - 1)
+            self.view.options(title, pages[page], show_hints)
+            if len(pages) > 1:
+                self.view.message(
+                    'Страница ' + str(page + 1) + '/' + str(len(pages)) + ' · > далее · < ранее',
+                    'dim',
+                )
+            self.view.footer(exit_label)
             value = self.ask('Номер', '0').strip()
             value = (aliases or {}).get(value, value)
             if value in valid:
                 return value
-            self.view.message(
-                'Выберите номер из списка. Enter — ' + exit_label.lower() + '.', 'yellow'
-            )
+            if value in ('>', '<') and len(pages) > 1:
+                page = max(0, min(page + (1 if value == '>' else -1), len(pages) - 1))
+                warning = ''
+                continue
+            warning = 'Выберите номер из списка. Enter — ' + exit_label.lower() + '.'
 
     def confirm(self, label='Выполнить операцию?'):
         return self.answer(label + ' да/нет', ('да', 'нет'), 'нет') == 'да'
@@ -296,7 +311,17 @@ class UI:
             return
 
     def run(self, path, **values):
-        self.view.message('Выполняется: ' + path + '; установка ' + str(self.root))
+        title = next(
+            (
+                item.title
+                for _, actions in ui_actions.MENUS.values()
+                for item in actions
+                if item.path == path
+            ),
+            cli_commands.BY_PATH[path].purpose,
+        )
+        label = 'Выполняется: ' + title
+        self.view.message('Установка: ' + str(self.root), 'dim')
         args = [
             sys.executable,
             str(self.source / 'misbot.py'),
@@ -307,7 +332,8 @@ class UI:
         for key, value in values.items():
             args += ['--' + key, str(value)]
         if self.runner:
-            return self.runner(args)
+            with self.view.busy(label):
+                return self.runner(args)
         # Run in the same foreground process group. Ctrl+C reaches backend;
         # wait for it to finish before displaying recovery or accepting changes.
         child = subprocess.Popen(
@@ -317,7 +343,11 @@ class UI:
             else subprocess.DEVNULL,
         )
         try:
-            return child.wait()
+            if path in ('users invitation show', 'credentials admin show', 'update latest'):
+                self.view.message(label)
+                return child.wait()
+            with self.view.busy(label):
+                return child.wait()
         except (KeyboardInterrupt, state_store.OperationInterrupted):
             if child.poll() is None:
                 child.send_signal(signal.SIGTERM)
@@ -1029,19 +1059,24 @@ class UI:
     def menu(self):
         state = self.installation()
         version = json.loads((self.source / 'release.json').read_text())['version']
-        self.view.heading('Misbot ' + version, 'Управление сервером ' + state.get('domain', ''))
-        self.view.details(
-            [
-                ('Установка', str(self.root)),
-                (
-                    'Режим',
-                    'Подключённая Compose-установка' if self.adopted() else 'Установка Misbot',
-                ),
-            ]
-        )
+        self.view.heading('Открываем управление сервером')
         self.run('status')
         while True:
             try:
+                self.view.heading(
+                    'Misbot ' + version, 'Управление сервером ' + state.get('domain', '')
+                )
+                self.view.details(
+                    [
+                        ('Установка', str(self.root)),
+                        (
+                            'Режим',
+                            'Подключённая Compose-установка'
+                            if self.adopted()
+                            else 'Установка Misbot',
+                        ),
+                    ]
+                )
                 choices = [
                     item
                     for item in ui_actions.MAIN
@@ -1093,11 +1128,12 @@ class UI:
         self.view.message('Системные пакеты и их зависимости сохраняют собственные лицензии.')
         self.pause()
 
-    def edit_fields(self, title, keys):
+    def edit_fields(self, title, keys, section='', subtitle=''):
         before = {key: self.model[key] for key in keys}
         aliases = {key: str(i) for i, key in enumerate(keys, 1)}
         aliases['применить'] = 'a'
         while True:
+            self.view.heading(section or title, subtitle)
             choices = [
                 (
                     str(i),
@@ -1111,12 +1147,14 @@ class UI:
             choices.append(
                 ('a', 'Применить изменения', 'Сначала покажем итог и запросим подтверждение')
             )
-            choice = self.choose(title, choices, aliases=aliases)
+            choice = self.choose(title, choices, aliases=aliases, keep_hints=True)
             if choice == '0':
                 return None
             if choice == 'a':
                 return {key: self.model[key] for key in keys if self.model[key] != before[key]}
-            self.field(keys[int(choice) - 1])
+            key = keys[int(choice) - 1]
+            self.view.heading(schema.FIELDS[key].label, section)
+            self.field(key)
 
     def homepage_menu(self):
         import homepage
@@ -1131,8 +1169,12 @@ class UI:
 
             self.model = load(self.root, True)
         before = dict(self.model)
-        self.view.heading('Сайт сервера', 'Выберите поле, проверьте итог и примените изменения.')
-        changes = self.edit_fields('Что изменить?', homepage.KEYS)
+        changes = self.edit_fields(
+            'Что изменить?',
+            homepage.KEYS,
+            'Сайт сервера',
+            'Выберите поле, проверьте итог и примените изменения.',
+        )
         if not changes:
             self.view.message('Изменения не применялись.')
             return
@@ -1160,7 +1202,10 @@ class UI:
             )
             self.view.result('Сайт сервера', code, self.continuation())
         else:
-            with state_store.operation_guard(self.root):
+            with (
+                self.view.busy('Проверяем и применяем настройки сайта'),
+                state_store.operation_guard(self.root),
+            ):
                 result = homepage.Backend(self.root).apply(changes)
             self.view.message(
                 'Результат: ' + result['status'] + '. Просмотр: sudo misbot homepage show'
@@ -1173,10 +1218,6 @@ class UI:
             self.view.message('Настройки подключённого стека меняются его собственными средствами.')
             return
         self.model = load(self.root, complete=True)
-        self.view.heading(
-            'Настройки сервера',
-            'Домен сервера закреплён. Хранилище и ключи доступа — в отдельных разделах.',
-        )
         keys = (
             'PUBLIC_IP',
             'ACME_EMAIL',
@@ -1188,7 +1229,12 @@ class UI:
             'MAX_UPLOAD_SIZE_MIB',
         )
         before = dict(self.model)
-        changes = self.edit_fields('Что изменить?', keys)
+        changes = self.edit_fields(
+            'Что изменить?',
+            keys,
+            'Настройки сервера',
+            'Домен сервера закреплён. Хранилище и ключи доступа — в отдельных разделах.',
+        )
         if not changes:
             self.view.message('Изменения не применялись.')
             return
@@ -1201,7 +1247,8 @@ class UI:
         )
         self.view.message('Будет создана согласованная копия; возможен перезапуск служб.')
         if self.confirm('Применить изменения?'):
-            apply_settings(self.root, changes)
+            with self.view.busy('Проверяем копию и применяем настройки сервера'):
+                apply_settings(self.root, changes)
             self.view.message('Настройки применены.', 'green')
 
 
@@ -1219,8 +1266,10 @@ def main():
     if os.geteuid() != 0:
         print('Выполните sudo misbot ui; автоматически пароль не запрашивается.', file=sys.stderr)
         return 77
-    ui = UI(args.directory, view=TerminalView(plain=args.plain))
-    with ui.view.screen():
+    view = TerminalView(plain=args.plain)
+    with view.screen():
+        with view.busy('Загружаем настройки установки'):
+            ui = UI(args.directory, view=view)
         code = interaction(ui)
     if ui.view.screen_used:
         text(

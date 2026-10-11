@@ -6,9 +6,11 @@ from contextlib import contextmanager
 
 try:
     from rich import box
-    from rich.console import Console
+    from rich.console import Console, Group
+    from rich.live import Live
     from rich.panel import Panel
     from rich.progress_bar import ProgressBar
+    from rich.spinner import Spinner
     from rich.table import Table
     from rich.text import Text
 except ImportError:
@@ -30,6 +32,8 @@ class TerminalView:
         self.console = None if plain else console
         self.fullscreen = False
         self.screen_used = False
+        self.page = []
+        self.used_lines = 0
         if console is None and Console is not None and not plain:
             if sys.stdout.isatty() and os.environ.get('TERM', '') != 'dumb':
                 self.console = Console(markup=False, highlight=False, emoji=False)
@@ -56,16 +60,59 @@ class TerminalView:
     def compact(self):
         return self.console is None or self.console.width < 60
 
+    def lines(self, renderable):
+        return max(1, len(self.console.render_lines(renderable, pad=False)))
+
+    def print(self, renderable):
+        if self.fullscreen:
+            self.page.append(renderable)
+            self.used_lines += self.lines(renderable)
+        self.console.print(renderable, overflow='fold')
+
+    def snapshot(self):
+        return list(self.page) if self.fullscreen and self.console else None
+
+    def redraw(self, snapshot):
+        if snapshot is None:
+            return
+        self.console.clear(home=True)
+        self.page = []
+        self.used_lines = 0
+        for renderable in snapshot:
+            if isinstance(renderable, Panel):
+                renderable.width = self.console.width
+            self.print(renderable)
+
+    @contextmanager
+    def busy(self, label):
+        if (
+            self.console is None
+            or not self.console.is_terminal
+            or self.console.no_color
+            or os.environ.get('TERM') == 'dumb'
+        ):
+            self.message(label)
+            yield
+            return
+        animation = Group(
+            Spinner('dots', text=Text(literal(label)), style='cyan'),
+            ProgressBar(total=None, pulse=True, width=None, pulse_style='cyan'),
+        )
+        with Live(animation, console=self.console, transient=True, refresh_per_second=8):
+            yield
+
     def message(self, message, style=''):
         value = literal(message)
         if self.console is None:
             print(value, flush=True)
         else:
-            self.console.print(Text(value, style=style), overflow='fold')
+            self.print(Text(value, style=style))
 
     def heading(self, title, subtitle=''):
         if self.fullscreen:
             self.console.clear(home=True)
+            self.page = []
+            self.used_lines = 0
         if self.compact:
             self.message('\n' + title, 'bold cyan')
             if subtitle:
@@ -75,12 +122,12 @@ class TerminalView:
         content.append(literal(title), style='bold')
         if subtitle:
             content.append('\n' + literal(subtitle), style='dim')
-        self.console.print(
+        self.print(
             Panel(
                 content,
                 box=box.ROUNDED,
                 border_style='cyan',
-                padding=(1, 2),
+                padding=(0, 1) if self.fullscreen else (1, 2),
                 width=self.console.width if self.fullscreen else min(self.console.width, 100),
             )
         )
@@ -95,26 +142,52 @@ class TerminalView:
         table.add_column(ratio=3, overflow='fold')
         for label, value in rows:
             table.add_row(Text(literal(label)), Text(literal(value)))
-        self.console.print(table)
+        self.print(table)
 
-    def options(self, title, choices):
-        self.message('\n' + title, 'bold')
-        if self.compact:
-            for number, label, hint in choices:
-                self.message(number + '  ' + label, 'cyan')
-                if hint:
-                    self.message('   ' + hint, 'dim')
-            return
+    def choice_table(self, choices, show_hints=True):
         table = Table.grid(padding=(0, 1), pad_edge=False)
         table.add_column(width=2, justify='right')
         table.add_column(overflow='fold')
         for number, label, hint in choices:
             content = Text()
             content.append(literal(label), style='bold' if number != '0' else 'dim')
-            if hint:
+            if hint and show_hints:
                 content.append('\n' + literal(hint), style='dim')
             table.add_row(Text(number, style='cyan'), content)
-        self.console.print(table)
+        return table
+
+    def choice_pages(self, title, choices, exit_label, keep_hints=False):
+        if not self.fullscreen or self.console is None:
+            return [choices], True
+        reserve = self.lines(Text('\n' + title)) + self.lines(Text(self.footer_text(exit_label)))
+        navigation = self.lines(Text('Страница 99/99 · > далее · < ранее'))
+        room = max(2, self.console.height - self.used_lines - reserve - navigation - 2)
+        if self.lines(self.choice_table(choices)) <= room:
+            return [choices], True
+        if not keep_hints and self.lines(self.choice_table(choices, False)) <= room:
+            return [choices], False
+        exit_choice = choices[-1]
+        pages, page = [], []
+        for choice in choices[:-1]:
+            if (
+                page
+                and self.lines(self.choice_table([*page, choice, exit_choice], keep_hints)) > room
+            ):
+                pages.append([*page, exit_choice])
+                page = []
+            page.append(choice)
+        pages.append([*page, exit_choice])
+        return pages, keep_hints
+
+    def options(self, title, choices, show_hints=True):
+        self.message('\n' + title, 'bold')
+        if self.compact and not self.fullscreen:
+            for number, label, hint in choices:
+                self.message(number + '  ' + label, 'cyan')
+                if hint and show_hints:
+                    self.message('   ' + hint, 'dim')
+            return
+        self.print(self.choice_table(choices, show_hints))
 
     def wizard_step(self, index, names):
         self.heading(
@@ -122,7 +195,7 @@ class TerminalView:
             'Шаг ' + str(index + 1) + ' из ' + str(len(names)) + ' · ' + names[index],
         )
         if not self.compact:
-            self.console.print(
+            self.print(
                 ProgressBar(
                     total=len(names),
                     completed=index,
@@ -144,8 +217,16 @@ class TerminalView:
         if code and continuation:
             self.message(continuation)
 
-    def footer(self, exit_label='Назад'):
+    @staticmethod
+    def footer_text(exit_label):
         if exit_label == 'Назад':
-            self.message('Назад: 0 или «назад» · Выход: «сохранить и выйти»', 'dim')
-        else:
-            self.message('Выход: 0 или «сохранить и выйти»', 'dim')
+            return 'Назад: 0 или «назад» · Выход: «сохранить и выйти»'
+        return 'Выход: 0 или «сохранить и выйти»'
+
+    def footer(self, exit_label='Назад'):
+        label = self.footer_text(exit_label)
+        if self.fullscreen and self.console:
+            padding = self.console.height - self.used_lines - self.lines(Text(label)) - 2
+            if padding > 0:
+                self.print(Text('\n' * (padding - 1)))
+        self.message(label, 'dim')
