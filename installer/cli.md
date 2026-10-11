@@ -1,4 +1,4 @@
-# Команда Misbot 1.1.0
+# Команда Misbot 1.1.1
 
 Для индивидуально подключённой существующей установки действует ограниченный
 [режим Compose](existing-compose.md): `misbot help` показывает доступные команды;
@@ -197,12 +197,6 @@ JSON предназначен для будущего UI; UI не должен �
 | `misbot federation requests retry` | `federation-retry` | `--request` |
 | `misbot federation recover` | `federation-recover` | нет |
 | `misbot federation rollback` | `federation-rollback` | нет |
-| `misbot federation rooms invitations` | `federation-room-invitations` | нет |
-| `misbot federation rooms accept` | `federation-room-accept` | `--room` |
-| `misbot federation rooms reject` | `federation-room-reject` | `--room` |
-| `misbot federation rooms leave` | `federation-room-leave` | `--room` |
-| `misbot federation rooms invite` | `federation-room-invite` | `--server`, `--room` |
-| `misbot federation rooms auto-accept` | `federation-auto-accept` | `--enabled` |
 | `misbot ui` | `ui` | нет |
 | `misbot config init` | `init` | `--domain` |
 | `misbot config generate` | `generate` | нет |

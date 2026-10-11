@@ -41,12 +41,6 @@ COMMANDS = [
     Command('federation requests retry','federation-retry',('request',),'Запросить удалённое состояние и завершить частичное применение.'),
     Command('federation recover','federation-recover',purpose='Завершить локальное применение из защищённого checkpoint.',stops='Synapse/Web перезапускаются.'),
     Command('federation rollback','federation-rollback',purpose='Восстановить прежнюю конфигурацию локальной операции.',stops='Synapse/Web перезапускаются.'),
-    Command('federation rooms invitations','federation-room-invitations',purpose='Приглашения, адресованные только административному боту.'),
-    Command('federation rooms accept','federation-room-accept',('room',),'Принять текущее приглашение бота.'),
-    Command('federation rooms reject','federation-room-reject',('room',),'Отклонить текущее приглашение бота.'),
-    Command('federation rooms leave','federation-room-leave',('room',),'Покинуть комнату от имени бота.'),
-    Command('federation rooms invite','federation-room-invite',('server','room'),'Пригласить согласованный bot MXID одобренного peer в комнату.'),
-    Command('federation rooms auto-accept','federation-auto-accept',('enabled',),'true/false; default false; только согласованная identity и connected peer.'),
     Command('ui','ui',purpose='Открыть русский SSH-мастер или меню; нужен TTY.',installed=False),
     Command('config init','init',('domain',),'Создать установку, settings/server.env и приватные внутренние credentials.',installed=False),
     Command('config generate','generate',purpose='Сгенерировать конфигурацию без перезапуска.'),
@@ -127,7 +121,7 @@ TOPICS={
     'config':'Установка и конфигурация', 'users':'Пользователи и регистрация',
     'storage':'Медиа, S3 и БД', 'backup':'Копии, восстановление и перенос',
     'update':'Обновление', 'credentials':'Credentials и Vault',
-    'federation':'Федерация: локальная политика, подписанные заявки Misbot и комнаты административного бота.',
+    'federation':'Федерация: локальная политика и подписанные заявки Misbot.',
     'homepage':'Главная страница: локальный лендинг, Element Web или внешний HTTPS URL.',
 }
 

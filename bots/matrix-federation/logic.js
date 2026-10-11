@@ -17,30 +17,19 @@ const MORE = `Федерация: взаимное подключение сер
 заявки / операции
 подтвердить MB-0123456789abcdef0123456789abcdef
 отклонить MB-… / отменить MB-… / повторить MB-… / статус MB-…
-приглашения
-принять комнату !room:example.org / отклонить комнату !room:example.org
-покинуть комнату !room:example.org
-пригласить бота example.org !room:example.org
-автоприём включить / автоприём выключить
 восстановить / откатить — локальные настройки федерации
 Применение политики может временно остановить службы.`;
 
 function parse(text) {
-    const single = {"серверы":"servers", "заявки":"requests", "операции":"operations", "приглашения":"room-invitations", "восстановить":"recover", "откатить":"rollback"};
+    const single = {"серверы":"servers", "заявки":"requests", "операции":"operations", "восстановить":"recover", "откатить":"rollback"};
     const command=text.toLowerCase();
     if (Object.hasOwn(single,command)) return {action:single[command]};
-    // Fold command words only. Matrix room IDs and request IDs are opaque.
+    // Fold command words only. Request IDs are opaque.
     let m=text.match(/^(проверить|добавить|удалить|пригласить) сервер ([^\s]+)$/i);
     if(m)return {action:{"проверить":"check","добавить":"add","удалить":"remove","пригласить":"invite"}[m[1].toLowerCase()],argument:m[2]};
     const requests={"подтвердить":"approve","отклонить":"reject","отменить":"cancel","повторить":"retry","статус":"request-status"};
     m=text.match(/^([^\s]+) (MB-[0-9a-f]{32})$/);
     if(m && Object.hasOwn(requests,m[1].toLowerCase()))return {action:requests[m[1].toLowerCase()],argument:m[2]};
-    m=text.match(/^(принять|отклонить|покинуть) комнату (![^\s]+)$/i);
-    if(m)return {action:{"принять":"room-accept","отклонить":"room-reject","покинуть":"room-leave"}[m[1].toLowerCase()],argument:m[2]};
-    m=text.match(/^пригласить бота ([^\s]+) (![^\s]+)$/i);
-    if(m)return {action:"room-invite",argument:JSON.stringify({server:m[1],room:m[2]})};
-    m=command.match(/^автоприём (включить|выключить)$/);
-    if(m)return {action:"auto-accept",argument:m[1]==="включить"?"true":"false"};
     return null;
 }
 

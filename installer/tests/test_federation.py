@@ -138,6 +138,29 @@ class FederationTests(unittest.TestCase):
         self.assertEqual(self.a.load()['jobs'][accepted['operation_id']]['argument'],'c.example')
         self.assertNotIn('c.example',self.a.servers())
 
+    def test_removed_room_operations_are_denied_without_side_effects(self):
+        before={path:path.read_bytes() for path in self.a.root.rglob('*') if path.is_file()}
+        for action in ('room-invitations','room-accept','room-reject','room-leave','room-invite','auto-accept'):
+            request={'action':action,'argument':'!fixture:a.example','actor':'@admin:a.example','event_id':'$'+action}
+            with self.subTest(action=action),patch.object(self.a,'ready',side_effect=AssertionError('backend access')):
+                with self.assertRaisesRegex(protocol.ProtocolError,'unknown_operation'):
+                    self.a.operate(action,request['argument'],request['actor'],request['event_id'])
+                with self.assertRaisesRegex(protocol.ProtocolError,'local_authorization_required'):
+                    federation_service.bot_call(self.a,request,10003)
+                with self.assertRaisesRegex(protocol.ProtocolError,'local_authorization_required'):
+                    federation_service.queue_job(self.a,request)
+        self.assertEqual(before,{path:path.read_bytes() for path in self.a.root.rglob('*') if path.is_file()})
+
+    def test_previously_queued_room_operation_fails_after_update(self):
+        jid='FO-'+'a'*32
+        data=self.a.load();data['jobs']={jid:{'action':'auto-accept','argument':'true',
+            'actor':'@admin:a.example','event_id':'$old-room-operation','state':'queued'}};self.a.save(data)
+        federation_service.job_step(self.a)
+        job=self.a.load()['jobs'][jid]
+        self.assertEqual(job['state'],'failed')
+        self.assertEqual(job['result']['code'],'unknown_operation')
+        self.assertFalse(self.a.auto_accept())
+
     def test_policy_plan_is_shown_before_actual_change(self):
         emitted=[]
         self.a.admission=True
@@ -200,7 +223,8 @@ class FederationTests(unittest.TestCase):
         self.assertEqual(self.a.operate('remove','absent.example')['status'],'unchanged')
         claim=json.dumps({'sender':'@admin-panel:b.example','room':'!fixture:b.example'})
         self.assertFalse(federation_service.bot_call(self.a,{'action':'auto-invitation','argument':claim},10003)['allowed'])
-        rid=self.invite();self.b.operate('approve',rid);self.a.operate('auto-accept','true')
+        rid=self.invite();self.b.operate('approve',rid)
+        model=configuration.load(self.a.root);model['FEDERATION_AUTO_ACCEPT']='true';configuration.write_model(self.a.root,model)
         with patch('federation_runtime.matrix_operation',return_value={'invitations':[{'room':'!fixture:b.example','sender':'@admin-panel:b.example'}]}):
             self.assertTrue(federation_service.bot_call(self.a,{'action':'auto-invitation','argument':claim},10003)['allowed'])
         with patch('federation_runtime.matrix_operation',return_value={'invitations':[]}):

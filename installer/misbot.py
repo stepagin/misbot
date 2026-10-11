@@ -62,7 +62,7 @@ def operation_help(command):
             'archive':'/root/misbot-backup.tar.gz','sha256':'ARCHIVE_SHA256','public-ip':'203.0.113.20',
             'confirm':'source-stopped' if command.backend=='restore-activate' else 'target-stopped',
             'object':'backup/example/object.enc','output':'/root/verified-backup.tar.gz',
-            'tag':'admin-panel','server':'example.org','room':'!fictional:example.org','request':'MB-0123456789abcdef0123456789abcdef','enabled':'false'}
+            'tag':'admin-panel','server':'example.org','request':'MB-0123456789abcdef0123456789abcdef'}
     if command.backend.startswith('vault-'):sample['config']='/root/misbot-vault.env'
     if command.backend=='database-external':sample['config']='/root/misbot-postgres.env'
     if command.backend.startswith('backup-'):sample['config']='/root/misbot-backup-s3.env'
@@ -168,7 +168,6 @@ def plan(command,options,values,source=None):
             if command.backend.startswith('federation-'):
                 action=command.backend[11:]
                 arguments=[values[name] for name in command.arguments]
-                if action=='room-invite':arguments=[json.dumps({'server':values['server'],'room':values['room']})]
                 return ['/usr/bin/python3',str(root/'federation.py'),'--directory',str(root),action,*arguments]
             if command.backend.startswith('features-'):
                 return ['/usr/bin/python3',str(root/'existing_features.py'),'--directory',str(root),command.backend,
@@ -277,7 +276,6 @@ def plan(command,options,values,source=None):
         return args
     if command.backend.startswith('federation-'):
         action=command.backend[11:];argument=[values[name] for name in command.arguments]
-        if action=='room-invite':argument=[json.dumps({'server':values['server'],'room':values['room']})]
         return ['/usr/bin/python3',str(backend/'federation.py'),'--directory',str(root),action,*argument]
     if command.backend.startswith('invitation-'):
         return ['/usr/bin/python3',str(backend/'registration.py'),'--directory',str(root),command.backend[11:]]

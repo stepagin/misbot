@@ -24,9 +24,8 @@ import federation_protocol as protocol
 import lifecycle
 import state_store
 
-BOT_ACTIONS={'servers','check','add','remove','invite','requests','approve','reject','cancel','retry',
-             'request-status','peers','operations','room-invitations','room-accept','room-reject','room-leave','room-invite','auto-accept','recover','rollback'}
-MUTATIONS=BOT_ACTIONS-{'servers','check','requests','request-status','peers','operations','room-invitations'}
+BOT_ACTIONS=federation.ACTIONS
+MUTATIONS=BOT_ACTIONS-{'servers','check','requests','request-status','peers','operations'}
 
 
 class Rate:
