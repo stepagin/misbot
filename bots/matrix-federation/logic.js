@@ -1,6 +1,7 @@
 "use strict";
 
 const HELP = `Панель администратора Misbot
+
 версия — установленная и последняя версия, список изменений
 обновить — проверка версии и подтверждение обновления
 статистика день / неделя / месяц / всего
@@ -9,8 +10,10 @@ const HELP = `Панель администратора Misbot
 уведомления — включение и отключение уведомлений
 серверы / заявки — федерация
 ещё — редкие команды федерации
+
 Обновление через SSH: sudo misbot update latest`;
 const MORE = `Федерация: взаимное подключение серверов
+
 проверить сервер example.org
 добавить сервер example.org / удалить сервер example.org
 пригласить сервер example.org
@@ -18,6 +21,7 @@ const MORE = `Федерация: взаимное подключение сер
 подтвердить MB-0123456789abcdef0123456789abcdef
 отклонить MB-… / отменить MB-… / повторить MB-… / статус MB-…
 восстановить / откатить — локальные настройки федерации
+
 Применение политики может временно остановить службы.`;
 
 function parse(text) {
@@ -56,10 +60,51 @@ function parse(text) {
 }
 
 function statisticsText(result) {
-    return `Сообщений: ${result.messages}\nРегистраций: ${result.registrations}\nЗвонки: недоступно\nСредняя длительность звонка: недоступно\nПериод: ${result.start_utc} — ${result.end_utc}\n${result.note}`;
+    return `Сообщений: ${result.messages}\nРегистраций: ${result.registrations}\nЧисло звонков: недоступно\nСредняя длительность звонка: недоступно\nПериод: ${result.start_utc} — ${result.end_utc}\n${result.note}`;
 }
 function versionText(result) {
-    return `Установлена: Misbot ${result.installed}\nПоследняя стабильная: ${result.latest || "релиз ещё не опубликован"}\n${result.update_available ? "Доступно обновление." : "Обновление не требуется."}\n${result.notes || ""}\n${result.url || ""}\nКоманда: ${result.command}`;
+    return `Установленная версия: Misbot ${result.installed}\nПоследняя стабильная версия: ${result.latest || "релиз ещё не опубликован"}\n${result.update_available ? "Доступно обновление." : "Более новая стабильная версия не найдена."}\n${result.notes || ""}\n${result.url || ""}\nКоманда: ${result.command}`;
+}
+
+function stateText(state) {
+    if (typeof state !== "string" || !state) throw new Error("Invalid operation state");
+    const labels = {
+        queued: "принято",
+        running: "выполняется",
+        complete: "готово",
+        failed: "завершение не подтверждено",
+        interrupted: "прервано",
+        applied: "изменения применены",
+        unchanged: "изменения не требуются",
+        already_processed: "уже обработано",
+        rolled_back: "прежние настройки восстановлены",
+        pending: "ожидает решения",
+        accepted: "одобрено",
+        applying: "настройки применяются",
+        partially_applied: "настройки применены частично",
+        connected: "политика применена на обоих серверах",
+        rejected: "отклонено",
+        expired: "срок истёк",
+        cancelled: "отменено"
+    };
+    return Object.hasOwn(labels, state) ? `${labels[state]} (${state})` : state;
+}
+
+function resultText(result) {
+    // One required result object; status is optional, other backend fields stay literal.
+    if (!result || typeof result !== "object" || Array.isArray(result))
+        throw new Error("Invalid operation result");
+    const details = { ...result };
+    const heading = Object.hasOwn(details, "status")
+        ? `Операция: ${stateText(details.status)}.`
+        : "Результат запроса:";
+    delete details.status;
+    const body = JSON.stringify(
+        details,
+        (key, value) => (/backup|migration|move|checkpoint/i.test(key) ? undefined : value),
+        2
+    );
+    return Object.keys(details).length ? `${heading}\n${body}` : heading;
 }
 
 class FederationBot {
@@ -165,24 +210,26 @@ class FederationBot {
                     event_id: draft.id
                 });
                 this.store.setValue(key, null);
-                await reply(`Получателей: ${result.queued}. ${result.message}`);
+                await reply(`${result.message}\nПолучателей: ${result.queued}.`);
                 return;
             }
             if (text === "рассылка") return reply("Пришлите текст нового сообщения или «отмена».");
             draft = { kind: "broadcast", body: original, id: event.event_id, created: Date.now() };
             this.store.setValue(key, draft);
             await reply(
-                `Сообщение от администратора сервера ${this.config.server_name},\n\n${original}`
+                `Сообщение от администратора сервера ${this.config.server_name}:\n\n${original}`
             );
             await reply(
-                "Подтверждение рассылки: «отправить» или «отмена». Для редактирования пришлите другой текст в этот чат."
+                "Черновик готов. Подтверждение рассылки: «отправить» или «отмена». Чтобы изменить текст, отправьте новый вариант в этот чат."
             );
             return;
         }
         if (draft?.kind === "welcome") {
             await this.call("panel-welcome", original, event);
             this.store.setValue(key, null);
-            await reply("Приветствие сохранено. {domain} заменяется доменом сервера.");
+            await reply(
+                "Приветствие сохранено для новых пользователей. {domain} заменяется доменом сервера."
+            );
             return;
         }
         if (draft?.kind === "update" && text === "обновить подтверждаю") {
@@ -191,7 +238,9 @@ class FederationBot {
                 event_id: draft.id
             });
             this.store.setValue(key, null);
-            await reply(`Обновление ${result.version}: ${result.status}. ${result.message || ""}`);
+            await reply(
+                `Обновление ${result.version}: ${stateText(result.status)}.\n${result.message || ""}`.trimEnd()
+            );
             return;
         }
         if (["помощь", "меню", "help", "/start"].includes(text)) {
@@ -217,7 +266,7 @@ class FederationBot {
                     created: Date.now()
                 });
                 await reply(
-                    "Для запуска напишите «обновить подтверждаю». Отмена: «отмена». Проверим свободный диск до применения; сервер временно остановится. Результат сохранится при перезапуске."
+                    "Обновление доступно. Для запуска напишите «обновить подтверждаю». Отмена: «отмена». Перед применением проверим свободное место. Сервер временно остановится. Результат сохранится при перезапуске."
                 );
             }
             return;
@@ -229,14 +278,14 @@ class FederationBot {
                 created: Date.now()
             });
             await reply(
-                "Пришлите текст рассылки. Далее покажу итог и попрошу подтверждение. Отмена: «отмена»."
+                "Пришлите текст рассылки. Затем покажу черновик для подтверждения. Отмена: «отмена»."
             );
             return;
         }
         if (text === "приветствие") {
             const result = await this.call("panel-welcome", null, event);
             await reply(result.text);
-            await reply("Изменить: «изменить приветствие».");
+            await reply("Чтобы изменить текст, отправьте «изменить приветствие».");
             return;
         }
         if (text === "изменить приветствие") {
@@ -252,7 +301,7 @@ class FederationBot {
             const result = await this.call("panel-status", null, event),
                 p = result.preferences;
             await reply(
-                `Обновления: ${p.updates ? "включены" : "выключены"}\nРегистрации: ${p.registrations ? "включены" : "выключены"}\nЕжемесячная статистика: ${p.statistics ? "включена" : "выключена"}\nНастройка: «уведомления обновления / регистрации / статистика включить / выключить».`
+                `Обновления: ${p.updates ? "включены" : "выключены"}\nРегистрации: ${p.registrations ? "включены" : "выключены"}\nЕжемесячная статистика: ${p.statistics ? "включена" : "выключена"}\nНастройка: уведомления обновления / регистрации / статистика включить / выключить.`
             );
             return;
         }
@@ -298,13 +347,7 @@ class FederationBot {
             actor: event.sender,
             event_id: event.event_id
         });
-        await reply(
-            JSON.stringify(
-                result,
-                (key, value) => (/backup|migration|move|checkpoint/i.test(key) ? undefined : value),
-                2
-            )
-        );
+        await reply(resultText(result));
     }
     async notifications() {
         const snapshot = await this.control({ action: "notifications" });
@@ -322,7 +365,7 @@ class FederationBot {
                 if (this.store.getValue(key)) continue;
                 await this.client.sendNotice(
                     room,
-                    `Заявка ${item.id}: ${item.server}; ${item.state}. Подтвердить: подтвердить ${item.id}; отказ: отклонить ${item.id}.`
+                    `Заявка на подключение сервера ${item.server}.\nИдентификатор: ${item.id}\nСостояние: ${stateText(item.state)}.\n\nПодтверждение: подтвердить ${item.id}\nОтказ: отклонить ${item.id}`
                 );
                 this.store.setValue(key, true);
             }
@@ -334,7 +377,7 @@ class FederationBot {
                     "Операция " +
                         item.id +
                         ": " +
-                        item.state +
+                        stateText(item.state) +
                         "\n" +
                         JSON.stringify(
                             item.result,
@@ -349,4 +392,4 @@ class FederationBot {
         }
     }
 }
-module.exports = { FederationBot, parse, HELP, MORE, statisticsText };
+module.exports = { FederationBot, parse, HELP, MORE, statisticsText, stateText, resultText };

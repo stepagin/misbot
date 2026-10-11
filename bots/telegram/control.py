@@ -23,10 +23,10 @@ WRITES = frozenset(('start', 'stop', 'backup', 'backup_verify', 'storage_connect
 
 def run_control(config, operation):
     if operation not in COMMANDS or operation not in config.get('management_actions', []):
-        raise BotError('Эта команда управления не подключена.')
+        raise BotError('Эта команда управления не подключена. Обратитесь к администратору.')
     root = Path(config['stack_root'])
     if not root.is_absolute() or root.resolve() != root or root == Path('/'):
-        raise BotError('Проверь каталог установки через SSH.')
+        raise BotError('Каталог установки не подтверждён. Проверьте его через SSH.')
     try:
         imported = (
             json.loads((root / 'installation.json').read_text()).get('backend')
@@ -35,7 +35,7 @@ def run_control(config, operation):
     except (OSError, ValueError):
         imported = False
     if not imported:
-        raise BotError('Это управление требует подключённого стека existing-compose.')
+        raise BotError('Управление службами доступно для подключённого стека existing-compose.')
     command = [
         '/usr/bin/python3',
         str(root / 'misbot.py'),

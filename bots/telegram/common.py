@@ -16,22 +16,26 @@ class BotError(Exception):
 
 def domain(value):
     if not isinstance(value, str) or value != value.strip() or len(value) > 253:
-        raise BotError('Укажи только домен сервера, например matrix.org.')
+        raise BotError('Укажите домен Matrix-сервера, например matrix.org.')
     try:
         result = value.lower().encode('idna').decode('ascii')
     except UnicodeError:
-        raise BotError('Недопустимый домен.')
+        raise BotError(
+            'Не удалось распознать домен. Укажите домен Matrix-сервера, например matrix.org.'
+        )
     try:
         ipaddress.ip_address(result)
     except ValueError:
         pass
     else:
-        raise BotError('Нужен домен Matrix сервера, а не IP-адрес.')
+        raise BotError(
+            'Для этого действия нужен домен Matrix-сервера. Укажите домен вместо IP-адреса.'
+        )
     labels = result.split('.')
     if len(labels) < 2 or any(
         not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', x) for x in labels
     ):
-        raise BotError('Укажи только домен сервера, без https://, пути и порта.')
+        raise BotError('Укажите только домен сервера, без https://, пути и порта.')
     return result
 
 
@@ -50,7 +54,7 @@ def private_json(path, data):
 def receive(stream):
     data = stream.readline(MAX_BODY + 1)
     if len(data) > MAX_BODY or not data.endswith(b'\n'):
-        raise BotError('Недопустимый размер запроса.')
+        raise BotError('Запрос не принят: превышен размер или не завершено сообщение.')
     return json.loads(data)
 
 
@@ -62,5 +66,5 @@ def bridge_call(request, path=None, timeout=100):
         client.sendall(json.dumps(request).encode() + b'\n')
         result = receive(client.makefile('rb'))
     if not result.get('ok'):
-        raise BotError(result.get('error', 'Сервис временно недоступен.'))
+        raise BotError(result.get('error', 'Не удалось выполнить запрос. Повторите позже.'))
     return result['result']

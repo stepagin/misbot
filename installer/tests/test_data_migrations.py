@@ -195,7 +195,7 @@ inspect = migrations.inspect_database
 def exit_after_replacement(db):
     version = inspect(db)
     saved = db.execute("SELECT value FROM settings WHERE key='welcome'").fetchone()
-    if saved and json.loads(saved[0]).startswith('Привет! Добро пожаловать в '):
+    if saved and json.loads(saved[0]).startswith('Здравствуйте. Добро пожаловать в '):
         os._exit(23)
     return version
 migrations.inspect_database = exit_after_replacement

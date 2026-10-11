@@ -57,21 +57,21 @@ function tokenMessage(item, server, config = {}) {
 ${uses} ${validity}
 
 На телефоне:
-1. Установи Element X — ссылки на ${site.hostname} (${siteUrl}).
-2. В приложении укажи сервер ${server}.
-3. Создай аккаунт и введи код приглашения при регистрации.
+1. Установите Element X — ссылки на ${site.hostname} (${siteUrl}).
+2. В приложении укажите сервер ${server}.
+3. Создайте аккаунт и введите код приглашения при регистрации.
 
-На компьютере: открой веб-чат (${webUrl}) и выбери «Создать учётную запись».`;
+На компьютере: откройте веб-чат (${webUrl}) и выберите «Создать учётную запись».`;
     const html = `<p><strong>Приглашение в ${escapeHtml(name)}</strong></p>
 <p>Код: <code>${escapeHtml(a.token)}</code></p>
 <p>${escapeHtml(uses)} ${validityHtml}</p>
 <p><strong>На телефоне:</strong></p>
 <ol>
-<li>Установи Element X — ссылки на <a href="${escapeHtml(siteUrl)}">${escapeHtml(site.hostname)}</a>.</li>
-<li>В приложении укажи сервер <code>${escapeHtml(server)}</code>.</li>
-<li>Создай аккаунт и введи код приглашения при регистрации.</li>
+<li>Установите Element X — ссылки на <a href="${escapeHtml(siteUrl)}">${escapeHtml(site.hostname)}</a>.</li>
+<li>В приложении укажите сервер <code>${escapeHtml(server)}</code>.</li>
+<li>Создайте аккаунт и введите код приглашения при регистрации.</li>
 </ol>
-<p><strong>На компьютере:</strong> открой <a href="${escapeHtml(webUrl)}">веб-чат</a> и выбери «Создать учётную запись».</p>`;
+<p><strong>На компьютере:</strong> откройте <a href="${escapeHtml(webUrl)}">веб-чат</a> и выберите «Создать учётную запись».</p>`;
     return notice(body, html);
 }
 
@@ -136,7 +136,7 @@ class ReferralBot {
                   : `${seconds} с`;
         return this.client.sendNotice(
             roomId,
-            `Реферальный бот\n\nпригласить — создать приглашение\nпригласить Для Антона — создать с названием\nтокены [offset] — мои приглашения (например: токены 20)\nотозвать [ID] — выбрать и отозвать своё приглашение
+            `Реферальный бот\n\nпригласить — создать приглашение\nпригласить Для Антона — создать с названием\nтокены [offset] — показать ваши приглашения (например: токены 20)\nотозвать [ID] — выбрать и отозвать ваше приглашение
 помощь — эта справка
 отмена — отменить выбор; ещё — следующая страница выбора\n\nРегистраций на код: ${usage}. Срок: ${duration}.`
         );
@@ -148,21 +148,22 @@ class ReferralBot {
             return this.client.sendNotice(
                 room,
                 previous
-                    ? "Больше приглашений нет. Выбери номер из списка или отмена."
-                    : "Нет приглашений для показа."
+                    ? "Больше приглашений нет. Выберите номер из списка или отправьте «отмена»."
+                    : "Пока нет приглашений."
             );
         }
         const first = revoke ? previous?.ids.length || 0 : offset;
         const lines = page.tokens.map((item, i) => {
             const label = this.label(sender, item.id);
+            const status = remaining(item);
             return {
-                text: `${first + i + 1}. ${label ? label + " · " : ""}${item.attributes.token} — ${remaining(item)}`,
-                html: `${first + i + 1}. ${label ? escapeHtml(label) + " · " : ""}<code>${escapeHtml(item.attributes.token)}</code> — ${escapeHtml(remaining(item))}`
+                text: `${first + i + 1}. ${label ? label + " · " : ""}${item.attributes.token} — ${status}`,
+                html: `${first + i + 1}. ${label ? escapeHtml(label) + " · " : ""}<code>${escapeHtml(item.attributes.token)}</code> — ${escapeHtml(status)}`
             };
         });
-        const title = revoke ? "Какое приглашение отозвать?" : "Мои приглашения";
+        const title = revoke ? "Какое приглашение отозвать?" : "Ваши приглашения";
         const footer = revoke
-            ? `Напиши номер. Отмена: отмена или «отмена». Выбор действует 15 минут.${page.has_more ? "\nЕщё приглашения: ещё" : ""}`
+            ? `Напишите номер приглашения. Отмена: отмена. Выбор действует 15 минут.${page.has_more ? "\nЕщё приглашения: ещё" : ""}`
             : page.has_more
               ? `Ещё приглашения: токены ${offset + 20}`
               : "";
@@ -202,14 +203,14 @@ class ReferralBot {
                 this.store.setValue(key, null);
                 return this.client.sendNotice(
                     room,
-                    "Нет активного выбора. Напиши отозвать, чтобы получить свежий список."
+                    "Выбор приглашения не активен. Отправьте «отозвать», чтобы получить новый список."
                 );
             }
             if (command === "ещё") {
                 if (!dialog.hasMore)
                     return this.client.sendNotice(
                         room,
-                        "Это весь список. Выбери номер или отмена."
+                        "Это весь список. Выберите номер или отправьте «отмена»."
                     );
                 return this.list(room, sender, dialog.offset, true, dialog);
             }
@@ -217,7 +218,7 @@ class ReferralBot {
             if (!Number.isSafeInteger(index) || index < 0 || index >= dialog.ids.length)
                 return this.client.sendNotice(
                     room,
-                    "Такого номера нет. Выбери номер из списка или отмена."
+                    "Такого номера нет в списке. Выберите номер из списка или отправьте «отмена»."
                 );
             // The saved ID is tied to this exact room/user and shown list, not
             // a refreshed position which could point to another invitation.
@@ -230,7 +231,7 @@ class ReferralBot {
             if (arg && (arg.length > 80 || /[\r\n\x00-\x1f\x7f]/.test(arg)))
                 return this.client.sendNotice(
                     room,
-                    "Название: одна строка, до 80 символов. Например: пригласить Для Антона."
+                    "Название не принято. Используйте одну строку до 80 символов. Например: пригласить Для Антона."
                 );
             const item = await this.call("invite", sender, {
                 request_id: "matrix:" + event.event_id
@@ -240,11 +241,14 @@ class ReferralBot {
                 room,
                 tokenMessage(item, this.config.server_name, this.config)
             );
-            if (arg) await this.client.sendNotice(room, `Название для тебя: ${arg}`);
+            if (arg) await this.client.sendNotice(room, `Название для вас: ${arg}`);
         } else if (["токены"].includes(command)) {
             const offset = arg === undefined ? 0 : Number(arg);
             if (!Number.isSafeInteger(offset) || offset < 0)
-                return this.client.sendNotice(room, "Просмотр: токены или токены 20.");
+                return this.client.sendNotice(
+                    room,
+                    "Начало списка не распознано. Отправьте «токены» или «токены 20»."
+                );
             await this.list(room, sender, offset);
         } else if (["отозвать"].includes(command)) {
             if (arg) {

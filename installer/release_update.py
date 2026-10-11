@@ -53,7 +53,7 @@ def queue(root, number, event):
         if previous['id'] == identifier:
             return {'status': previous['state'], 'version': previous['version']}
         if previous['state'] in ('queued', 'running'):
-            raise RuntimeError('Обновление уже выполняется; результат придёт в этот чат.')
+            raise RuntimeError('Обновление уже выполняется. Результат придёт в этот чат.')
     job = {
         'id': identifier,
         'version': number,
@@ -155,7 +155,7 @@ def apply(root, number=None, progress=None):
         'installed': current,
         'success': True,
         'exit_code': 0,
-        'detail': 'Новая версия применена; проверки служб завершены. Приватный журнал: ' + str(log),
+        'detail': 'Новая версия применена. Проверки служб завершены. Приватный журнал: ' + str(log),
     }
 
 
@@ -185,7 +185,7 @@ def run_job(root, identifier):
         safe_detail = (
             str(error)[:1200]
             if type(error) is RuntimeError
-            else 'Не удалось подтвердить операцию; детали SDK скрыты.'
+            else 'Результат операции не подтверждён. Подробности SDK скрыты.'
         )
         job.update(
             state='failed',
@@ -196,9 +196,9 @@ def run_job(root, identifier):
                 + stage
                 + '. '
                 + safe_detail
-                + ' Обновление прервано или отказало (диск, GitHub, checksum, совместимость или службы). '
+                + ' Завершение обновления не подтверждено. '
                 'Проверьте sudo misbot status и свободный диск: df -h. Повторите проверку версии; '
-                'если есть pending update, используйте указанную status команду update recover.',
+                'если есть pending update, используйте указанную в status команду update recover.',
             },
         )
     job['finished'] = time.time()
@@ -223,8 +223,8 @@ def recover_job(root):
             state='interrupted',
             result={
                 'installed': releases.installed(root),
-                'detail': 'Процесс обновления завершился без итогового ответа. Проверьте sudo misbot status; '
-                'при pending выполните update recover из доверенного комплекта. Данные сохранены.',
+                'detail': 'Процесс обновления завершился без итогового ответа. Проверьте sudo misbot status. '
+                'При pending выполните update recover из доверенного комплекта.',
             },
         )
         state_store.write_json(path, job)
@@ -240,7 +240,11 @@ def result_notice(panel):
         panel.notice(
             'update-result:' + job['id'],
             'Обновление Misbot: '
-            + job['state']
+            + {
+                'complete': 'готово (complete)',
+                'failed': 'завершение не подтверждено (failed)',
+                'interrupted': 'прервано (interrupted)',
+            }[job['state']]
             + '\nБыло: '
             + job['before']
             + '; запрошено: '

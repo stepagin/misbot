@@ -127,7 +127,7 @@ class ReleasesTests(unittest.TestCase):
             with patch.object(
                 releases.shutil, 'disk_usage', return_value=type('Usage', (), {'free': 0})()
             ):
-                with self.assertRaisesRegex(RuntimeError, 'диска'):
+                with self.assertRaisesRegex(RuntimeError, 'места'):
                     releases.download(
                         Path(folder),
                         self.release(raw),

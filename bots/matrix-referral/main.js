@@ -94,7 +94,7 @@ async function main() {
                     await client
                         .sendNotice(
                             roomId,
-                            error.userMessage || "Не удалось выполнить команду. Попробуй ещё раз."
+                            error.userMessage || "Не удалось выполнить команду. Повторите попытку."
                         )
                         .catch(() => {});
                 }

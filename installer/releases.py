@@ -67,7 +67,7 @@ def https(url, limit):
         return raw
     except (OSError, ValueError):
         raise RuntimeError(
-            'GitHub Releases недоступен. Повторите позже; установленная версия сохранена.'
+            'Не удалось получить данные GitHub Releases. Повторите позже. Установленная версия сохранена.'
         ) from None
 
 
@@ -146,9 +146,7 @@ def download(root, release, fetch=https):
     parent.mkdir(parents=True, mode=0o700, exist_ok=True)
     assets = {item['name']: item for item in release['assets'] if item.get('state') == 'uploaded'}
     if not {ARCHIVE, ARCHIVE + '.sha256'} <= assets.keys():
-        raise RuntimeError(
-            'Релиз не содержит готового установщика и checksum; обновление не начато.'
-        )
+        raise RuntimeError('Обновление не начато: в релизе нет готового установщика и checksum.')
 
     def asset_url(name):
         expected = (
@@ -163,7 +161,7 @@ def download(root, release, fetch=https):
         raise RuntimeError('Unsupported release archive size')
     if shutil.disk_usage(parent).free < size + 256 * 1024 * 1024 + 1024**3:
         raise RuntimeError(
-            'Недостаточно свободного диска для загрузки и распаковки релиза: нужен резерв 1 ГиБ.'
+            'Недостаточно места для загрузки и распаковки релиза. Освободите место с резервом 1 ГиБ.'
         )
     checksum = fetch(asset_url(ARCHIVE + '.sha256'), 4096).decode('ascii').strip()
     if not re.fullmatch(r'[0-9a-f]{64}  ' + re.escape(ARCHIVE), checksum):

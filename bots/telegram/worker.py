@@ -42,7 +42,7 @@ class Bot:
             timeout=timeout,
         )
         if r.status_code != 200 or not r.json().get('ok'):
-            raise BotError('Telegram временно отклонил запрос.')
+            raise BotError('Telegram не подтвердил запрос. Повторите позже.')
         return r.json()['result']
 
     def servers(self):
@@ -52,7 +52,9 @@ class Bot:
         servers = self.servers()
         name = self.config.get('server_name', 'misbot.ru')
         if name not in servers:
-            raise BotError('Сервер этого бота временно недоступен.')
+            raise BotError(
+                'Сервер этого бота не найден в списке подключённых. Обратитесь к администратору.'
+            )
         return name
 
     def waiting(self, uid, value):
@@ -96,7 +98,7 @@ class Bot:
         days = policy['lifetime_seconds'] / 86400
         text = (
             f'Misbot · @{identity["username"]}:{name}\n\n'
-            f'Пригласи друга: один код — {policy["usage_limit"]} человек, срок {days:g} дней.'
+            f'Регистраций на код: {policy["usage_limit"]}. Срок: {days:g} дн.'
         )
         buttons = [
             [self.button('Создать приглашение', 'invite')],
@@ -124,17 +126,17 @@ class Bot:
     def login(self, chat, uid):
         auth = self.call('auth_start', uid)
         text = (
-            'Войди в свой Matrix-аккаунт. Управление сервером доступно администраторам.\n\n'
+            'Войдите в свой Matrix-аккаунт. Управление сервером доступно администраторам.\n\n'
             'Код подтверждения: '
             + auth['user_code']
-            + '\n\nПодтверждай только свой запрос. После входа вернись сюда и нажми «Я вошёл».'
+            + '\n\nПодтверждайте только свой запрос. После входа вернитесь в чат и нажмите «Проверить вход».'
         )
         return self.send(
             chat,
             self.with_code(text, auth['user_code']),
             [
                 [{'text': 'Войти в Misbot', 'url': auth['url']}],
-                [self.button('Я вошёл', 'auth_check')],
+                [self.button('Проверить вход', 'auth_check')],
             ],
             parse_mode='HTML',
         )
@@ -146,7 +148,7 @@ class Bot:
             .astimezone(timezone(timedelta(hours=3)))
             .strftime('%d.%m.%Y %H:%M МСК')
             if attr.get('expires_at')
-            else 'без срока'
+            else 'без срока действия'
         )
         status = (
             'действует'
@@ -154,9 +156,9 @@ class Bot:
             else ('отозван' if attr.get('revoked_at') else 'использован или истёк')
         )
         text = (
-            f'Приглашение на {name}\n\n{attr["token"]}\n\nДо: {expiry}\n'
-            f'Использований: {attr["times_used"]}/{attr.get("usage_limit")} · {status}\n\n'
-            f'Передай другу этот код. В Element X укажи сервер {name}; при регистрации введи код.'
+            f'Приглашение в {name}\n\nКод: {attr["token"]}\n\nСрок действия: {expiry}\n'
+            f'Регистраций: {attr["times_used"]}/{attr.get("usage_limit")} · {status}\n\n'
+            f'Передайте другу этот код. В Element X укажите сервер {name}. При регистрации введите код приглашения.'
         )
         buttons = [[{'text': 'Копировать код', 'copy_text': {'text': attr['token']}}]]
         if attr['valid']:
@@ -171,7 +173,7 @@ class Bot:
             else 'Сейчас федерация открыта для всех серверов.'
         )
         text += (
-            '\n\nЧтобы добавить сервер, нажми кнопку и пришли его домен (например matrix.org).\n'
+            '\n\nЧтобы добавить сервер, нажмите «Добавить сервер» и отправьте его домен, например matrix.org.\n'
             'Удаление: /federation_remove домен\nИзменение кратко перезапускает Synapse.'
         )
         self.send(chat, text, [[self.button('Добавить сервер', 'fed_add')]])
@@ -185,7 +187,7 @@ class Bot:
             text += (
                 '\nФедерация станет ограниченной: будут разрешены свой сервер и добавленный домен.'
             )
-        text += '\nБудет проверенная копия и краткий перезапуск Synapse. Подтверждение действует 5 минут.'
+        text += '\nПеред применением будет проверена резервная копия. Synapse кратко перезапустится. Подтверждение действует 5 минут.'
         self.send(
             chat,
             text,
@@ -205,7 +207,7 @@ class Bot:
             text += '\nРеферальный Matrix-бот: ' + (
                 'подключён' if data.get('referral_bot') else 'не подключён'
             )
-            text += '\nБот управления федерацией: ' + (
+            text += '\nПанель администратора Misbot: ' + (
                 'подключён' if data.get('federation_bot') else 'не подключён'
             )
             if data.get('admin'):
@@ -213,7 +215,7 @@ class Bot:
             if data.get('homepage'):
                 text += '\nСайт: https://' + data['homepage'] + '/'
             if not result.get('ok') or data.get('pending'):
-                text += '\nПодключение не завершено; проверь misbot features status.'
+                text += '\nПодключение не завершено. Проверьте misbot features status.'
             return self.send(chat, text)
         if operation == 'storage':
             result = self.call('manage_read', uid, operation=operation)
@@ -221,15 +223,15 @@ class Bot:
             text = (
                 'Вложения в S3: '
                 + ('подключены' if data.get('media_s3') else 'не подключены')
-                + '\nКопии в S3: '
+                + '\nРезервные копии в S3: '
                 + ('подключены' if data.get('backup_s3') else 'не подключены')
                 + '\nПоследняя внешняя копия: '
                 + ('проверена' if data.get('last_backup_verified') else 'не подтверждена')
             )
             if data.get('media_pending'):
-                text += '\nПеренос S3 не завершён: misbot storage recover через SSH.'
+                text += '\nПеренос вложений в S3 не завершён. Через SSH выполните misbot storage recover.'
             if not result['ok']:
-                text += '\nСостояние не подтверждено; проверь misbot storage status через SSH.'
+                text += '\nСостояние не подтверждено. Через SSH выполните misbot storage status.'
             return self.send(chat, text)
         if operation in ('status', 'check'):
             result = self.call('manage_read', uid, operation=operation)
@@ -238,19 +240,21 @@ class Bot:
                 good = (
                     item['running'] and item['healthy'] if operation == 'status' else item['passed']
                 )
-                text += '\n' + ('✅ ' if good else '⚠️ ') + item['name']
+                text += '\n' + ('Проверено: ' if good else 'Нужна проверка: ') + item['name']
             if result.get('backup_pending'):
-                text += '\nНезавершённая копия: выполни misbot backup recover через SSH.'
+                text += '\nРезервная копия не завершена. Через SSH выполните misbot backup recover.'
             if not result['ok']:
-                text += '\nПроверка не подтверждена. Подробности: misbot status и misbot check через SSH.'
+                text += (
+                    '\nПроверка не подтверждена. Через SSH выполните misbot status и misbot check.'
+                )
             return self.send(chat, text)
         confirmation = self.call('manage_prepare', uid, operation=operation)
         text = {
-            'start': 'Запустить службы? Изменённые службы могут перезапуститься.',
-            'stop': 'Остановить службы Matrix? Пользователи потеряют доступ до запуска служб.',
-            'backup_verify': 'Прочитать и проверить последнюю копию, восстановив временные базы? Службы продолжат работу.',
-            'storage_connect': 'Подключить S3 вложений из профиля, заполненного через SSH? Synapse кратко перезапустится; локальные файлы сохранятся.',
-            'backup': 'Создать согласованную резервную копию? Synapse и MAS временно остановятся. После подключения S3 полный архив отправится туда зашифрованным.',
+            'start': 'Запустить службы?\nИзменённые службы могут перезапуститься.',
+            'stop': 'Остановить службы Matrix?\nСервер будет недоступен до запуска служб.',
+            'backup_verify': 'Проверить последнюю резервную копию?\nДля проверки будут восстановлены временные базы. Службы продолжат работу.',
+            'storage_connect': 'Подключить S3 вложений из профиля, заполненного через SSH?\nSynapse кратко перезапустится. Локальные файлы сохранятся.',
+            'backup': 'Создать согласованную резервную копию?\nSynapse и MAS временно остановятся. Если S3 подключён, полный архив отправится туда зашифрованным.',
         }.get(operation, 'Выполнить операцию управления?')
         return self.send(
             chat,
@@ -265,7 +269,7 @@ class Bot:
         if job['state'] == 'running':
             return self.send(
                 chat,
-                'Операция выполняется. Нажми кнопку для проверки результата.',
+                'Операция выполняется. Нажмите «Проверить результат», чтобы узнать её состояние.',
                 [[self.button('Проверить результат', 'manage_job|' + job['job'])]],
             )
         if job['state'] == 'finished' and job['result'].get('ok'):
@@ -281,8 +285,8 @@ class Bot:
             )
         return self.send(
             chat,
-            'Завершение операции не подтверждено. Проверь misbot status через SSH. '
-            'Если есть незавершённая копия: misbot backup recover.',
+            'Завершение операции не подтверждено. Через SSH выполните misbot status. '
+            'Если резервная копия не завершена, выполните misbot backup recover.',
         )
 
     def process(self, update):
@@ -315,7 +319,7 @@ class Bot:
                 return self.menu(chat, uid)
             if command == '/logout':
                 self.call('logout', uid)
-                return self.send(chat, 'Выход из бота выполнен. Для входа: /start.')
+                return self.send(chat, 'Вы вышли из бота. Для входа отправьте /start.')
             if not self.call('identity', uid)['authenticated']:
                 return self.login(chat, uid)
             if command in (
@@ -362,7 +366,7 @@ class Bot:
                     chat,
                     'Пока нет приглашений.'
                     if not page['tokens']
-                    else 'Твои приглашения, страница ' + str(offset // 5 + 1),
+                    else 'Ваши приглашения. Страница ' + str(offset // 5 + 1),
                     [buttons] if buttons else None,
                 )
             if command.startswith('revoke|'):
@@ -377,19 +381,21 @@ class Bot:
                 self.call('federation', uid)
                 self.waiting(uid, operation)
                 return self.send(
-                    chat, 'Пришли домен Matrix сервера, например matrix.org. Отмена: /start'
+                    chat, 'Отправьте домен Matrix-сервера, например matrix.org. Отмена: /start.'
                 )
             if command.startswith('fed_apply|'):
-                self.send(chat, 'Передаю подтверждённое изменение серверу.')
+                self.send(chat, 'Подтверждение получено. Передаю изменение серверу.')
                 domains = self.call('fed_apply', uid, confirmation=command.split('|', 1)[1])
                 if isinstance(domains, dict) and isinstance(domains.get('operation_id'), str):
                     return self.send(
                         chat,
-                        'Операция принята: '
+                        'Операция принята. Идентификатор: '
                         + domains['operation_id']
                         + '\nРезультат доступен в административном Matrix-боте и через misbot federation operations.',
                     )
-                return self.send(chat, 'Список применён:\n' + '\n'.join(domains))
+                return self.send(
+                    chat, 'Список разрешённых серверов сохранён:\n' + '\n'.join(domains)
+                )
             with self.db_lock:
                 row = self.db.execute('SELECT waiting FROM users WHERE uid=?', (uid,)).fetchone()
             if row and row[0] and not callback and not text.startswith('/'):
@@ -402,7 +408,7 @@ class Bot:
                 chat,
                 str(error)
                 if isinstance(error, BotError)
-                else 'Не удалось разобрать команду. Начни /start.',
+                else 'Не удалось распознать команду. Откройте меню: /start.',
             )
 
     def polling(self):

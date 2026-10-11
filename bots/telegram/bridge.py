@@ -44,7 +44,7 @@ def check_peer(uid, action):
         return
     if uid == 10001 and action not in matrix_actions - {'servers'}:
         return
-    raise BotError('Это действие недоступно этому боту.')
+    raise BotError('Это действие недоступно через данного бота.')
 
 
 class Bridge:
@@ -102,14 +102,14 @@ class Bridge:
             'SELECT * FROM authorizations WHERE server=? AND uid=?', (name, uid)
         ).fetchone()
         if not row or row['expires'] <= time.time():
-            raise BotError('Сначала войди в Misbot: /start.')
+            raise BotError('Вход в Misbot не подтверждён. Для входа отправьте /start.')
         return self.apis[name].active_user(row['user_id'])
 
     def admin(self, name, uid):
         user = self.member(name, uid)
         attr = user['attributes']
         if not attr.get('admin', attr.get('can_request_admin', False)):
-            raise BotError('Управлять сервером может только администратор MAS.')
+            raise BotError('Для управления сервером нужны права администратора MAS.')
         return user
 
     def poll_auths(self):
@@ -191,7 +191,9 @@ class Bridge:
                 (request.get('job'), name, uid),
             ).fetchone()
             if not row:
-                raise BotError('Операция не найдена или принадлежит другому пользователю.')
+                raise BotError(
+                    'Операция недоступна: она не найдена или связана с другим аккаунтом.'
+                )
             return {
                 'job': row['id'],
                 'operation': row['operation'],
@@ -200,14 +202,16 @@ class Bridge:
             }
         operation = request.get('operation')
         if action != 'manage_apply' and (operation not in COMMANDS or operation not in enabled):
-            raise BotError('Эта команда управления не подключена.')
+            raise BotError('Эта команда управления не подключена. Обратитесь к администратору.')
         if action == 'manage_read':
             if operation in WRITES:
-                raise BotError('Эта операция требует подтверждения.')
+                raise BotError(
+                    'Для этой операции нужно подтверждение. Запросите его через меню бота.'
+                )
             return run_control(config, operation)
         if action == 'manage_prepare':
             if operation not in WRITES:
-                raise BotError('Эта операция не требует подтверждения.')
+                raise BotError('Эта операция доступна без подтверждения. Выберите её в меню бота.')
             key = secrets.token_urlsafe(16)
             self.db.execute('DELETE FROM confirmations WHERE expires<?', (int(time.time()),))
             self.db.execute(
@@ -222,12 +226,14 @@ class Bridge:
                 (request.get('confirmation'), uid, name),
             ).fetchone()
             if not row or row['expires'] <= time.time() or not row['action'].startswith('manage:'):
-                raise BotError('Подтверждение истекло или уже использовано.')
+                raise BotError(
+                    'Подтверждение недействительно: срок истёк или оно уже использовано. Запросите новое подтверждение.'
+                )
             operation = row['action'].removeprefix('manage:')
             if operation not in WRITES or operation not in enabled:
-                raise BotError('Эта команда управления не подключена.')
+                raise BotError('Эта команда управления не подключена. Обратитесь к администратору.')
             if self.db.execute("SELECT 1 FROM management_jobs WHERE state='running'").fetchone():
-                raise BotError('Дождись завершения текущей операции.')
+                raise BotError('Другая операция уже выполняется. Дождитесь её завершения.')
             key = secrets.token_urlsafe(16)
             self.db.execute('DELETE FROM confirmations WHERE id=?', (row['id'],))
             self.db.execute(
@@ -240,18 +246,18 @@ class Bridge:
             ).start()
             LOG.info('management operation started operation=%s server=%s', operation, name)
             return {'job': key, 'operation': operation, 'state': 'running', 'result': None}
-        raise BotError('Неизвестная операция.')
+        raise BotError('Команда не распознана. Откройте меню бота.')
 
     def invite(self, name, api, policy, uid, request_id, inviter_name=None):
         if not isinstance(request_id, str) or not 1 <= len(request_id) <= 90:
-            raise BotError('Недопустимый запрос приглашения.')
+            raise BotError('Запрос приглашения не принят. Откройте меню бота и повторите создание.')
         row = self.db.execute('SELECT * FROM invitations WHERE request=?', (request_id,)).fetchone()
         if row and (row['server'] != name or row['uid'] != uid):
-            raise BotError('Приглашение принадлежит другому пользователю.')
+            raise BotError('Это приглашение недоступно для управления из вашего аккаунта.')
         recovering = bool(row)
         if not row:
             if not isinstance(inviter_name, str) or not inviter_name or len(inviter_name) > 255:
-                raise BotError('Не удалось сохранить имя пригласившего.')
+                raise BotError('Имя пригласившего не подтверждено. Повторите вход через меню бота.')
             code = 'MIS-' + secrets.token_urlsafe(18)
             created_at = int(time.time())
             expires = created_at + policy['invitation_lifetime_seconds']
@@ -338,7 +344,7 @@ class Bridge:
             except Exception:
                 LOG.error('federation rollback health check failed')
             raise BotError(
-                'Не удалось применить список. Предыдущая конфигурация восстановлена; обратись к администратору.'
+                'Список разрешённых серверов не применён. Прежняя конфигурация восстановлена. Обратитесь к администратору.'
             )
         LOG.info('federation configuration applied server=%s count=%s', name, len(domains))
 
@@ -350,10 +356,10 @@ class Bridge:
             or root.stat().st_uid != 0
             or root.stat().st_mode & 0o022
         ):
-            raise BotError('Проверь доверенный каталог Misbot через SSH.')
+            raise BotError('Каталог Misbot не прошёл проверку доверия. Проверьте его через SSH.')
         source = root / 'command_wrapper.py'
         if source.is_symlink() or source.stat().st_uid != 0 or source.stat().st_mode & 0o022:
-            raise BotError('Проверь публичный runtime Misbot через SSH.')
+            raise BotError('Runtime Misbot не прошёл проверку доверия. Проверьте его через SSH.')
         if str(root) not in sys.path:
             sys.path.insert(0, str(root))
         import command_wrapper
@@ -363,7 +369,7 @@ class Bridge:
             json.loads((root / 'installation.json').read_text()).get('backend')
             != 'existing-compose'
         ):
-            raise BotError('Общий backend Misbot не подключён.')
+            raise BotError('Общий backend Misbot не подключён. Обратитесь к администратору.')
         import federation
 
         return federation.backend(root)
@@ -381,7 +387,7 @@ class Bridge:
             except (requests.RequestException, ValueError):
                 pass
             time.sleep(1)
-        raise BotError('Synapse не подтвердил запуск.')
+        raise BotError('Запуск Synapse не подтверждён. Обратитесь к администратору.')
 
     def handle(self, request):
         with self.lock:
@@ -411,7 +417,7 @@ class Bridge:
             if not matrix_action and (
                 not isinstance(uid, int) or isinstance(uid, bool) or uid <= 0
             ):
-                raise BotError('Недопустимый пользователь Telegram.')
+                raise BotError('Запрос не принят: пользователь Telegram не распознан.')
             name, api, policy = self.server(request)
             if action in ('manage_read', 'manage_prepare', 'manage_apply', 'manage_job'):
                 return self.management(request, name, uid)
@@ -441,10 +447,10 @@ class Bridge:
             if action == 'tokens':
                 offset = request.get('offset', 0)
                 if not isinstance(offset, int) or offset < 0:
-                    raise BotError('Недопустимая страница.')
+                    raise BotError('Страница не распознана. Откройте список приглашений заново.')
                 limit = request.get('limit', 5) if matrix_action else 5
                 if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 20:
-                    raise BotError('Недопустимый размер страницы.')
+                    raise BotError('Размер страницы не принят. Откройте список приглашений заново.')
                 pending = self.db.execute(
                     'SELECT request FROM invitations WHERE server=? AND uid=? AND resource IS NULL',
                     (name, uid),
@@ -498,7 +504,7 @@ class Bridge:
                     (name, uid, resource),
                 ).fetchone()
                 if not own:
-                    raise BotError('Можно отозвать только своё приглашение.')
+                    raise BotError('Отзыв доступен только для ваших приглашений.')
                 current = api.api('user-registration-tokens/' + resource)['data']
                 if current['attributes'].get('revoked_at'):
                     return current
@@ -570,10 +576,10 @@ class Bridge:
                 if action == 'fed_prepare':
                     operation = request.get('operation')
                     if operation not in ('add', 'remove'):
-                        raise BotError('Неизвестная операция.')
+                        raise BotError('Команда не распознана. Откройте меню бота.')
                     target = domain(request.get('domain'))
                     if operation == 'remove' and target == name:
-                        raise BotError('Свой сервер остаётся в списке.')
+                        raise BotError('Собственный сервер должен оставаться в списке разрешённых.')
                     key = secrets.token_urlsafe(16)
                     self.db.execute(
                         'DELETE FROM confirmations WHERE expires<?', (int(time.time()),)
@@ -598,7 +604,9 @@ class Bridge:
                     or row['expires'] <= time.time()
                     or row['action'] not in ('add', 'remove')
                 ):
-                    raise BotError('Подтверждение истекло или уже использовано.')
+                    raise BotError(
+                        'Подтверждение недействительно: срок истёк или оно уже использовано. Запросите новое подтверждение.'
+                    )
                 if adopted:
                     import federation_service
 
@@ -623,7 +631,7 @@ class Bridge:
                 self.db.execute('DELETE FROM confirmations WHERE id=?', (row['id'],))
                 self.db.commit()
                 return sorted(domains)
-            raise BotError('Неизвестная операция.')
+            raise BotError('Команда не распознана. Откройте меню бота.')
 
 
 class Handler(socketserver.StreamRequestHandler):
@@ -643,7 +651,7 @@ class Handler(socketserver.StreamRequestHandler):
         except Exception as error:
             # Exception text may contain a proxy password, ID token, or an HTTP URL.
             LOG.error('operation failed type=%s', type(error).__name__)
-            answer = {'ok': False, 'error': 'Сервис временно недоступен. Повтори позже.'}
+            answer = {'ok': False, 'error': 'Не удалось выполнить запрос. Повторите позже.'}
         self.wfile.write(json.dumps(answer).encode() + b'\n')
 
 

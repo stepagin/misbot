@@ -477,7 +477,7 @@ class GeneratorTests(unittest.TestCase):
         panel = admin_panel.Panel(self.root)
         self.assertEqual(panel.settings()['welcome'], admin_panel.DEFAULT_WELCOME)
         self.assertIn(
-            'Привет! Добро пожаловать в chat.example.org.',
+            'Здравствуйте. Добро пожаловать в chat.example.org.',
             panel.welcome_text(panel.settings()['welcome']),
         )
         compose = yaml.safe_load((self.root / 'compose.yaml').read_text())

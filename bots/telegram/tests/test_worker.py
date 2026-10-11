@@ -1,4 +1,5 @@
 import io
+from html.parser import HTMLParser
 from pathlib import Path
 import sys
 import tempfile
@@ -9,6 +10,20 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from worker import Bot, Health
+
+
+class VisibleText(HTMLParser):
+    def __init__(self, source):
+        super().__init__(convert_charrefs=True)
+        self.parts = []
+        self.tags = []
+        self.feed(source)
+
+    def handle_starttag(self, tag, attrs):
+        self.tags.append((tag, attrs))
+
+    def handle_data(self, data):
+        self.parts.append(data)
 
 
 class WorkerTests(unittest.TestCase):
@@ -159,7 +174,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(
             payload['reply_markup']['inline_keyboard'][0][0]['copy_text']['text'], code
         )
-        self.assertIn('До: 04.10.2026 03:00 МСК', payload['text'])
+        self.assertIn('Срок действия: 04.10.2026 03:00 МСК', payload['text'])
         self.assertNotIn('Код подходит', payload['text'])
 
     def test_expiration_converts_across_year_boundary(self):
@@ -174,7 +189,9 @@ class WorkerTests(unittest.TestCase):
             },
         }
         self.bot.token_message(123, 'misbot.ru', item)
-        self.assertIn('До: 01.01.2027 02:30 МСК', self.bot.telegram.call_args.args[1]['text'])
+        self.assertIn(
+            'Срок действия: 01.01.2027 02:30 МСК', self.bot.telegram.call_args.args[1]['text']
+        )
 
     def test_authentication_code_is_monospace(self):
         self.identity = {'authenticated': False}
@@ -185,6 +202,96 @@ class WorkerTests(unittest.TestCase):
         method, payload = self.bot.telegram.call_args.args
         self.assertEqual(payload['parse_mode'], 'HTML')
         self.assertIn('<code>ABCD-EFGH</code>', payload['text'])
+
+    def test_login_preserves_special_characters_lines_and_confirmation_button(self):
+        code = 'A<&>_"\'\nNEXT'
+        url = 'https://mas.example.org/link?lang=ru&request=fictional'
+        self.bot.call = Mock(return_value={'user_code': code, 'url': url})
+        self.bot.login(123, 123)
+        payload = self.bot.telegram.call_args.args[1]
+        visible = VisibleText(payload['text'])
+        self.assertEqual(visible.tags, [('code', [])])
+        self.assertIn('Код подтверждения: ' + code + '\n\n', ''.join(visible.parts))
+        self.assertIn('нажмите «Проверить вход»', ''.join(visible.parts))
+        self.assertEqual(
+            payload['reply_markup']['inline_keyboard'],
+            [
+                [{'text': 'Войти в Misbot', 'url': url}],
+                [{'text': 'Проверить вход', 'callback_data': 'auth_check'}],
+            ],
+        )
+
+    def test_invitation_without_expiry_keeps_real_limit_status_and_copy_payload(self):
+        code = 'MIS-<&>"\'\nCODE'
+        item = {
+            'id': 'own-code',
+            'attributes': {
+                'token': code,
+                'valid': False,
+                'revoked_at': '2026-10-01T00:00:00Z',
+                'expires_at': None,
+                'times_used': 2,
+                'usage_limit': 3,
+            },
+        }
+        self.bot.token_message(123, 'example.org', item)
+        payload = self.bot.telegram.call_args.args[1]
+        visible = VisibleText(payload['text'])
+        self.assertEqual(visible.tags, [('code', [])])
+        body = ''.join(visible.parts)
+        self.assertIn('Код: ' + code + '\n\n', body)
+        self.assertIn('Срок действия: без срока действия', body)
+        self.assertIn('Регистраций: 2/3 · отозван', body)
+        self.assertNotIn('Для одной регистрации', body)
+        self.assertEqual(
+            payload['reply_markup']['inline_keyboard'],
+            [
+                [{'text': 'Копировать код', 'copy_text': {'text': code}}],
+            ],
+        )
+
+    def test_running_success_failure_and_interruption_have_distinct_results(self):
+        for state, ok, expected in [
+            ('running', False, 'Операция выполняется.'),
+            ('finished', True, 'Резервная копия создана.'),
+            ('finished', False, 'Завершение операции не подтверждено.'),
+            ('interrupted', False, 'Завершение операции не подтверждено.'),
+        ]:
+            with self.subTest(state=state, ok=ok):
+                self.bot.job_message(
+                    123,
+                    {
+                        'state': state,
+                        'operation': 'backup',
+                        'job': 'fictional-job',
+                        'result': {'ok': ok},
+                    },
+                )
+                payload = self.bot.telegram.call_args.args[1]
+                self.assertTrue(payload['text'].startswith(expected))
+                if state == 'running':
+                    self.assertEqual(
+                        payload['reply_markup']['inline_keyboard'][0][0]['callback_data'],
+                        'manage_job|fictional-job',
+                    )
+                else:
+                    self.assertNotIn('reply_markup', payload)
+
+    def test_check_uses_text_states_and_keeps_recovery_actions(self):
+        self.bot.call = Mock(
+            return_value={
+                'ok': False,
+                'backup_pending': True,
+                'checks': [{'name': 'synapse', 'passed': True}, {'name': 'mas', 'passed': False}],
+            }
+        )
+        self.bot.manage(123, 123, 'check')
+        body = self.bot.telegram.call_args.args[1]['text']
+        self.assertIn('Проверено: synapse', body)
+        self.assertIn('Нужна проверка: mas', body)
+        for command in ('misbot backup recover', 'misbot status', 'misbot check'):
+            self.assertIn(command, body)
+        self.bot.call.assert_called_once_with('manage_read', 123, operation='check')
 
     @staticmethod
     def health_reply(error=None, last_poll=None):

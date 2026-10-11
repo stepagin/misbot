@@ -13,12 +13,12 @@ import state_store
 from welcome_message import DEFAULT_WELCOME, LEGACY_WELCOMES
 
 EXPECTED_WELCOME = (
-    'Привет! Добро пожаловать в example.org.\n\n'
+    'Здравствуйте. Добро пожаловать в example.org.\n\n'
     'Я — серверный помощник. В этот чат будут приходить новости и объявления сервера.\n\n'
-    'Чтобы пригласить друга, открой реферального бота и отправь команду «пригласить». '
+    'Чтобы пригласить друга, откройте реферального бота и отправьте команду «пригласить». '
     'Он выдаст код для регистрации.\n'
     'https://matrix.to/#/@referral-bot:example.org\n\n'
-    'Я на сообщения не отвечаю. Если нужна помощь, напиши администратору:\n'
+    'Я не отвечаю на сообщения. Если нужна помощь, напишите администратору:\n'
     'https://matrix.to/#/@matrix-admin:example.org'
 )
 
@@ -220,7 +220,7 @@ class PanelTests(unittest.TestCase):
         self.assertEqual(first['queued'], 1)
         self.assertEqual(len(self.pending()), 1)
         self.assertEqual(
-            self.pending()[0]['body'], 'Сообщение от администратора сервера example.org,\n\nНовости'
+            self.pending()[0]['body'], 'Сообщение от администратора сервера example.org:\n\nНовости'
         )
 
     def test_latest_minor_only_once_and_three_day_interval(self):
@@ -322,6 +322,80 @@ class PanelTests(unittest.TestCase):
         release_update.result_notice(admin_panel.Panel(self.root, lambda: self.now))
         self.assertEqual(len(self.pending()), 1)
         self.assertIn('disk check failed', self.pending()[0]['body'])
+
+    def test_update_notices_distinguish_completion_failure_and_interruption(self):
+        for state, label in [
+            ('complete', 'готово'),
+            ('failed', 'завершение не подтверждено'),
+            ('interrupted', 'прервано'),
+        ]:
+            with self.subTest(state=state):
+                state_store.write_json(
+                    release_update.job_path(self.root),
+                    {
+                        'id': 'fictional-' + state,
+                        'before': '1.1.0',
+                        'version': '1.2.0',
+                        'state': state,
+                        'stage': 'apply',
+                        'result': {
+                            'installed': '1.1.0',
+                            'exit_code': 7,
+                            'detail': 'Проверьте sudo misbot status.',
+                        },
+                    },
+                )
+                release_update.result_notice(self.panel)
+                release_update.result_notice(self.panel)
+                pending = self.pending()
+                self.assertEqual(len(pending), 1)
+                body = pending[0]['body']
+                self.assertTrue(body.startswith(f'Обновление Misbot: {label} ({state})\n'))
+                for fact in (
+                    'Было: 1.1.0',
+                    'запрошено: 1.2.0',
+                    'установлено: 1.1.0',
+                    'Этап: apply',
+                    'код завершения: 7',
+                    'sudo misbot status',
+                ):
+                    self.assertIn(fact, body)
+                self.panel.handle('panel-ack', {'id': pending[0]['id'], 'delivered': True}, None)
+        with self.panel.database() as db:
+            self.assertEqual(
+                db.execute("SELECT count(*) FROM outbox WHERE state='sent'").fetchone()[0], 3
+            )
+
+    def test_updated_registration_copy_still_supports_disabling_pending_notices(self):
+        self.users = [{'mxid': '@alice:example.org', 'created': self.now, 'active': True}]
+        self.panel.observe_users()
+        self.assertEqual(len(self.pending()), 2)
+        self.assertEqual(
+            next(i['body'] for i in self.pending() if i['via'] == 'admin'),
+            'Новый пользователь зарегистрировался:\n@alice:example.org',
+        )
+        self.panel.handle('panel-preferences', {'key': 'registrations', 'enabled': False}, '$off')
+        self.assertEqual(len(self.pending()), 1)
+        self.assertEqual(self.pending()[0]['via'], 'welcome')
+
+    def test_copy_upgrade_keeps_existing_welcome_and_pending_delivery(self):
+        previous = (
+            EXPECTED_WELCOME.replace('Здравствуйте.', 'Привет!')
+            .replace('откройте', 'открой')
+            .replace('отправьте', 'отправь')
+            .replace('Я не отвечаю на сообщения.', 'Я на сообщения не отвечаю.')
+            .replace('напишите', 'напиши')
+        )
+        self.panel.handle('panel-welcome', previous, '$saved')
+        self.users = [{'mxid': '@alice:example.org', 'created': self.now, 'active': True}]
+        self.panel.observe_users()
+        settings, pending = self.panel.settings(), self.pending()
+        restarted = admin_panel.Panel(self.root, lambda: self.now)
+        restarted.user_page = self.panel.user_page
+        restarted.observe_users()
+        self.assertEqual(restarted.settings(), settings)
+        self.assertEqual(restarted.handle('panel-outbox', None, None)['items'], pending)
+        self.assertEqual(next(i['body'] for i in pending if i['via'] == 'welcome'), previous)
 
     def test_detached_worker_reports_disk_failure_and_recovers_a_dead_process(self):
         job = {

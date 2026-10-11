@@ -189,7 +189,7 @@ class Panel:
                             'registration:' + mxid,
                             owner(self.root),
                             'admin',
-                            'Новый пользователь зарегистрировался: ' + mxid,
+                            'Новый пользователь зарегистрировался:\n' + mxid,
                         )
             cursor = users[-1]['mxid']
             if len(users) < 500:
@@ -333,7 +333,7 @@ class Panel:
                 self.set(db, 'welcome', body)
             return {'saved': True}
         if action == 'panel-broadcast':
-            body = 'Сообщение от администратора сервера ' + self.domain + ',\n\n' + text(argument)
+            body = 'Сообщение от администратора сервера ' + self.domain + ':\n\n' + text(argument)
             self.observe_users()
             with self.database() as db:
                 users = list(db.execute('SELECT mxid FROM users WHERE active=1 ORDER BY mxid'))
@@ -341,7 +341,7 @@ class Panel:
                     self.enqueue(db, 'broadcast:' + event, user['mxid'], 'welcome', body)
             return {
                 'queued': len(users),
-                'message': 'Рассылка поставлена в очередь; отправка ограничена по скорости.',
+                'message': 'Рассылка принята и поставлена в очередь. Скорость отправки ограничена.',
             }
         if action == 'panel-statistics':
             return self.statistics(argument)
@@ -396,6 +396,6 @@ def statistics_text(result):
         + str(result['messages'])
         + '\nРегистраций: '
         + str(result['registrations'])
-        + '\nЗвонки: недоступно\nСредняя длительность звонка: недоступно\n'
+        + '\nЧисло звонков: недоступно\nСредняя длительность звонка: недоступно\n'
         + result['note']
     )

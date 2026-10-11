@@ -101,11 +101,11 @@ test("invitation uses configured title, landing and web chat with Matrix formatt
 Для одной регистрации. Действует до 01.01.2027 02:30 МСК.
 
 На телефоне:
-1. Установи Element X — ссылки на community.example.org (https://community.example.org/).
-2. В приложении укажи сервер misbot.ru.
-3. Создай аккаунт и введи код приглашения при регистрации.
+1. Установите Element X — ссылки на community.example.org (https://community.example.org/).
+2. В приложении укажите сервер misbot.ru.
+3. Создайте аккаунт и введите код приглашения при регистрации.
 
-На компьютере: открой веб-чат (https://community.example.org) и выбери «Создать учётную запись».`
+На компьютере: откройте веб-чат (https://community.example.org) и выберите «Создать учётную запись».`
     );
     assert.equal(sent[0].format, "org.matrix.custom.html");
     assert.match(sent[0].formatted_body, /<strong>Приглашение в Наш сервер<\/strong>/);
@@ -120,7 +120,7 @@ test("invitation uses configured title, landing and web chat with Matrix formatt
     );
     assert.match(
         sent[0].formatted_body,
-        /<strong>На компьютере:<\/strong> открой <a href="https:\/\/community\.example\.org">веб-чат<\/a>/
+        /<strong>На компьютере:<\/strong> откройте <a href="https:\/\/community\.example\.org">веб-чат<\/a>/
     );
 });
 
@@ -286,7 +286,7 @@ test("revoke dialog binds number to shown ID, survives restart, and clears after
         event_id: "$stale",
         content: { msgtype: "m.text", body: "1" }
     });
-    assert.match(sent.at(-1).body, /Нет активного выбора/);
+    assert.match(sent.at(-1).body, /Выбор приглашения не активен/);
     assert.equal(calls.filter((x) => x.action === "matrix_revoke").length, 1);
 });
 
@@ -313,7 +313,7 @@ test("invalid choice, cancel, timeout and a different room cannot revoke", async
         );
         assert.match(
             sent.at(-1).body,
-            scenario === "invalid" ? /Такого номера нет/ : /Нет активного выбора/
+            scenario === "invalid" ? /Такого номера нет/ : /Выбор приглашения не активен/
         );
     }
 });
@@ -345,7 +345,7 @@ test("name stays private in creator metadata and lists, not the forwarded invita
     event.content.body = "пригласить Для Антона";
     await bot.message("!room", event);
     assert.doesNotMatch(sent[0].body, /Для Антона|\отозвать/);
-    assert.equal(sent[1].body, "Название для тебя: Для Антона");
+    assert.equal(sent[1].body, "Название для вас: Для Антона");
     const restart = new ReferralBot(client, bot.control, store, config);
     await restart.message("!room", {
         ...event,
@@ -366,4 +366,87 @@ test("short remaining time and used status ignore expiry", () => {
     assert.equal(remaining(item, now), "истёк");
     item.attributes.times_used = 1;
     assert.equal(remaining(item, now), "использован");
+});
+
+// Read the supported notice markup as a client without formatting, retaining
+// link destinations and ordered steps. Decode text after removing markup.
+function readableNotice(html) {
+    let number = 0;
+    return html
+        .replace(/>\s+</g, "><")
+        .replace(/<a href="([^"]+)">([^<]+)<\/a>/g, "$2 ($1)")
+        .replace(/<p>/g, "")
+        .replace(/<\/p>/g, "\n\n")
+        .replace(/\n\n<ol>/g, "\n")
+        .replace(/<ol>/g, "")
+        .replace(/<li>/g, () => `${++number}. `)
+        .replace(/<\/li>/g, "\n")
+        .replace(/<\/ol>/g, "\n")
+        .replace(/<br>/g, "\n")
+        .replace(/<\/?(?:strong|code)>/g, "")
+        .replace(
+            /&(?:amp|lt|gt|quot|#39);/g,
+            (value) =>
+                ({
+                    "&amp;": "&",
+                    "&lt;": "<",
+                    "&gt;": ">",
+                    "&quot;": '"',
+                    "&#39;": "'"
+                })[value]
+        )
+        .trimEnd();
+}
+
+test("Matrix invitation keeps identical meaning and lines with or without HTML", () => {
+    const { item } = setup();
+    item.attributes.token = "MIS-<&>\"'";
+    const config = {
+        site_name: '<Наш & "сервер">',
+        site_url: "https://example.org/",
+        web_url: "https://chat.example.org/?from=invite&lang=ru#/register"
+    };
+    for (const [limit, expiry] of [
+        [1, "2026-12-31T23:30:00Z"],
+        [3, null]
+    ]) {
+        item.attributes.usage_limit = limit;
+        item.attributes.expires_at = expiry;
+        const message = tokenMessage(item, "matrix.example.org", config);
+        assert.equal(readableNotice(message.formatted_body), message.body);
+        assert.deepEqual(tokenMessage(item, "matrix.example.org", config), message);
+        assert.doesNotMatch(message.formatted_body, /<Наш|<script/);
+        assert.equal((message.formatted_body.match(/<li>/g) || []).length, 3);
+    }
+});
+
+test("revoke list preserves labels and code text in both formats", async () => {
+    const { bot, item, event, store, sent } = setup();
+    const label = '<Для & "друга">';
+    store.setValue(JSON.stringify(["label", event.sender, item.id]), label);
+    await bot.message("!room", { ...event, content: { msgtype: "m.text", body: "отозвать" } });
+    const message = sent[0];
+    assert.equal(readableNotice(message.formatted_body), message.body);
+    assert.ok(message.body.includes(label));
+    assert.ok(message.body.includes(item.attributes.token));
+    assert.match(message.body, /Напишите номер приглашения/);
+    assert.doesNotMatch(message.formatted_body, /<Для/);
+});
+
+test("plain and HTML lists share the same remaining time at an expiry boundary", async () => {
+    const { bot, item, event, sent } = setup();
+    const original = Date.now;
+    let now = Date.parse(item.attributes.expires_at) - 500;
+    Date.now = () => {
+        const value = now;
+        now += 60000;
+        return value;
+    };
+    try {
+        await bot.list("!room", event.sender, 0);
+        assert.match(sent[0].body, /осталось 1 мин/);
+        assert.equal(readableNotice(sent[0].formatted_body), sent[0].body);
+    } finally {
+        Date.now = original;
+    }
 });

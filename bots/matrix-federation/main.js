@@ -27,7 +27,7 @@ function control(request) {
             error
                 ? reject(
                       new Error(
-                          "Управляющая служба недоступна или отказала. Проверьте misbot status; повторите через federation requests retry/recover."
+                          "Управляющая служба не подтвердила запрос. Проверьте misbot status. Для заявки используйте federation requests retry; для восстановления — federation recover."
                       )
                   )
                 : resolve(value);
@@ -110,7 +110,7 @@ async function main() {
                     await client
                         .sendNotice(
                             room,
-                            "Изменение не подтверждено. Проверьте sudo misbot status. Если показан operation ID, используйте sudo misbot federation operations и указанную recovery/retry команду. Для исправления ввода: помощь."
+                            "Результат команды не подтверждён. Выполните sudo misbot status. Если есть идентификатор операции, проверьте sudo misbot federation operations и выполните указанную команду recovery/retry. Справка по вводу: помощь."
                         )
                         .catch(() => {});
             }

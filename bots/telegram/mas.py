@@ -20,7 +20,9 @@ class MAS:
     def request(self, path, method='GET', data=None, params=None):
         url = urljoin(self.base + '/', path)
         if urlsplit(url).netloc != urlsplit(self.base).netloc:
-            raise BotError('Ошибка адреса MAS.')
+            raise BotError(
+                'Адрес MAS не соответствует подключённой службе. Обратитесь к администратору.'
+            )
         with self.lock:
             if time.time() >= self.expires:
                 r = requests.post(
@@ -31,7 +33,9 @@ class MAS:
                     allow_redirects=False,
                 )
                 if r.status_code != 200:
-                    raise BotError('MAS не выдал доступ службе бота.')
+                    raise BotError(
+                        'MAS не предоставил доступ службе бота. Обратитесь к администратору.'
+                    )
                 token = r.json()
                 self.token = token['access_token']
                 self.expires = time.time() + max(1, token.get('expires_in', 60) - 20)
@@ -47,7 +51,7 @@ class MAS:
             if r.status_code == 401:
                 self.expires = 0
             if r.status_code not in (200, 201, 204):
-                raise BotError('MAS отклонил операцию (HTTP %s).' % r.status_code)
+                raise BotError('MAS не подтвердил выполнение операции (HTTP %s).' % r.status_code)
             return r.json() if r.content else None
 
     def api(self, path, **kwargs):
@@ -66,16 +70,16 @@ class MAS:
         user = self.api('users/' + user_id)['data']
         attr = user['attributes']
         if attr.get('deactivated_at') or attr.get('locked_at') or attr.get('legacy_guest'):
-            raise BotError('Нужен действующий аккаунт Misbot. Этот аккаунт недоступен.')
+            raise BotError(
+                'Аккаунт недоступен для работы с ботом. Нужен действующий Matrix-аккаунт на этом сервере.'
+            )
         return user
 
     def administrator_user(self, user_id):
         user = self.active_user(user_id)
         attr = user['attributes']
         if not attr.get('admin', attr.get('can_request_admin', False)):
-            raise BotError(
-                'Изменять федерацию может только администратор MAS. У этой учётной записи нет доступа.'
-            )
+            raise BotError('Для изменения федерации нужны права администратора MAS.')
         return user
 
     def matrix_user(self, mxid, server_name):
@@ -89,7 +93,7 @@ class MAS:
             raise BotError('Приглашения доступны пользователям этого сервера.')
         username = mxid[1 : -len(suffix)]
         if not username or ':' in username or any(ord(c) < 32 for c in username):
-            raise BotError('Недопустимый Matrix ID.')
+            raise BotError('Не удалось распознать Matrix ID. Проверьте адрес аккаунта.')
         user = self.api('users/by-username/' + quote(username, safe=''))['data']
         return self.active_user(user['id'])
 
@@ -102,7 +106,9 @@ class MAS:
             allow_redirects=False,
         )
         if r.status_code != 200:
-            raise BotError('MAS не разрешил подтверждение доступа (HTTP %s).' % r.status_code)
+            raise BotError(
+                'MAS не подтвердил запрос доступа (HTTP %s). Повторите позже.' % r.status_code
+            )
         return r.json()
 
     def device_token(self, code):
@@ -120,7 +126,7 @@ class MAS:
 
     def device_user(self, token):
         if 'openid' not in token.get('scope', '').split():
-            raise BotError('Misbot не подтвердил вход.')
+            raise BotError('Misbot не подтвердил вход. Повторите вход через меню бота.')
         r = requests.get(
             self.base + '/oauth2/userinfo',
             headers={'Authorization': 'Bearer ' + token['access_token']},
@@ -128,7 +134,7 @@ class MAS:
             allow_redirects=False,
         )
         if r.status_code != 200:
-            raise BotError('MAS не подтвердил учётную запись.')
+            raise BotError('MAS не подтвердил учётную запись. Повторите вход через меню бота.')
         subject = r.json()['sub']
         try:
             number = UUID(subject).int

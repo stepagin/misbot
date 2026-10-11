@@ -1,7 +1,7 @@
 "use strict";
 const test = require("node:test"),
     assert = require("node:assert/strict");
-const { FederationBot, parse, HELP, MORE } = require("../logic");
+const { FederationBot, parse, HELP, MORE, resultText, stateText } = require("../logic");
 function setup() {
     const cfg = {
             user_id: "@federation-bot:example.org",
@@ -292,13 +292,13 @@ test("broadcast preview is separate from confirmation, edit and cancel require n
     await send("Первые Новости");
     assert.equal(
         x.sent.at(-2),
-        "Сообщение от администратора сервера example.org,\n\nПервые Новости"
+        "Сообщение от администратора сервера example.org:\n\nПервые Новости"
     );
     assert.match(x.sent.at(-1), /Подтверждение/);
     await send("Новые НОВОСТИ");
     assert.equal(
         x.sent.at(-2),
-        "Сообщение от администратора сервера example.org,\n\nНовые НОВОСТИ"
+        "Сообщение от администратора сервера example.org:\n\nНовые НОВОСТИ"
     );
     assert.equal(x.calls.filter((c) => c.action === "panel-broadcast").length, 0);
     x.bot.control = async (r) => {
@@ -355,4 +355,97 @@ test("owner revocation during an operation prevents its reply", async () => {
     };
     await assert.rejects(x.bot.message("!room", x.event));
     assert.equal(x.sent.length, 0);
+});
+
+test("operation presentation separates acceptance, execution and completion", () => {
+    for (const [state, meaning] of [
+        ["queued", "принято"],
+        ["running", "выполняется"],
+        ["complete", "готово"],
+        ["failed", "завершение не подтверждено"],
+        ["interrupted", "прервано"]
+    ]) {
+        const result = {
+            status: state,
+            operation_id: "FO-fictional",
+            next_action: "misbot federation operations"
+        };
+        const before = structuredClone(result);
+        const body = resultText(result);
+        assert.ok(body.startsWith(`Операция: ${meaning} (${state}).\n`));
+        assert.match(body, /FO-fictional/);
+        assert.match(body, /misbot federation operations/);
+        assert.deepEqual(result, before);
+        assert.equal(resultText(result), body);
+    }
+    assert.equal(stateText("connected"), "политика применена на обоих серверах (connected)");
+    assert.equal(stateText("future_state"), "future_state");
+});
+
+test("plain results keep special characters and suppress private recovery details", () => {
+    const result = {
+        servers: ["example.org"],
+        note: "<&>\"'\nСледующая строка",
+        backup: "FICTIONAL_SECRET",
+        nested: { checkpoint: "FICTIONAL_SECRET", code: "busy" }
+    };
+    const body = resultText(result);
+    assert.ok(body.startsWith("Результат запроса:\n"));
+    assert.deepEqual(JSON.parse(body.slice(body.indexOf("\n") + 1)), {
+        servers: result.servers,
+        note: result.note,
+        nested: { code: "busy" }
+    });
+    assert.doesNotMatch(body, /FICTIONAL_SECRET/);
+    assert.equal(
+        resultText({ status: "unchanged" }),
+        "Операция: изменения не требуются (unchanged)."
+    );
+});
+
+test("invalid formatter parameters fail without including their values", () => {
+    for (const value of [undefined, null, "FICTIONAL_SECRET", ["FICTIONAL_SECRET"]]) {
+        assert.throws(() => resultText(value), { message: "Invalid operation result" });
+    }
+    for (const value of [undefined, null, "", { secret: "FICTIONAL_SECRET" }]) {
+        assert.throws(() => stateText(value), { message: "Invalid operation state" });
+    }
+});
+
+test("notifications keep commands, distinct states and deduplication after restart", async () => {
+    const x = setup(),
+        id = "MB-" + "a".repeat(32);
+    const snapshot = {
+        requests: [{ id, server: "peer.example.org", state: "pending" }],
+        operations: [
+            {
+                id: "FO-fictional",
+                state: "interrupted",
+                result: {
+                    code: "interrupted",
+                    next_action: "sudo misbot federation recover",
+                    checkpoint: "FICTIONAL_SECRET"
+                }
+            }
+        ]
+    };
+    x.client.getJoinedRooms = async () => ["!room", "!other"];
+    x.bot.control = async (request) =>
+        request.action === "authorize" ? { authorized: true } : snapshot;
+    await x.bot.notifications();
+    assert.equal(x.sent.length, 2);
+    assert.match(x.sent[0], /ожидает решения \(pending\)/);
+    assert.ok(x.sent[0].includes("подтвердить " + id));
+    assert.ok(x.sent[0].includes("отклонить " + id));
+    assert.match(x.sent[1], /прервано \(interrupted\)/);
+    assert.match(x.sent[1], /sudo misbot federation recover/);
+    assert.doesNotMatch(x.sent[1], /FICTIONAL_SECRET/);
+    const restart = new FederationBot(x.client, x.bot.control, x.bot.store, x.cfg);
+    await restart.notifications();
+    assert.equal(x.sent.length, 2);
+    snapshot.requests[0].state = "connected";
+    await restart.notifications();
+    assert.equal(x.sent.length, 3);
+    assert.match(x.sent[2], /политика применена на обоих серверах \(connected\)/);
+    assert.doesNotMatch(x.sent[2], /комнаты проверены/);
 });
