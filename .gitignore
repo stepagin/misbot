@@ -4,6 +4,7 @@
 /.idea/
 /CLAUDE.md
 /AGENTS.md
+/CONTRIBUTING.md
 
 # Rebuild from public sources with: python3 installer/build.py
 /dist/
