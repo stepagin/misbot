@@ -48,7 +48,7 @@ DNS не считается готовым по подтверждению по�
 `FEDERATION_AUTO_ACCEPT` в policy.env: boolean `true`/`false`, default `false`, пример `false`.
 Включает только приём комнат от точного bot MXID одобренного connected peer;
 не меняет allowlist и права участников. Применяется сразу backend при проверке
-приглашения. Изменение: `sudo misbot federation rooms auto-accept --enabled true`.
+приглашения. Значение задаётся в `settings/policy.env` через общую конфигурацию.
 Остальные [операции федерации](federation.md) используют тот же загрузчик.
 
 Каталог `settings` — root:root 0700, файлы — root:root 0600, обычные файлы,

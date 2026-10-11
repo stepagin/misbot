@@ -654,10 +654,6 @@ class Federation(federation.Backend):
         path = self.installation.control / 'features/policy.json'
         return path.exists() and json.loads(path.read_text()).get('auto_accept') is True
 
-    def set_auto_accept(self, value):
-        folder = private_directory(self.installation.control / 'features')
-        save(folder / 'policy.json', {'auto_accept': value == 'true'})
-
     def matrix_operation(self, action, argument):
         # Execute the existing fixed membership helper inside the accepted Synapse.
         config = json.loads((self.root / 'config/federation-bot.json').read_text())

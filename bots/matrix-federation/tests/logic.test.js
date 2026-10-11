@@ -11,11 +11,11 @@ function setup(){
 }
 test("Russian grammar and opaque IDs",()=>{
  assert.equal(parse("подтвердить MB-"+"a".repeat(32)).action,"approve");assert.equal(parse("подтвердить 1"),null);
- assert.equal(parse("принять комнату !Case:example.org").argument,"!Case:example.org");assert.match(MORE,/взаимное подключение/);assert.doesNotMatch(HELP+MORE,/копи|backup|перенос/i);
+ assert.match(MORE,/взаимное подключение/);assert.doesNotMatch(HELP+MORE,/копи|backup|перенос/i);
 });
 test("all federation command words ignore case without changing their arguments",()=>{
- const id="MB-"+"0123456789abcdef".repeat(2),room="!MiXeD:example.org",server="Peer.Example";
- for(const [command,action] of Object.entries({серверы:"servers",заявки:"requests",операции:"operations",приглашения:"room-invitations",восстановить:"recover",откатить:"rollback"})){
+ const id="MB-"+"0123456789abcdef".repeat(2),server="Peer.Example";
+ for(const [command,action] of Object.entries({серверы:"servers",заявки:"requests",операции:"operations",восстановить:"recover",откатить:"rollback"})){
   assert.deepEqual(parse(command.toUpperCase()),{action},command);
  }
  for(const [command,action] of Object.entries({проверить:"check",добавить:"add",удалить:"remove",пригласить:"invite"})){
@@ -24,12 +24,20 @@ test("all federation command words ignore case without changing their arguments"
  for(const [command,action] of Object.entries({подтвердить:"approve",отклонить:"reject",отменить:"cancel",повторить:"retry",статус:"request-status"})){
   assert.deepEqual(parse(command.toUpperCase()+" "+id),{action,argument:id},command);
  }
- for(const [command,action] of Object.entries({принять:"room-accept",отклонить:"room-reject",покинуть:"room-leave"})){
-  assert.deepEqual(parse(command.toUpperCase()+" КоМнАтУ "+room),{action,argument:room},command);
+});
+test("removed room commands never dispatch and are absent from help",async()=>{
+ const commands=["приглашения","принять комнату !MiXeD:example.org","отклонить комнату !MiXeD:example.org",
+  "покинуть комнату !MiXeD:example.org","пригласить бота peer.example !MiXeD:example.org",
+  "автоприём включить","автоприём выключить"];
+ for(const command of commands){
+  for(const body of [command,command.toUpperCase()]){
+   assert.equal(parse(body),null,body);
+   const x=setup();await x.bot.message("!room",{...x.event,content:{msgtype:"m.text",body}});
+   assert.equal(x.calls.filter(c=>c.action!=="authorize").length,0,body);
+   assert.deepEqual(x.sent,[HELP],body);
+  }
  }
- assert.deepEqual(parse("ПриГлаСить БОТА "+server+" "+room),{action:"room-invite",argument:JSON.stringify({server,room})});
- assert.deepEqual(parse("АвТоПрИёМ ВКЛЮЧИТЬ"),{action:"auto-accept",argument:"true"});
- assert.deepEqual(parse("АВТОПРИЁМ ВыКлЮчИтЬ"),{action:"auto-accept",argument:"false"});
+ assert.doesNotMatch(HELP+MORE,/приглашения|принять комнату|отклонить комнату|покинуть комнату|пригласить бота|автоприём/i);
 });
 test("request IDs require their exact case and unknown commands stay unknown",()=>{
  const id="MB-"+"a".repeat(32);
@@ -39,11 +47,10 @@ test("request IDs require their exact case and unknown commands stay unknown",()
  for(const unknown of ["constructor","toString","__proto__","НЕИЗВЕСТНО"]){assert.equal(parse(unknown),null);}
 });
 test("mixed-case federation commands reach the backend with untouched IDs",async()=>{
- const x=setup(),id="MB-"+"a".repeat(32),room="!MiXeD:example.org";
+ const x=setup(),id="MB-"+"a".repeat(32);
  for(const [body,action,argument] of [
   ["ПОДТВЕРДИТЬ "+id,"approve",id],
-  ["ПрИнЯтЬ КОМНАТУ "+room,"room-accept",room],
-  ["ПРИГЛАСИТЬ бота Peer.Example "+room,"room-invite",JSON.stringify({server:"Peer.Example",room})],
+  ["ПРИГЛАСИТЬ сервер Peer.Example","invite","Peer.Example"],
  ]){
   await x.bot.message("!room",{...x.event,event_id:"$"+action,content:{msgtype:"m.text",body}});
   assert.equal(x.calls.find(c=>c.action===action)?.argument,argument);

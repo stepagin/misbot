@@ -19,6 +19,8 @@ import state_store
 
 TERMINAL = ('rejected','cancelled','expired')
 REQUEST = re.compile(r'MB-[0-9a-f]{32}\Z')
+ACTIONS = frozenset(('servers','check','add','remove','invite','requests','approve','reject',
+                     'cancel','retry','request-status','peers','operations','recover','rollback'))
 
 
 def failure(code, root=None, action=None):
@@ -67,8 +69,6 @@ class Backend:
     def save(self, data): state_store.write_json(self.path,data)
     def guard(self): return state_store.operation_guard(self.root)
     def auto_accept(self): return config.load(self.root).get('FEDERATION_AUTO_ACCEPT','false')=='true'
-    def set_auto_accept(self, value):
-        model=config.load(self.root,True);model['FEDERATION_AUTO_ACCEPT']=value;config.write_model(self.root,model)
     def matrix_operation(self, action, argument):
         from federation_runtime import matrix_operation
         return matrix_operation(self.root,action,argument)
@@ -303,6 +303,7 @@ class Backend:
             return protocol.envelope(own,self.key,remote,reply)
 
     def operate(self, action, argument=None, actor='root', event_id=None):
+        if action not in ACTIONS: raise protocol.ProtocolError('unknown_operation')
         with self.guard():
             self.ready(action in ('recover','rollback','operations','requests','request-status','peers','servers'));self.authorize(actor);data=self.load()
             if event_id:
@@ -344,19 +345,6 @@ class Backend:
                 if action=='reject' and item['direction']!='incoming': raise protocol.ProtocolError('invalid_transition')
                 item.update(state='rejected' if action=='reject' else 'cancelled',delivery_pending=True);self.save(data)
                 return self.retry(data,argument)
-            if action=='auto-accept':
-                value=schema.field_value('FEDERATION_AUTO_ACCEPT',argument)
-                self.set_auto_accept(value)
-                return {'auto_accept':value=='true'}
-            if action in ('room-invitations','room-accept','room-reject','room-leave','room-invite'):
-                from federation_runtime import matrix_operation
-                if action=='room-invite':
-                    argument=json.loads(argument);server=schema.domain(argument['server'])
-                    peer=data['peers'].get(server)
-                    if not peer or not peer.get('approved') or data['requests'][peer['request_id']]['state']!='connected':
-                        raise protocol.ProtocolError('peer_not_connected')
-                    argument=json.dumps({'room':argument['room'],'mxid':peer['document']['bot_mxid']})
-                return self.matrix_operation(action,argument)
             raise protocol.ProtocolError('unknown_operation')
 
 
@@ -369,7 +357,7 @@ def backend(root, **kwargs):
 
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('--directory',required=True,type=Path)
-    parser.add_argument('action');parser.add_argument('argument',nargs='?');args=parser.parse_args()
+    parser.add_argument('action',choices=sorted(ACTIONS));parser.add_argument('argument',nargs='?');args=parser.parse_args()
     try:
         state_store.require_root();__import__('command_wrapper').trusted_installation(args.directory)
         result=backend(args.directory).operate(args.action,args.argument)
