@@ -167,6 +167,7 @@ class ConfigurationTests(unittest.TestCase):
             {'domain': 'fictional.example.org', 'config_format_version': 2, 'preview': True},
         )
         source = Path(__file__).resolve().parents[1]
+        previous = None
         for _ in range(2):
             result = subprocess.run(
                 [

@@ -5,6 +5,8 @@ from html.parser import HTMLParser
 
 BASE = 'http://mas:8080'
 CALLBACK = 'https://web.bootstrap-test.invalid/check'
+# The isolated integration runner injects this before executing the fixture.
+CREDS: dict[str, str]
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -134,7 +136,7 @@ for _ in range(20):
     assert selected is not None, 'authorization form'
     values = dict(selected['inputs'])
     if password:
-        values.update(username=CREDS['username'], password=CREDS['password'])
+        values.update(username=CREDS['username'], password=CREDS['password'])  # noqa: F821
     if 'action' in values:
         values['action'] = 'allow'
     target = urllib.parse.urljoin(url, selected['action'])
