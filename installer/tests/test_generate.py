@@ -22,7 +22,7 @@ class GeneratorTests(unittest.TestCase):
         for action in ('version','--version'):
             result=subprocess.run(['bash',str(BUNDLE/'install.sh'),action],capture_output=True,text=True)
             self.assertEqual(result.returncode,0,result.stderr)
-            self.assertEqual(result.stdout.strip(),'Misbot 1.1.1')
+            self.assertEqual(result.stdout.strip(),'Misbot 1.2.0')
 
     def test_known_provider_pair_code_translates_to_safe_full_path_continuation(self):
         import lifecycle
@@ -52,9 +52,14 @@ class GeneratorTests(unittest.TestCase):
             self.assertFalse(any('.server-access' in p or p.endswith('.env') or
                 '/tests/' in p or '/verification/' in p or '/evidence/' in p or
                 'SYNAPSE_INSTALLER_' in p or p.endswith('live-test.js') for p in names))
-            self.assertEqual(json.loads(archive.extractfile('matrix-installer/release.json').read())['version'], '1.1.1')
+            self.assertEqual(json.loads(archive.extractfile('matrix-installer/release.json').read())['version'], '1.2.0')
             self.assertEqual(archive.extractfile('matrix-installer/LICENSE').read(),
                              (BUNDLE.parent/'LICENSE').read_bytes())
+            licenses=archive.extractfile('matrix-installer/third-party-licenses.md').read().decode()
+            self.assertIn('Copyright (c) 2020 Will McGugan',licenses)
+            self.assertIn('THE SOFTWARE IS PROVIDED "AS IS"',licenses)
+            self.assertIn('matrix-installer/terminal_views.py',names)
+            self.assertIn('matrix-installer/ui_actions.py',names)
             manifest=archive.extractfile('matrix-installer/SHA256SUMS').read().decode()
             self.assertEqual({'matrix-installer/'+line.split('  ',1)[1] for line in manifest.splitlines()},
                              names-{'matrix-installer/SHA256SUMS'})

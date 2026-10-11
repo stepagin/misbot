@@ -23,6 +23,17 @@ BUNDLE = Path(__file__).resolve().parents[1]
 
 
 class ExistingTests(unittest.TestCase):
+    def test_existing_ui_delegates_to_shared_menu_and_preserves_result(self):
+        import terminal_ui
+        installation=existing.Installation.__new__(existing.Installation)
+        installation.root=Path('/opt/fictional-stack')
+        with patch('sys.stdin.isatty',return_value=True),patch('sys.stdout.isatty',return_value=True), \
+                patch.object(terminal_ui,'UI') as factory:
+            factory.return_value.menu.return_value=130
+            self.assertEqual(installation.ui(),130)
+        factory.assert_called_once_with(directory=installation.root,source=installation.root)
+        factory.return_value.menu.assert_called_once()
+
     def fixture(self, base):
         root = base / "installation"
         root.mkdir(mode=0o700)

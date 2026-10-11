@@ -6,9 +6,123 @@ from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 import terminal_ui as ui
 import configuration_schema as schema
+import ui_actions
 
 
 class UITests(unittest.TestCase):
+    def test_task_catalog_uses_current_cli_without_removed_room_commands(self):
+        self.assertNotIn('rooms',ui_actions.MENUS)
+        for group,(_,actions) in ui_actions.MENUS.items():
+            for action in actions:
+                with self.subTest(group=group,path=action.path):
+                    if action.path.startswith('@'):
+                        self.assertIn(action.path[1:],ui_actions.MENUS)
+                    else:
+                        self.assertIn(action.path,ui.cli_commands.BY_PATH)
+                        self.assertFalse(action.path.startswith('federation rooms'))
+                        for argument in ui.cli_commands.BY_PATH[action.path].arguments:
+                            self.assertIn(argument,ui_actions.ARGUMENTS)
+
+    def test_navigation_and_read_only_action_do_not_require_confirmation(self):
+        with tempfile.TemporaryDirectory() as folder:
+            entries=iter(['1','1','0','0'])
+            interface=self.initialized_ui(folder,reader=lambda *args:next(entries))
+            calls=[]
+            with patch('sys.stdout',new=io.StringIO()),patch.object(interface,'run',side_effect=lambda path,**kw:calls.append(path) or 0):
+                self.assertEqual(interface.menu(),0)
+            self.assertEqual(calls,['status','status'])
+
+    def test_enter_cancels_stop_and_secret_display(self):
+        for path in ('stop','users invitation show','credentials admin show'):
+            with self.subTest(path=path),tempfile.TemporaryDirectory() as folder:
+                interface=self.initialized_ui(folder,reader=lambda *args:'')
+                with patch('sys.stdout',new=io.StringIO()),patch.object(interface,'run') as run:
+                    self.assertEqual(interface.execute(ui_actions.Action(path,'Fictional action')),0)
+                run.assert_not_called()
+
+    def test_invalid_menu_number_is_retried_without_running_anything(self):
+        entries=iter(['99','invalid','0'])
+        with tempfile.TemporaryDirectory() as folder:
+            interface=ui.UI(directory=Path(folder)/'target',draft=Path(folder)/'draft.json',reader=lambda *args:next(entries))
+            with patch('sys.stdout',new=io.StringIO()),patch.object(interface,'run') as run:
+                self.assertEqual(interface.choose('Test',[('1','Read','')]),'0')
+            run.assert_not_called()
+
+    def test_existing_stack_skips_native_settings_and_filters_nested_menus(self):
+        import state_store
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);root.chmod(0o700)
+            state_store.write_json(root/'installation.json',{'domain':'example.org','backend':'existing-compose'})
+            with patch('configuration.load',side_effect=AssertionError('native configuration read')):
+                interface=ui.UI(directory=root,draft=root/'draft.json')
+            for group in ui_actions.MENUS:
+                for item in interface.available_actions(group):
+                    if not item.path.startswith('@'):
+                        self.assertIn(ui.cli_commands.BY_PATH[item.path].backend,ui.cli_commands.EXISTING_BACKENDS)
+            self.assertEqual(interface.available_actions('users'),[])
+            self.assertFalse(interface.supported('storage database connect'))
+            self.assertTrue(interface.supported('features enable'))
+
+    def test_ui_preserves_backend_failure_and_offers_selected_server_status(self):
+        with tempfile.TemporaryDirectory() as folder:
+            interface=self.initialized_ui(folder,reader=lambda *args:'да')
+            with patch('sys.stdout',new=io.StringIO()) as output,patch.object(interface,'run',return_value=130):
+                self.assertEqual(interface.execute(ui_actions.Action('start','Запустить сервер')),130)
+            self.assertIn('Операция прервана',output.getvalue())
+            self.assertIn(str(interface.root),output.getvalue())
+
+    def test_settings_preview_cancel_keeps_active_configuration(self):
+        import configuration
+        with tempfile.TemporaryDirectory() as folder:
+            entries=iter(['2','fictional@example.org','a','нет'])
+            interface=self.initialized_ui(folder,reader=lambda *args:next(entries))
+            before=configuration.load(interface.root,True)
+            with patch('sys.stdout',new=io.StringIO()),patch.object(configuration,'apply_settings') as apply:
+                interface.settings_menu()
+            apply.assert_not_called()
+            self.assertEqual(configuration.load(interface.root,True),before)
+            self.assertEqual(json.loads(interface.draft.read_text())['values']['ACME_EMAIL'],'fictional@example.org')
+
+    def test_cancelled_restore_does_not_switch_selected_installation(self):
+        with tempfile.TemporaryDirectory() as folder:
+            target=Path(folder)/'new target'
+            entries=iter([str(target),'/root/fictional.tar.gz','a'*64,'8.8.8.8','нет'])
+            interface=self.initialized_ui(folder,reader=lambda *args:next(entries))
+            previous=interface.root
+            with patch('sys.stdout',new=io.StringIO()),patch.object(interface,'run') as run:
+                self.assertEqual(interface.execute(ui_actions.Action('backup restore','Restore')),0)
+            run.assert_not_called()
+            self.assertEqual(interface.root,previous)
+            self.assertFalse(target.exists())
+
+    def test_new_installation_offers_restore_without_existing_installation(self):
+        with tempfile.TemporaryDirectory() as folder:
+            entries=iter(['2','0','0'])
+            interface=ui.UI(directory=Path(folder)/'target',draft=Path(folder)/'draft.json',reader=lambda *args:next(entries))
+            with patch('sys.stdout',new=io.StringIO()) as output,patch.object(interface,'run') as run:
+                self.assertEqual(interface.welcome(),0)
+            run.assert_not_called()
+            self.assertIn('Скачать и проверить копию',output.getvalue())
+            self.assertNotIn('Активировать восстановленный сервер',output.getvalue())
+
+    def test_empty_final_review_does_not_apply_installation(self):
+        entries=iter(['','сохранить и выйти'])
+        with tempfile.TemporaryDirectory() as folder:
+            interface=ui.UI(directory=Path(folder)/'target',draft=Path(folder)/'draft.json',reader=lambda *args:next(entries))
+            interface.model=schema.validate({'DOMAIN':'example.org'})
+            with patch('sys.stdout',new=io.StringIO()),self.assertRaises(ui.SaveExit),patch.object(interface,'run') as run:
+                interface.setup_step(6)
+            run.assert_not_called()
+
+    def test_completion_does_not_print_invitation_secret(self):
+        with tempfile.TemporaryDirectory() as folder:
+            interface=self.initialized_ui(folder)
+            import registration
+            with patch('sys.stdout',new=io.StringIO()) as output,patch.object(registration,'manage',return_value={'state':'valid','expires_at':'2030-01-01','token':'FICTIONAL_HIDDEN_TOKEN'}):
+                interface.finish()
+            self.assertNotIn('FICTIONAL_HIDDEN_TOKEN',output.getvalue())
+            self.assertIn('Показать код приглашения',output.getvalue())
+
     def initialized_ui(self,folder,step=7,reader=None):
         import configuration,state_store
         root=Path(folder)/'target';root.mkdir(mode=0o700)
@@ -102,6 +216,61 @@ class UITests(unittest.TestCase):
     def test_non_tty_does_not_wait(self):
         result=subprocess.run([sys.executable,str(Path(ui.__file__))],input='',capture_output=True,text=True)
         self.assertEqual(result.returncode,2);self.assertIn('ssh -t',result.stderr)
+
+    def test_real_rich_pty_menu_resize_and_cancel_do_not_stop_server(self):
+        import terminal_views
+        if terminal_views.Console is None:self.skipTest('Rich is optional')
+        with tempfile.TemporaryDirectory() as folder:
+            script=Path(folder)/'menu.py'
+            script.write_text('''import sys
+from pathlib import Path
+sys.path.insert(0,sys.argv[1])
+import terminal_ui,configuration,state_store
+root=Path(sys.argv[2]);root.mkdir(mode=0o700)
+state_store.write_json(root/'installation.json',{'domain':'example.org','databases_initialized':True,'config_format_version':2,'mas_issuer':'https://mas.example.org/'})
+configuration.write_model(root,{'DOMAIN':'example.org'})
+def run(args):
+    print('FICTIONAL BACKEND:'+ ' '.join(args[4:]),flush=True)
+    return 0
+interface=terminal_ui.UI(root,draft=root/'draft.json',runner=run)
+interface.model['GOOGLE_CLIENT_SECRET']='FICTIONAL_UNSHOWN_SECRET'
+raise SystemExit(interface.menu())
+''')
+            master,slave=pty.openpty()
+            import fcntl,struct,termios
+            fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack('HHHH',24,80,0,0))
+            environment={key:value for key,value in os.environ.items() if key!='NO_COLOR'}
+            environment['TERM']='xterm-256color'
+            child=subprocess.Popen([sys.executable,str(script),str(Path(ui.__file__).parent),str(Path(folder)/'target')],
+                stdin=slave,stdout=slave,stderr=slave,start_new_session=True,env=environment)
+            os.close(slave);transcript=b'';pending=b''
+            def answer(marker,value):
+                nonlocal transcript,pending
+                deadline=time.monotonic()+8
+                while marker.encode() not in pending:
+                    if time.monotonic()>deadline:raise AssertionError(transcript.decode(errors='replace'))
+                    if select.select([master],[],[],.1)[0]:
+                        try:block=os.read(master,65536)
+                        except OSError:raise AssertionError(transcript.decode(errors='replace')) from None
+                        transcript+=block;pending+=block
+                pending=pending.split(marker.encode(),1)[1]
+                os.write(master,(value+'\n').encode())
+            try:
+                answer('Номер [0]:','1')
+                fcntl.ioctl(master,termios.TIOCSWINSZ,struct.pack('HHHH',12,24,0,0))
+                answer('Номер [0]:','5')
+                answer('Выполнить операцию? да/нет [нет]:','')
+                answer('Номер [0]:','0')
+                answer('Номер [0]:','0')
+                child.wait(timeout=8)
+                self.assertEqual(child.returncode,0,transcript.decode(errors='replace'))
+                self.assertIn(b'\x1b[',transcript)
+                self.assertIn(b'FICTIONAL BACKEND:status',transcript)
+                self.assertNotIn(b'FICTIONAL BACKEND:stop',transcript)
+                self.assertNotIn(b'FICTIONAL_UNSHOWN_SECRET',transcript)
+            finally:
+                if child.poll() is None:child.kill();child.wait()
+                os.close(master)
 
     def test_real_small_dumb_pty_local_wizard_with_back_and_hidden_input(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -239,6 +408,7 @@ while True:time.sleep(.05)
                     if time.monotonic()>deadline:raise AssertionError(output.decode(errors='replace'))
                     if select.select([master],[],[],.1)[0]:output+=os.read(master,65536)
             try:
+                until('С чего начать?');os.write(master,b'1\n')
                 until('DOMAIN: ');os.write(master,b'example.org\n');until('абсолютный путь')
                 os.killpg(child.pid,signal.SIGHUP);child.wait(timeout=8)
                 self.assertEqual(child.returncode,130)

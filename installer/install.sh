@@ -163,11 +163,11 @@ host_dependencies() {
   if command -v curl >/dev/null && command -v openssl >/dev/null &&
      command -v python3 >/dev/null && command -v ip >/dev/null &&
      command -v swapon >/dev/null && command -v dig >/dev/null && [[ -s /etc/ssl/certs/ca-certificates.crt ]] &&
-     python3 -c 'import yaml' >/dev/null 2>&1; then
+     python3 -c 'import yaml, rich' >/dev/null 2>&1; then
     return
   fi
   apt-get update -qq
-  apt-get install -y --no-install-recommends ca-certificates curl openssl python3 python3-yaml util-linux iproute2 dnsutils
+  apt-get install -y --no-install-recommends ca-certificates curl openssl python3 python3-yaml python3-rich util-linux iproute2 dnsutils
 }
 
 docker_dependencies() {

@@ -753,52 +753,19 @@ class Installation:
     def ui(self):
         if not sys.stdin.isatty() or not sys.stdout.isatty():
             raise Error("SSH-меню требует TTY: sudo misbot ui.")
-        actions = {"1": self.status, "2": self.check, "3": self.start, "4": self.stop,
-                   "5": self.backup, "6": self.verify, "7": self.recover,
-                   "8": self.storage_status, "9": self.recover_media}
-        while True:
-            print("\nMisbot: существующий стек " + self.state["domain"])
-            print("1 состояние, 2 проверка, 3 запуск, 4 остановка, 5 копия, 6 проверка копии, 7 recovery копии")
-            print("8 хранилища, 9 recovery S3, 10 проверка S3, 11 подключить S3 медиа, 12 копия в S3, 0 выход")
-            print('13 компоненты, 14 включить компоненты, 15 федерация, 16 сайт, 17 расписание копий, 18 обновить Misbot')
-            choice = input("> ").strip()
-            if choice == "0":
-                return
-            if choice in ('13','14','15','16','17','18'):
-                words={ '13':['features','status'], '16':['homepage','show'], '17':['backup','schedule','status'] }.get(choice)
-                if choice=='14':words=['features','enable','--config',input('Путь к проверенному root-only feature plan: ').strip()]
-                if choice=='18':words=['update','apply','--source',input('Доверенный распакованный public source каталог: ').strip()]
-                if choice=='15':
-                    print('1 серверы, 2 заявки, 3 peers, 4 операции, 5 добавить, 6 удалить, 7 согласовать сервер')
-                    selection=input('> ').strip()
-                    action={'1':'servers','2':'requests','3':'peers','4':'operations','5':'add','6':'remove','7':'invite'}.get(selection)
-                    if not action:continue
-                    words=['federation',action]
-                    if selection in ('5','6','7'):words+=['--server',input('Matrix server_name: ').strip()]
-                if choice in ('14','18') and input('Применить подготовленный план? Введите да: ').strip()!='да':continue
-                subprocess.run(['/usr/local/bin/misbot','--directory',str(self.root),*words],check=False)
-                continue
-            if choice in ('10', '11', '12'):
-                purpose = 'backup' if choice == '12' else 'media'
-                if choice == '10':
-                    purpose = input('Назначение media/backup [media]: ').strip() or 'media'
-                    if purpose not in ('media', 'backup'):
-                        continue
-                config = Path(input('Путь к root-only S3 env (Enter — сохранённый профиль): ').strip()
-                              or str(self.control / 's3' / (purpose + '.env')))
-                if choice != '10' and input('Возможна остановка служб. Продолжить? Введите да: ').strip() != 'да':
-                    continue
-                with self.lock():
-                    if choice == '10': self.s3_check(config, purpose)
-                    elif choice == '11': self.connect_media(config)
-                    else: self.backup(config, self.model['backup_key'])
-                continue
-            if choice not in actions:
-                continue
-            if choice in ("4", "5") and input("Будет остановка служб. Продолжить? Введите да: ").strip() != "да":
-                continue
-            with self.lock():
-                actions[choice]()
+        import terminal_ui
+        previous={number:signal.getsignal(number) for number in (signal.SIGINT,signal.SIGTERM,signal.SIGHUP)}
+        def interrupted_ui(signum,frame):
+            if signum==signal.SIGINT:raise KeyboardInterrupt()
+            raise terminal_ui.state_store.OperationInterrupted('SSH/UI interrupted')
+        try:
+            for number in previous:signal.signal(number,interrupted_ui)
+            return terminal_ui.UI(directory=self.root,source=self.root).menu()
+        except (EOFError,terminal_ui.state_store.OperationInterrupted):
+            print('Ввод прерван. Повторите sudo misbot ui; проверьте misbot status.')
+            return 130
+        finally:
+            for number,handler in previous.items():signal.signal(number,handler)
 
     @contextlib.contextmanager
     def lock(self):
@@ -883,8 +850,7 @@ def main():
         if args.action == 's3-cleanup' and not args.catalog:
             raise Error('Нужен --catalog собственного probe.')
         if args.action == "ui":
-            installation.ui()
-            return 0
+            return installation.ui() or 0
         if args.action in ('status', 'storage-status', 'check'):
             return actions[args.action]() or 0
         with installation.lock():

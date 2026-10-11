@@ -161,6 +161,30 @@ os._exit(23)
 
 
 class ReleaseDataMigrationTests(unittest.TestCase):
+    def test_ui_release_updates_previous_versions_without_changing_private_data(self):
+        added={'terminal_views.py','ui_actions.py','third-party-licenses.md'}
+        entries=update.validate_manifest(self.source)[0]
+        (self.root/'secrets').mkdir(mode=0o700)
+        state_store.write_text(self.root/'secrets/fictional.key','FICTIONAL_KEEP_KEY')
+        private_before={name:(self.root/name).read_bytes() for name in ('settings.env','secrets/fictional.key')}
+        for previous in ('1.0.0','1.0.1','1.1.0','1.1.1'):
+            with self.subTest(previous=previous):
+                info=update.release(self.root);info['version']=previous
+                (self.root/'release.json').write_text(json.dumps(info))
+                for name in added:(self.root/name).unlink(missing_ok=True)
+                (self.root/'SHA256SUMS').write_text(''.join(
+                    hashlib.sha256((self.root/name).read_bytes()).hexdigest()+'  '+name+'\n'
+                    for name in entries if name not in added))
+                with patch.object(update,'update_resource_check'),patch.object(update,'verified_backup'), \
+                        patch.object(update,'run_up',side_effect=self.start),patch.object(update,'refresh_command'):
+                    update.perform_update(self.source,self.root,'apply')
+                    update.perform_update(self.source,self.root,'apply')
+                self.assertEqual(update.release(self.root)['version'],'1.2.0')
+                self.assertEqual(migrations.check(self.root),1)
+                for name in added:self.assertEqual((self.root/name).read_bytes(),entries[name].read_bytes())
+                self.assertEqual(private_before,{name:(self.root/name).read_bytes() for name in private_before})
+                self.assertEqual(json.loads((self.root/'installation.json').read_text())['domain'],'fictional.example')
+
     @classmethod
     def setUpClass(cls):
         cls.temp = tempfile.TemporaryDirectory()
@@ -298,7 +322,7 @@ class ReleaseDataMigrationTests(unittest.TestCase):
                 patch.object(update, 'run_up', side_effect=self.start), patch.object(update, 'refresh_command'):
             update.perform_update(self.source, self.root, 'apply')
             update.perform_update(self.source, self.root, 'apply')
-        self.assertEqual(update.release(self.root)['version'], '1.1.1')
+        self.assertEqual(update.release(self.root)['version'], update.release(self.source)['version'])
         self.assertEqual(migrations.check(self.root), 1)
         with sqlite3.connect(self.root / 'data/admin-panel/panel.sqlite') as db:
             self.assertEqual(db.execute('SELECT value FROM settings WHERE key="welcome"').fetchone()[0],
