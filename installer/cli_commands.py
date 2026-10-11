@@ -1,13 +1,15 @@
 """One command vocabulary shared by CLI, help, documentation and future UI."""
 
 from dataclasses import dataclass
+from collections.abc import Mapping
+from pathlib import Path
 
 
 @dataclass(frozen=True)
 class Command:
     path: str
     backend: str
-    arguments: tuple = ()
+    arguments: tuple[str, ...] = ()
     purpose: str = ''
     stops: str = 'Нет.'
     data: str = 'Данные и ключи сохраняются.'
@@ -567,7 +569,7 @@ TOPICS = {
 }
 
 
-def backend_argv(command, values, root):
+def backend_argv(command: Command, values: Mapping[str, str], root: Path) -> list[str]:
     action = command.backend
     args = [values[name] for name in command.arguments]
     if action == 'init':
@@ -579,7 +581,7 @@ def backend_argv(command, values, root):
     return [action, *args, str(root)]
 
 
-def recovery_command(action, root):
+def recovery_command(action: str, root: Path) -> str:
     import shlex
 
     return (

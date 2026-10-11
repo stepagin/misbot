@@ -18,6 +18,26 @@ import preflight
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_typed_validation_keeps_public_failure_shape_and_hides_values(self):
+        for value in (42, 'FICTIONAL_SECRET\nunsafe'):
+            with self.subTest(value_type=type(value).__name__):
+                with self.assertRaises(schema.InvalidConfiguration) as failure:
+                    schema.field_value('GOOGLE_CLIENT_SECRET', value, 'settings/auth.env')
+                record = failure.exception.result()
+                self.assertEqual(
+                    record,
+                    {
+                        'stage': 'configuration',
+                        'status': 'failed',
+                        'code': 'syntax',
+                        'file': 'settings/auth.env',
+                        'field': 'GOOGLE_CLIENT_SECRET',
+                        'explanation': str(failure.exception),
+                        'next_actions': ['sudo misbot config validate'],
+                    },
+                )
+                self.assertNotIn('FICTIONAL_SECRET', json.dumps(record))
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name) / 'installation'

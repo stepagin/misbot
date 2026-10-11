@@ -73,6 +73,7 @@ names = [
     'install.sh',
     'generate.py',
     'lifecycle.py',
+    'operation_models.py',
     'database.py',
     'postgres_setup.py',
     'pg_credentials.py',

@@ -1,29 +1,39 @@
 """One field model for files, CLI, wizard and runtime generation."""
 
 from dataclasses import dataclass
+from collections.abc import Mapping
+from typing import NoReturn, cast
 import ipaddress
 from pathlib import Path
 import re
 from urllib.parse import urlsplit, urlunsplit, quote
 import s3_config
+from operation_models import ConfigurationFailure, OperationResult, OperationStage, OperationStatus
 
 
 class InvalidConfiguration(RuntimeError):
-    def __init__(self, file, field, code, message):
+    def __init__(self, file: str | Path, field: str, code: str, message: str) -> None:
         self.file = str(file)
         self.field = field
         self.code = code
         super().__init__(f'{self.file}: {field}: {message}. Повтор: sudo misbot config validate')
 
-    def result(self):
+    def result(self) -> ConfigurationFailure:
+        result = OperationResult(
+            code=self.code,
+            stage=OperationStage.CONFIGURATION,
+            message=str(self),
+            next_actions=('sudo misbot config validate',),
+            status=OperationStatus.FAILED,
+        )
         return {
-            'stage': 'configuration',
-            'status': 'failed',
-            'code': self.code,
+            'stage': result.stage.value,
+            'status': result.status.value,
+            'code': result.code,
             'file': self.file,
             'field': self.field,
-            'explanation': str(self),
-            'next_actions': ['sudo misbot config validate'],
+            'explanation': result.message,
+            'next_actions': list(result.next_actions),
         }
 
 
@@ -39,7 +49,7 @@ class Field:
     impact: str = 'Применяется при generate/start; работающий сервер требует копии.'
 
 
-FIELDS = {
+FIELDS: dict[str, Field] = {
     'HOMEPAGE_MODE': Field(
         'site',
         'Главная: landing, element или external',
@@ -232,7 +242,7 @@ for key, label, secret, example in (
         example=example,
         impact='Назначение/credentials меняются отдельными storage/credentials операциями.',
     )
-BACKUP_FIELDS = {
+BACKUP_FIELDS: dict[str, Field] = {
     key: Field(
         'backup',
         value.label,
@@ -262,7 +272,7 @@ BACKUP_FIELDS.update(
 )
 
 
-def domain(value):
+def domain(value: str) -> str:
     try:
         value = value.strip().lower().encode('idna').decode('ascii')
     except (UnicodeError, ValueError):
@@ -282,7 +292,9 @@ def domain(value):
     raise ValueError('домен, а не IP')
 
 
-def field_value(key, value, file='форма', schema=FIELDS):
+def field_value(
+    key: str, value: object, file: str | Path = 'форма', schema: Mapping[str, Field] = FIELDS
+) -> str:
     if key not in schema:
         raise InvalidConfiguration(
             file,
@@ -414,11 +426,11 @@ def field_value(key, value, file='форма', schema=FIELDS):
     return value
 
 
-def mas_host(values):
+def mas_host(values: Mapping[str, str]) -> str:
     return values.get('MAS_DOMAIN') or 'mas.' + values['DOMAIN']
 
 
-def public_hosts(values):
+def public_hosts(values: Mapping[str, str]) -> list[str]:
     domain = values['DOMAIN']
     return list(
         dict.fromkeys(
@@ -432,9 +444,14 @@ def public_hosts(values):
     )
 
 
-def validate(values, origins=None, complete=True, preview=False):
+def validate(
+    values: Mapping[str, str],
+    origins: Mapping[str, str] | None = None,
+    complete: bool = True,
+    preview: bool = False,
+) -> dict[str, str]:
     origins = origins or {}
-    normalized = {}
+    normalized: dict[str, str] = {}
     for key, value in values.items():
         if preview and key == 'PUBLIC_IP' and value:
             try:
@@ -451,7 +468,7 @@ def validate(values, origins=None, complete=True, preview=False):
     model = {key: item.default for key, item in FIELDS.items()}
     model.update(normalized)
 
-    def error(key, message, code='field_dependency'):
+    def error(key: str, message: str, code: str = 'field_dependency') -> NoReturn:
         raise InvalidConfiguration(origins.get(key, 'settings.env'), key, code, message)
 
     if not model['DOMAIN']:
@@ -467,7 +484,7 @@ def validate(values, origins=None, complete=True, preview=False):
         if not model['HOMEPAGE_URL']:
             error('HOMEPAGE_URL', 'обязательно при external')
         target = urlsplit(model['HOMEPAGE_URL'])
-        host = target.hostname.lower().rstrip('.')
+        host = cast(str, target.hostname).lower().rstrip('.')
         managed = public_hosts(model)
         if model['PUBLIC_IP']:
             managed.append(model['PUBLIC_IP'])
@@ -508,7 +525,7 @@ def validate(values, origins=None, complete=True, preview=False):
     return model
 
 
-def validate_backup(values, file='settings/backup.env'):
+def validate_backup(values: Mapping[str, str], file: str = 'settings/backup.env') -> dict[str, str]:
     model = {key: item.default for key, item in BACKUP_FIELDS.items()}
     model.update(
         {key: field_value(key, value, file, BACKUP_FIELDS) for key, value in values.items()}

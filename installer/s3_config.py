@@ -1,5 +1,6 @@
 """Literal private S3 profiles and validation shared by all S3 consumers."""
 
+from collections.abc import Mapping
 import os
 from pathlib import Path
 import re
@@ -17,12 +18,12 @@ FIELDS = {
 
 
 class ConfigError(RuntimeError):
-    def __init__(self, code, message):
+    def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
 
 
-def validate(values):
+def validate(values: Mapping[str, str]) -> dict[str, str]:
     if set(values) - FIELDS:
         raise ConfigError(
             'unknown_parameters',
@@ -99,7 +100,7 @@ def validate(values):
     return dict(values, S3_ENDPOINT_URL=endpoint)
 
 
-def read_profile(path, purpose='media'):
+def read_profile(path: str | Path, purpose: str = 'media') -> dict[str, str]:
     path = Path(path)
     if path.name == 'backup.env' and path.parent.name == 'settings':
         if purpose != 'backup':

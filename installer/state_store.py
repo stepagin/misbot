@@ -15,6 +15,8 @@ import stat
 import subprocess
 import tempfile
 import cli_commands
+from typing import cast
+from operation_models import BackupPauseRecord
 
 
 class OperationInterrupted(Exception):
@@ -445,7 +447,7 @@ def assert_database_password_allowed(root):
         )
 
 
-def backup_pause_record(root):
+def backup_pause_record(root: str | Path) -> BackupPauseRecord | None:
     journal = Path(root) / 'backup-writers.json'
     if not journal.exists() and not journal.is_symlink():
         return None
@@ -479,7 +481,7 @@ def backup_pause_record(root):
         raise RuntimeError(
             'Invalid backup recovery journal; retain files and inspect the installation privately'
         )
-    return record
+    return cast(BackupPauseRecord, record)
 
 
 def assert_backup_allowed(root):
