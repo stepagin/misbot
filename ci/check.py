@@ -86,14 +86,89 @@ def verify_archive(path: Path) -> str:
     return checksum
 
 
+def verify_compact_archive(path: Path) -> str:
+    checksum = digest(path)
+    if path.with_name(path.name + '.sha256').read_text(encoding='ascii') != (
+        checksum + '  ' + path.name + '\n'
+    ):
+        raise CheckError('Compact archive checksum does not match')
+    with tarfile.open(path, 'r:gz') as archive:
+        members = archive.getmembers()
+        actual = {member.name: member for member in members}
+        if len(actual) != len(members) or not all(member.isfile() for member in members):
+            raise CheckError('Compact archive contains duplicate or non-regular files')
+        stream = archive.extractfile('matrix-installer/SHA256SUMS')
+        if stream is None:
+            raise CheckError('Compact archive lacks checksum manifest')
+        with stream:
+            manifest = stream.read().decode('utf-8')
+        entries = [line.split('  ', 1) for line in manifest.splitlines()]
+        names = ['matrix-installer/' + name for _, name in entries]
+        if len(names) != len(set(names)) or set(actual) != set(names) | {
+            'matrix-installer/SHA256SUMS'
+        }:
+            raise CheckError('Compact archive has missing or unexpected files')
+        for expected, name in entries:
+            relative = Path(name)
+            if relative.is_absolute() or '..' in relative.parts:
+                raise CheckError('Compact archive has unsafe paths')
+            stream = archive.extractfile('matrix-installer/' + name)
+            if stream is None:
+                raise CheckError('Compact archive contains unreadable files')
+            with stream:
+                if stream_digest(stream) != expected:
+                    raise CheckError('Compact archive does not match its manifest')
+        stream = archive.extractfile('matrix-installer/.misbot/SHA256SUMS')
+        if stream is None:
+            raise CheckError('Compact archive lacks runtime manifest')
+        with stream:
+            if stream.read() != (ROOT / 'installer/SHA256SUMS').read_bytes():
+                raise CheckError('Compact runtime manifest does not match the source')
+        source_entries = [
+            line.split('  ', 1) for line in (ROOT / 'installer/SHA256SUMS').read_text().splitlines()
+        ]
+        expected_names = {'matrix-installer/.misbot/' + name for _, name in source_entries} | {
+            'matrix-installer/.misbot/SHA256SUMS',
+            'matrix-installer/misbot.py',
+            'matrix-installer/README.md',
+            'matrix-installer/SHA256SUMS',
+        }
+        if set(actual) != expected_names:
+            raise CheckError('Compact archive differs from the runtime allowlist')
+        for expected, name in source_entries:
+            stream = archive.extractfile('matrix-installer/.misbot/' + name)
+            if stream is None:
+                raise CheckError('Compact runtime file is missing')
+            with stream:
+                if stream_digest(stream) != expected:
+                    raise CheckError('Compact runtime file differs from source')
+        stream = archive.extractfile('matrix-installer/misbot.py')
+        if stream is None:
+            raise CheckError('Compact launcher is missing')
+        with stream:
+            if stream.read() != (ROOT / 'installer/launch.py').read_bytes():
+                raise CheckError('Compact launcher differs from source')
+        visible = {Path(name).parts[1] for name in actual if len(Path(name).parts) > 1}
+        if visible != {'.misbot', 'misbot.py', 'README.md', 'SHA256SUMS'}:
+            raise CheckError('Compact bundle exposes unexpected top-level files')
+    return checksum
+
+
 def build_checks() -> None:
     run('build archive and checksums', [sys.executable, 'installer/build.py'])
     first = verify_archive(ROOT / 'dist/matrix-installer.tar.gz')
+    import json
+
+    version = json.loads((ROOT / 'installer/release.json').read_text())['version']
+    compact_name = 'misbot-setup-' + version + '.tar.gz'
+    compact_first = verify_compact_archive(ROOT / 'dist' / compact_name)
     with tempfile.TemporaryDirectory(prefix='misbot-rebuild-') as folder:
         second = Path(folder) / 'matrix-installer.tar.gz'
         run('reproducible build', [sys.executable, 'installer/build.py', '--output', str(second)])
         if verify_archive(second) != first:
             raise CheckError('Repeated builds produced different archives')
+        if verify_compact_archive(second.with_name(compact_name)) != compact_first:
+            raise CheckError('Repeated compact builds produced different archives')
     run('source manifest', [sys.executable, 'installer/build.py', '--check'])
 
 

@@ -175,9 +175,38 @@ class CheckTests(unittest.TestCase):
         with (
             patch.object(check, 'run'),
             patch.object(check, 'verify_archive', side_effect=['a' * 64, 'b' * 64]),
+            patch.object(check, 'verify_compact_archive', return_value='c' * 64),
         ):
             with self.assertRaisesRegex(check.CheckError, 'different archives'):
                 check.build_checks()
+
+    def test_compact_archive_checks_inner_source_and_launcher_not_only_its_own_hashes(self):
+        launcher = b'Fictional compact launcher\n'
+        (self.root / 'installer/launch.py').write_bytes(launcher)
+        compact = {'.misbot/' + name: data for name, data in self.payloads.items()}
+        compact.update({'misbot.py': launcher, 'README.md': b'Compact public guide\n'})
+
+        def package(files):
+            files = dict(files)
+            files['SHA256SUMS'] = ''.join(
+                hashlib.sha256(data).hexdigest() + '  ' + name + '\n'
+                for name, data in files.items()
+            ).encode()
+            self.write_archive(files)
+
+        with patch.object(check, 'ROOT', self.root):
+            package(compact)
+            self.assertEqual(check.verify_compact_archive(self.archive), check.digest(self.archive))
+            for change in (
+                {'.misbot/README.md': b'Tampered runtime'},
+                {'misbot.py': b'Tampered launcher'},
+                {'.misbot/private.txt': b'Unapproved source'},
+                {'.misbot/SHA256SUMS': b'Altered runtime manifest'},
+            ):
+                with self.subTest(change=list(change)):
+                    package({**compact, **change})
+                    with self.assertRaises(check.CheckError):
+                        check.verify_compact_archive(self.archive)
 
     def test_ci_uses_shared_checked_pipeline_for_pull_requests_and_releases(self):
         for name in ('quality', 'release'):

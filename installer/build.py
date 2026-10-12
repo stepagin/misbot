@@ -5,6 +5,7 @@ import argparse
 import gzip
 import hashlib
 import io
+import json
 from pathlib import Path
 import tarfile
 
@@ -72,6 +73,7 @@ names = [
     'registration_api.py',
     'configuration.md',
     'misbot.py',
+    'launch.py',
     'cli_commands.py',
     'command_wrapper.py',
     's3_config.py',
@@ -177,19 +179,49 @@ if args.check:
     raise SystemExit(0)
 (root / 'SHA256SUMS').write_bytes(manifest)
 payloads['SHA256SUMS'] = manifest
-args.output.parent.mkdir(parents=True, exist_ok=True)
-with args.output.open('wb') as output:
-    with gzip.GzipFile(fileobj=output, mode='wb', filename='', mtime=0) as compressed:
-        with tarfile.open(fileobj=compressed, mode='w') as archive:
-            for name, data in payloads.items():
-                member = tarfile.TarInfo('matrix-installer/' + name)
-                member.size = len(data)
-                member.mode = 0o755 if name == 'install.sh' else 0o644
-                member.mtime = 0
-                archive.addfile(member, io.BytesIO(data))
-print(args.output)
-digest = hashlib.sha256(args.output.read_bytes()).hexdigest()
-args.output.with_name(args.output.name + '.sha256').write_text(
-    digest + '  ' + args.output.name + '\n', encoding='ascii'
-)
-print('SHA256 ' + digest)
+
+
+def write_archive(path, files):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open('wb') as output:
+        with gzip.GzipFile(fileobj=output, mode='wb', filename='', mtime=0) as compressed:
+            with tarfile.open(fileobj=compressed, mode='w') as archive:
+                for name, data in files.items():
+                    member = tarfile.TarInfo('matrix-installer/' + name)
+                    member.size = len(data)
+                    member.mode = 0o755 if Path(name).name == 'install.sh' else 0o644
+                    member.mtime = 0
+                    archive.addfile(member, io.BytesIO(data))
+    print(path)
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    path.with_name(path.name + '.sha256').write_text(
+        digest + '  ' + path.name + '\n', encoding='ascii'
+    )
+    print('SHA256 ' + digest)
+
+
+# Preserve the established release asset/layout for existing update clients.
+write_archive(args.output, payloads)
+compact = {'.misbot/' + name: data for name, data in payloads.items()}
+compact['misbot.py'] = (root / 'launch.py').read_bytes()
+product_version = json.loads(payloads['release.json'])['version']
+compact['README.md'] = (
+    '# Misbot ' + product_version + '\n\n'
+    'Запуск: `sudo python3 misbot.py ui`. Служебные исходники и документация '
+    'находятся в `.misbot/`. Установка по умолчанию: `/opt/matrix-stack`.\n\n'
+    'Черновик хранится приватно в `~/.local/state/misbot/wizard/`, отдельно '
+    'от комплекта и данных сервера. Команды просмотра и сброса: '
+    '`sudo python3 misbot.py config draft show` и '
+    '`sudo python3 misbot.py config draft reset --confirm discard-draft`. '
+    'Параметр `--directory /абсолютный/путь` выбирает другой черновик.\n\n'
+    'Проверка комплекта: `sha256sum -c SHA256SUMS`. '
+    'Лицензия Misbot MIT: `.misbot/LICENSE`; '
+    'сторонние уведомления: `.misbot/third-party-licenses.md`.\n\n'
+    'Обновление существующего сервера: используйте совместимый '
+    '`matrix-installer.tar.gz` либо укажите `.misbot/` этого комплекта '
+    'как `--source`. Ключи и данные находятся в каталоге установки.\n'
+).encode()
+compact['SHA256SUMS'] = ''.join(
+    hashlib.sha256(data).hexdigest() + '  ' + name + '\n' for name, data in compact.items()
+).encode()
+write_archive(args.output.with_name('misbot-setup-' + product_version + '.tar.gz'), compact)
