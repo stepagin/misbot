@@ -207,7 +207,7 @@ class UITests(unittest.TestCase):
         interface.save()
         return interface
 
-    def test_initialized_draft_resumes_check_without_reapplying(self):
+    def test_initialized_draft_continues_start_without_reapplying(self):
         import configuration
 
         for step in (0, 6, 7, 8, 9):
@@ -228,7 +228,9 @@ class UITests(unittest.TestCase):
                     ),
                 ):
                     self.assertEqual(interface.wizard(), 0)
-                self.assertEqual(calls, [] if step == 9 else ['check'])
+                self.assertEqual(
+                    calls, [] if step == 9 else ['check'] if step == 8 else ['start', 'check']
+                )
                 finish.assert_called_once()
                 self.assertEqual(interface.model['DOMAIN'], 'example.org')
                 self.assertEqual(
@@ -248,7 +250,7 @@ class UITests(unittest.TestCase):
             self.assertIn('sudo misbot start', output.getvalue())
             self.assertNotIn('config validate/status', output.getvalue())
 
-    def test_initialization_completed_during_failed_start_resumes_check(self):
+    def test_initialization_completed_during_failed_start_retries_start_before_check(self):
         import configuration, state_store
 
         with tempfile.TemporaryDirectory() as folder:
@@ -281,7 +283,7 @@ class UITests(unittest.TestCase):
                             'mas_issuer': 'https://mas.example.org/',
                         },
                     )
-                    return 1
+                    return 1 if calls.count('start') == 1 else 0
                 return 0
 
             with (
@@ -290,7 +292,7 @@ class UITests(unittest.TestCase):
                 patch.object(interface, 'finish'),
             ):
                 self.assertEqual(interface.wizard(), 0)
-            self.assertEqual(calls, ['start', 'check'])
+            self.assertEqual(calls, ['start', 'start', 'check'])
 
     def test_back_at_completion_opens_menu_without_initial_form(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -313,10 +315,11 @@ class UITests(unittest.TestCase):
                 patch.object(
                     configuration, 'write_model', side_effect=AssertionError('must not write')
                 ),
-                patch.object(interface, 'run', side_effect=AssertionError('must not start')),
+                patch.object(interface, 'run', return_value=0) as run,
             ):
                 interface.setup_step(7)
             self.assertEqual(interface.model['DOMAIN'], 'example.org')
+            run.assert_called_once_with('start')
 
     def test_site_form_uses_common_schema_and_confirmation_preserves_on_cancel(self):
         import configuration, homepage, state_store
@@ -454,9 +457,10 @@ raise SystemExit(interface.menu())
             script.write_text("""import sys,json,os
 from pathlib import Path
 sys.path.insert(0,sys.argv[1])
-import terminal_ui,preflight,state_store,shutil
+import terminal_ui,preflight,state_store,shutil,socket
 shutil.which=lambda name:'/usr/bin/'+name
 for name in ('system_check','dns_check','caa_check','network_check'):setattr(preflight,name,lambda *a:None)
+preflight.resolve=lambda host,family,**kw:{'8.8.8.8'} if family==socket.AF_INET else set()
 def run(args):
     root=Path(sys.argv[2]);root.mkdir(mode=0o700,exist_ok=True)
     state_store.write_json(root/'installation.json',{'domain':'example.org','databases_initialized':False})
@@ -512,11 +516,10 @@ raise SystemExit(interface.wizard())
                     ('GOOGLE_CLIENT_ID:', 'FICTIONAL_ID'),
                     ('GOOGLE_CLIENT_SECRET:', 'FICTIONAL_HIDDEN_SECRET'),
                     ('Подключить TELEGRAM?', 'нет'),
-                    ('INVITATION_LIFETIME_SECONDS [604800]:', ''),
                     ('Настроить внешние копии', 'отложить'),
-                    ('применить. Назад', 'назад'),
+                    ('Команда или номер поля', 'назад'),
                     ('Настроить внешние копии', 'отложить'),
-                    ('применить. Назад', 'применить'),
+                    ('Команда или номер поля', 'применить'),
                 ]:
                     send_when(marker, value)
                 process.wait(timeout=10)
@@ -625,24 +628,26 @@ while True:time.sleep(.05)
                     if time.monotonic() > deadline:
                         raise AssertionError('child not ready')
                     time.sleep(0.02)
-                wait = child.wait
-                first = True
-
-                def interrupt_once(*args, **kwargs):
-                    nonlocal first
-                    if first:
-                        first = False
-                        raise KeyboardInterrupt()
-                    return wait(*args, **kwargs)
-
-                child.wait = interrupt_once
                 return child
+
+            import terminal_process
+
+            drain = terminal_process.read_output
+            first = True
+
+            def interrupt_once(child, emit):
+                nonlocal first
+                if first:
+                    first = False
+                    raise KeyboardInterrupt()
+                return drain(child, emit)
 
             interface = ui.UI(
                 directory=source / 'target', source=source, draft=source / 'draft.json'
             )
             with (
                 patch.object(ui.subprocess, 'Popen', side_effect=launch),
+                patch.object(terminal_process, 'read_output', side_effect=interrupt_once),
                 patch('sys.stdout', new=io.StringIO()),
             ):
                 self.assertEqual(interface.run('start'), 130)
@@ -652,6 +657,7 @@ while True:time.sleep(.05)
     def test_repeated_interruption_still_waits_for_backend_shutdown(self):
         class Child:
             def __init__(self):
+                self.stdout = None
                 self.interruptions = [KeyboardInterrupt(), ui.state_store.OperationInterrupted()]
                 self.stopped = False
                 self.signals = []
@@ -673,6 +679,7 @@ while True:time.sleep(.05)
             child = Child()
             with (
                 patch.object(ui.subprocess, 'Popen', return_value=child),
+                patch('terminal_process.read_output', side_effect=lambda child, emit: child.wait()),
                 patch('sys.stdout', new=io.StringIO()),
             ):
                 self.assertEqual(interface.run('start'), 130)

@@ -1,8 +1,9 @@
 """Task-oriented SSH interface using the existing CLI and private wizard drafts."""
 
 import argparse
+from contextlib import contextmanager
+from contextlib import nullcontext
 import getpass
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -66,10 +67,14 @@ class UI:
         self.runner = runner
         self.view = view or TerminalView()
         self.check_results = []
+        self.result_lines = []
+        self.result_total = 0
         self.explicit_draft = draft is not None
         self.draft = Path(draft) if self.explicit_draft else self.draft_path(self.root)
         self.model = {}
         self.backup = {}
+        self.admin_tag = 'admin-panel'
+        self.dns_verified = None
         self.confirmed_domains = set()
         self.step = 0
         if self.draft.exists():
@@ -78,6 +83,9 @@ class UI:
             saved = read_private_json(self.draft)
             self.model = saved['values']
             self.backup = saved.get('backup', {})
+            self.dns_verified = saved.get('dns_verified')
+            self.root = Path(saved['directory'])
+            self.admin_tag = saved.get('admin_tag', self.saved_admin_tag())
             self.confirmed_domains = set(saved.get('confirmed_domains', []))
             self.step = saved.get('step', 0)
             self.root = Path(saved['directory'])
@@ -89,13 +97,28 @@ class UI:
             from configuration import load
 
             self.model = load(self.root, complete=False)
+            self.admin_tag = self.saved_admin_tag()
+
+    def saved_admin_tag(self):
+        from configuration import read_private_json
+
+        identity = self.root / 'config/admin-panel-identity.json'
+        if identity.exists():
+            return read_private_json(identity)['user_id'].split(':', 1)[0].removeprefix('@')
+        return 'admin-panel'
 
     @staticmethod
     def draft_path(root):
+        import wizard_state
+
+        return wizard_state.draft_path(root)
+
+    def source_entrypoint(self):
+        outer = self.source.parent / 'misbot.py'
         return (
-            Path.home()
-            / '.local/state/misbot/wizard'
-            / (hashlib.sha256(str(root).encode()).hexdigest() + '.json')
+            outer
+            if self.source.name == '.misbot' and outer.is_file()
+            else self.source / 'misbot.py'
         )
 
     def ask(self, label, default='', secret=False):
@@ -117,6 +140,14 @@ class UI:
         if command is None:
             return False
         if command.installed and not self.installation():
+            return False
+        if path == 'admin bot set' and (
+            self.installation().get('federation_provisioned')
+            or any(
+                (self.root / 'data/referral-control' / name).exists()
+                for name in ('federation-session.json', 'managed-federation-user.json')
+            )
+        ):
             return False
         if self.adopted():
             return command.backend in cli_commands.EXISTING_BACKENDS
@@ -229,6 +260,8 @@ class UI:
                 'step': self.step,
                 'values': self.model,
                 'backup': self.backup,
+                'admin_tag': self.admin_tag,
+                'dns_verified': self.dns_verified,
                 'confirmed_domains': sorted(self.confirmed_domains),
             },
         )
@@ -247,9 +280,16 @@ class UI:
 
         self.model = load(self.root, complete=False)
         self.backup = backup_profile(self.root)
+        self.admin_tag = self.saved_admin_tag()
         self.view.message(
-            'Базы уже инициализированы. Первоначальные настройки повторно не применяются; продолжаем проверку существующей установки.'
+            'Базы уже созданы. Сохранённые настройки и ключи используются для продолжения запуска.'
         )
+
+    def field_label(self, key):
+        label = schema.FIELDS[key].label
+        if key == 'MAS_DOMAIN' and self.model.get('DOMAIN'):
+            label = label.replace('mas.<DOMAIN>', 'mas.' + self.model['DOMAIN'])
+        return label
 
     def field(self, key):
         if key not in schema.FIELDS:
@@ -257,7 +297,8 @@ class UI:
             return
         item = schema.FIELDS[key]
         while True:
-            self.view.message(key + ' — ' + item.label + '. ' + item.required + '; ' + item.impact)
+            label = self.field_label(key)
+            self.view.message(key + ' — ' + label + '. ' + item.required + '; ' + item.impact)
             current = self.model.get(key, item.default)
             choices = {
                 'media': (('local', 'Хранить медиа на этом сервере'), ('s3', 'Хранить медиа в S3')),
@@ -297,7 +338,7 @@ class UI:
                         'Enter — сохранить значение. /очистить — убрать значение, если поле необязательное.',
                         'dim',
                     )
-                value = self.ask(item.label if self.view.console else key, current, item.secret)
+                value = self.ask(label if self.view.console else key, current, item.secret)
                 if value == '/очистить' and not item.secret:
                     value = ''
             try:
@@ -337,53 +378,93 @@ class UI:
         if self.runner:
             with self.view.busy(label):
                 return self.runner(args)
-        capture = path == 'check'
-        if capture:
+        from terminal_process import read_output, present_output
+
+        interactive = path in (
+            'users invitation show',
+            'credentials admin show',
+            'update latest',
+            'remove',
+        )
+        records = []
+        self.result_lines = []
+        self.result_total = 0
+        if path == 'check':
             self.check_results = []
-        # Run in the same foreground process group. Ctrl+C reaches backend;
-        # wait for it to finish before displaying recovery or accepting changes.
+
+        def collect_check(line):
+            records.append(line[:8192])
+            del records[:-256]
+
+        # Only the UI writes the terminal while animation is active. Secret display
+        # and interactive backend confirmations keep their foreground terminal.
         child = subprocess.Popen(
             args,
-            stdin=None
-            if path in ('users invitation show', 'credentials admin show', 'update latest')
-            else subprocess.DEVNULL,
-            **(
-                {'stdout': subprocess.PIPE, 'stderr': subprocess.STDOUT, 'text': True}
-                if capture
-                else {}
-            ),
+            stdin=None if interactive else subprocess.DEVNULL,
+            stdout=None if interactive else subprocess.PIPE,
+            stderr=None if interactive else subprocess.STDOUT,
+            env={**os.environ, 'PYTHONUNBUFFERED': '1'},
+            bufsize=0,
         )
         try:
-            if path in ('users invitation show', 'credentials admin show', 'update latest'):
+            if interactive:
                 self.view.message(label)
                 return child.wait()
-            with self.view.busy(label):
-                if capture:
-                    output, _ = child.communicate()
-                    self.check_results = parse_checks(output)
-                    return child.returncode
-                return child.wait()
+            with self.view.busy(label) as progress:
+
+                def emit(line):
+                    if path == 'check':
+                        # Verification produces short structured records, not secrets.
+                        collect_check(line)
+                    else:
+                        messages = present_output(path, line)
+                        try:
+                            invitation_record = path == 'users invitation list' and isinstance(
+                                json.loads(line).get('invitations'), list
+                            )
+                        except (ValueError, AttributeError):
+                            invitation_record = False
+                        if invitation_record:
+                            self.result_total += len(messages)
+                            self.result_lines.extend(messages)
+                            del self.result_lines[:-1000]
+                            progress.log(
+                                'Получен список приглашений: ' + str(len(messages)) + ' строк.'
+                            )
+                        else:
+                            for message in messages:
+                                progress.log(message)
+
+                code = read_output(child, emit)
+            if path == 'check':
+                self.check_results = parse_checks('\n'.join(records))
+            return code
         except (KeyboardInterrupt, state_store.OperationInterrupted):
             if child.poll() is None:
                 child.send_signal(signal.SIGTERM)
             self.view.message(
                 'Операция прервана. Ожидается завершение дочернего процесса; checkpoints сохраняются.'
             )
-            while child.poll() is None:
-                try:
-                    if capture:
-                        child.communicate(timeout=1)
-                    else:
-                        child.wait(timeout=1)
-                except subprocess.TimeoutExpired:
-                    pass
-                except (KeyboardInterrupt, state_store.OperationInterrupted):
-                    pass
-            if capture:
-                output, _ = child.communicate()
-                self.check_results = parse_checks(output)
+            with nullcontext() if interactive else self.view.busy('Завершаем прерванную операцию'):
+                while child.poll() is None:
+                    try:
+                        if interactive:
+                            child.wait(timeout=1)
+                        else:
+                            read_output(
+                                child, collect_check if path == 'check' else lambda line: None
+                            )
+                    except subprocess.TimeoutExpired:
+                        pass
+                    except (KeyboardInterrupt, state_store.OperationInterrupted):
+                        pass
+            if path == 'check':
+                self.check_results = parse_checks('\n'.join(records))
             self.view.message(self.continuation())
             return 130
+        finally:
+            if child.stdout is not None:
+                child.stdout.close()
 
     def s3_form(self, purpose):
         import s3_diagnostics as probe
@@ -562,6 +643,287 @@ class UI:
             raise ValueError('Укажите ключ объекта в выделенном префиксе копий, без ..')
         return value
 
+    def setup_admin_tag(self):
+        def validate(value):
+            localpart = value.removeprefix('@')
+            if not re.fullmatch(r'[a-z0-9][a-z0-9._=-]{0,63}', localpart):
+                raise ValueError('Имя бота: строчные латинские буквы, цифры, точка, _ , = или -.')
+            if localpart in ('referral-bot', 'server-guide', 'matrix-admin'):
+                raise ValueError('Это имя уже используется другим ботом или администратором.')
+            return localpart
+
+        self.admin_tag = self.input_value(
+            'Имя административного бота до его создания', self.admin_tag, validate
+        )
+        self.save()
+
+    def dns_wait_command(self, timeout):
+        if self.reader:
+            command = self.ask('Команда ожидания DNS').strip().casefold()
+            if not command:
+                time.sleep(timeout)
+            return command
+        import select
+
+        if not select.select([sys.stdin], [], [], timeout)[0]:
+            return ''
+        if hasattr(self, '_dns_decoder'):
+            chunk = os.read(sys.stdin.fileno(), 1)
+            if not chunk:
+                raise SaveExit()
+            value = self._dns_decoder.decode(chunk)
+            if value in ('\n', '\r'):
+                command = self.dns_command_buffer
+                self.dns_command_buffer = ''
+                return command.strip().casefold()
+            if value in ('\x7f', '\b'):
+                self.dns_command_buffer = self.dns_command_buffer[:-1]
+            elif value in ('b', 'q') and not self.dns_command_buffer:
+                return 'назад' if value == 'b' else 'сохранить и выйти'
+            elif value and value.isprintable() and len(self.dns_command_buffer) < 128:
+                self.dns_command_buffer += value
+            return ''
+        command = sys.stdin.readline(129)
+        if not command:
+            raise SaveExit()
+        return command.strip().casefold()
+
+    @contextmanager
+    def dns_input_mode(self):
+        if self.reader or not sys.stdin.isatty():
+            yield
+            return
+        import termios
+        import codecs
+
+        descriptor = sys.stdin.fileno()
+        original = termios.tcgetattr(descriptor)
+        quiet = list(original)
+        quiet[3] &= ~(termios.ECHO | termios.ICANON)
+        quiet[6] = list(original[6])
+        quiet[6][termios.VMIN] = 1
+        quiet[6][termios.VTIME] = 0
+        self._dns_decoder = codecs.getincrementaldecoder('utf-8')('replace')
+        self.dns_command_buffer = ''
+        termios.tcsetattr(descriptor, termios.TCSANOW, quiet)
+        try:
+            yield
+        finally:
+            termios.tcsetattr(descriptor, termios.TCSANOW, original)
+            del self._dns_decoder
+            self.dns_command_buffer = ''
+
+    def wait_dns(self, expected):
+        import queue
+        import threading
+        import wizard_dns
+
+        hosts = schema.public_hosts(self.model)
+        statuses = {}
+        events = queue.Queue()
+        worker = None
+        next_check = time.monotonic()
+        complete = False
+        dirty = True
+        hint = 'Назад: b или «назад». Выход: q или «сохранить и выйти»; отмена.'
+        with (
+            self.dns_input_mode(),
+            self.view.busy('Проверяем DNS; повторная проверка каждые 10 секунд') as progress,
+        ):
+            while True:
+                if worker is None and time.monotonic() >= next_check:
+                    complete = False
+                    statuses = {}
+                    dirty = True
+
+                    def scan():
+                        try:
+                            wizard_dns.scan(self.model.copy(), expected, events.put)
+                        finally:
+                            events.put(None)
+
+                    worker = threading.Thread(target=scan, daemon=True)
+                    worker.start()
+                while not events.empty():
+                    status = events.get_nowait()
+                    if status is None:
+                        complete = True
+                        worker = None
+                        next_check = time.monotonic() + 10
+                    else:
+                        statuses[status.host] = status
+                    dirty = True
+                if dirty:
+                    if progress.animated:
+                        progress.logs.clear()
+                    progress.log('Ожидаемый IPv4 VPS: ' + expected)
+                    for host in hosts:
+                        status = statuses.get(host)
+                        progress.log(host + ': ' + (status.message if status else 'проверяется'))
+                    progress.log('CDN proxy должен быть отключён (DNS only).')
+                    progress.log(hint)
+                    progress.log('Команда: ' + getattr(self, 'dns_command_buffer', ''))
+                    dirty = False
+                if (
+                    complete
+                    and len(statuses) == len(hosts)
+                    and all(row.passed for row in statuses.values())
+                ):
+                    import select
+
+                    pending = bool(
+                        not self.reader
+                        and sys.stdin.isatty()
+                        and select.select([sys.stdin], [], [], 0)[0]
+                    )
+                    if not getattr(self, 'dns_command_buffer', '') and not pending:
+                        return
+                timeout = (
+                    0.1 if worker is not None else min(0.1, max(0, next_check - time.monotonic()))
+                )
+                previous = getattr(self, 'dns_command_buffer', '')
+                command = self.dns_wait_command(timeout)
+                if previous != getattr(self, 'dns_command_buffer', ''):
+                    dirty = True
+                if command == 'назад':
+                    raise Back()
+                if command == 'сохранить и выйти':
+                    raise SaveExit()
+                if command == 'отмена':
+                    raise Cancel()
+                if command:
+                    hint = 'Допустимые команды: назад, отмена, сохранить и выйти.'
+                    dirty = True
+
+    def dns_values(self):
+        return {key: self.model.get(key, '') for key in ('DOMAIN', 'MAS_DOMAIN', 'PUBLIC_IP')}
+
+    def check_dns_settings(self):
+        import preflight
+
+        domain = self.model['DOMAIN']
+        ip = self.model.get('PUBLIC_IP')
+        if not ip:
+            with self.view.busy('Определяем IPv4 по основному домену'):
+                addresses = preflight.resolve(domain, __import__('socket').AF_INET)
+            if len(addresses) == 1:
+                ip = next(iter(addresses))
+            while not ip:
+                self.view.message(
+                    'По записи A пока нельзя определить один IPv4 VPS. '
+                    'Укажите публичный IPv4 из панели VPS, чтобы проверить все имена '
+                    'и дождаться их DNS-записей. «Назад» вернёт к вводу домена.',
+                    'yellow',
+                )
+                self.field('PUBLIC_IP')
+                ip = self.model.get('PUBLIC_IP')
+        self.wait_dns(ip)
+        with self.view.busy('Проверяем DNS, сертификаты и сеть'):
+            preflight.dns_check(domain, ip, self.model.get('MAS_DOMAIN', ''))
+            preflight.caa_check(domain, self.model.get('MAS_DOMAIN', ''))
+            preflight.network_check(self.root, self.model.get('DOCKER_SUBNET', '172.30.50.0/24'))
+        self.dns_verified = self.dns_values()
+        self.save()
+
+    def setup_summary(self):
+        page = 0
+        warning = ''
+        while True:
+            self.model = schema.validate(self.model)
+            self.view.heading('Итог установки')
+            self.view.message(
+                'Итог. Внутренние пароли и ключи создаются автоматически '
+                'и сохраняются при повторном запуске.'
+            )
+            fields = [
+                key
+                for key, value in self.model.items()
+                if key
+                in (
+                    'DOMAIN',
+                    'MAS_DOMAIN',
+                    'PUBLIC_IP',
+                    'ACME_EMAIL',
+                    'MEDIA_MODE',
+                    'POSTGRES_MODE',
+                )
+                or (value and value != schema.FIELDS[key].default)
+            ]
+            rows = []
+            labels = {
+                'DOMAIN': 'Основной домен',
+                'MAS_DOMAIN': 'Домен авторизации MAS',
+                'PUBLIC_IP': 'IPv4 VPS',
+                'ACME_EMAIL': 'Email для сертификатов',
+                'MEDIA_MODE': 'Хранилище медиа',
+                'POSTGRES_MODE': 'База данных',
+            }
+            for index, key in enumerate(fields, 1):
+                value = self.model[key]
+                if key == 'MAS_DOMAIN':
+                    value = schema.mas_host(self.model)
+                shown = 'настроен' if schema.FIELDS[key].secret and value else value or 'не задано'
+                shown = shown if len(shown) <= 100 else shown[:97] + '…'
+                rows.append((str(index) + '. ' + labels.get(key, self.field_label(key)), shown))
+            admin_number = str(len(fields) + 1)
+            rows.append((admin_number + '. Имя административного бота', self.admin_tag))
+            backup_number = str(len(fields) + 2)
+            rows.append(
+                (backup_number + '. Внешние копии', 'настроены' if self.backup else 'отложены')
+            )
+            pages = [rows]
+            if self.view.fullscreen and self.view.console:
+                budget = max(1, self.view.console.height - self.view.used_lines - 11)
+                pages, part = [], []
+                for row in rows:
+                    if part and self.view.details([*part, row], measure=True) > budget:
+                        pages.append(part)
+                        part = []
+                    part.append(row)
+                pages.append(part)
+            page = min(page, len(pages) - 1)
+            self.view.details(pages[page])
+            if len(pages) > 1:
+                self.view.message('Страница ' + str(page + 1) + '/' + str(len(pages)))
+            self.view.message(
+                'Команды:\n'
+                '  номер поля — изменить значение\n'
+                '  применить — начать установку\n'
+                '  назад — предыдущий шаг\n'
+                '  отмена — отменить ввод и выйти\n'
+                '  сохранить и выйти — сохранить черновик'
+                + ('\n  > / < — страницы полей' if len(pages) > 1 else '')
+            )
+            if warning:
+                self.view.message(warning, 'yellow')
+            change = self.ask('Команда или номер поля', 'сохранить и выйти').strip()
+            warning = ''
+            if change.casefold() == 'сохранить и выйти':
+                raise SaveExit()
+            if change.casefold() == 'применить':
+                if self.dns_verified != self.dns_values():
+                    self.check_dns_settings()
+                return
+            if change in ('>', '<'):
+                page = max(0, min(page + (1 if change == '>' else -1), len(pages) - 1))
+                continue
+            previous_backup = self.backup.copy()
+            try:
+                if change == admin_number:
+                    self.setup_admin_tag()
+                elif change == backup_number:
+                    self.setup_step(5)
+                elif change.isdecimal() and 1 <= int(change) <= len(fields):
+                    self.field(fields[int(change) - 1])
+                elif change in fields:
+                    self.field(change)
+                else:
+                    warning = 'Введите номер поля или команду из списка.'
+            except Back:
+                if change == backup_number:
+                    self.backup = previous_backup
+                    self.save()
+
     def setup_step(self, index):
         import preflight
 
@@ -607,39 +969,14 @@ class UI:
             self.view.message(
                 'Проверка Linux amd64, systemd, памяти, диска и портов. Ошибку исправьте и повторите; шаг не пропускается.'
             )
-            preflight.system_check(self.root)
+            with self.view.busy('Проверяем систему и свободные ресурсы'):
+                preflight.system_check(self.root)
         elif index == 2:
             self.check_domain_inputs()
             self.field('MAS_DOMAIN')
             self.field('PUBLIC_IP')
             self.field('ACME_EMAIL')
-            domain = self.model['DOMAIN']
-            ip = self.model.get('PUBLIC_IP')
-            self.view.message(
-                'В DNS-панели домена создайте записи A. Для каждого имени укажите публичный IPv4 VPS:'
-            )
-            for host in schema.public_hosts(self.model):
-                self.view.message('  ' + host)
-            self.view.message(
-                'Удалите записи AAAA для этих имён и отключите CDN proxy (DNS only). '
-                'Сетевые порты перечислены в README.md комплекта.'
-            )
-            if not ip:
-                addresses = preflight.resolve(domain, __import__('socket').AF_INET)
-                if len(addresses) != 1:
-                    raise RuntimeError(
-                        'Не удалось определить один IPv4 по записи A основного домена. '
-                        'Проверьте имя домена и записи в DNS-панели. Можно указать PUBLIC_IP '
-                        'из панели VPS; затем будут проверены записи всех имён. '
-                        '«назад» вернёт к вводу домена.'
-                    )
-                ip = next(iter(addresses))
-            preflight.dns_check(domain, ip, self.model.get('MAS_DOMAIN', ''))
-            preflight.caa_check(domain, self.model.get('MAS_DOMAIN', ''))
-            preflight.network_check(self.root, self.model.get('DOCKER_SUBNET', '172.30.50.0/24'))
-            self.view.message(
-                'DNS/CAA/система проверены автоматически. До запуска свободные порты проверяются backend.'
-            )
+            self.check_dns_settings()
         elif index == 3:
             self.field('MEDIA_MODE')
             if self.model['MEDIA_MODE'] == 's3':
@@ -665,7 +1002,9 @@ class UI:
                     self.model[provider + '_CLIENT_ID'] = ''
                     self.model[provider + '_CLIENT_SECRET'] = ''
                     self.save()
-            self.field('INVITATION_LIFETIME_SECONDS')
+            self.view.message(
+                'Срок приглашений можно изменить после установки в настройках сервера.', 'dim'
+            )
         elif index == 5:
             self.view.message(
                 'Внешние копии требуют отдельного private bucket/prefix и recovery key вне установки. Можно явно отложить; локальная копия не защищает от потери VPS.'
@@ -696,36 +1035,7 @@ class UI:
             self.save()
         elif index == 6:
             self.check_domain_inputs()
-            self.model = schema.validate(self.model)
-            self.view.message(
-                'Итог. Внутренние пароли/ключи создаёт backend и сохраняет при повторе.'
-            )
-            rows = []
-            for key, value in self.model.items():
-                if value and (
-                    value != schema.FIELDS[key].default
-                    or key in ('DOMAIN', 'MEDIA_MODE', 'POSTGRES_MODE')
-                ):
-                    rows.append(
-                        (
-                            schema.FIELDS[key].label,
-                            'настроен' if schema.FIELDS[key].secret else value,
-                        )
-                    )
-            self.view.details(rows)
-            self.view.message('Внешние копии: ' + ('настроены' if self.backup else 'явно отложены'))
-            while True:
-                change = self.ask(
-                    'Введите имя поля для исправления или применить. Назад/отмена/сохранить и выйти'
-                )
-                if change:
-                    break
-                self.view.message(
-                    'Чтобы запустить установку, введите «применить». «сохранить и выйти» оставит только черновик.'
-                )
-            if change != 'применить':
-                self.field(change)
-                raise Back()
+            self.setup_summary()
         elif index == 7:
             from configuration import write_model
 
@@ -738,12 +1048,21 @@ class UI:
             metadata = json.loads((self.root / 'installation.json').read_text())
             if metadata.get('databases_initialized'):
                 self.use_active_configuration()
-                return
-            write_model(self.root, self.model, self.backup)
+            else:
+                write_model(self.root, self.model, self.backup)
+                if self.admin_tag != self.saved_admin_tag() and not metadata.get(
+                    'federation_provisioned'
+                ):
+                    if self.run('admin bot set', tag=self.admin_tag):
+                        raise RuntimeError(
+                            'Имя административного бота не сохранено. Проверьте выбранное имя; '
+                            'настройки и ключи сохранены.'
+                        )
             code = self.run('start')
             if code:
                 raise RuntimeError(
-                    'Запуск не подтверждён. sudo misbot status; исправьте причину и повторите start. Draft сохранён.'
+                    'Запуск не завершён. «Повторить» продолжит запуск с сохранёнными данными '
+                    'и ключами. «Назад» откроет меню управления сервером.'
                 )
         elif index == 8:
             if self.run('check'):
@@ -819,9 +1138,9 @@ class UI:
         if 8 <= self.step <= 9 and self.initialized():
             self.use_active_configuration()
         while self.step < len(names):
-            if self.step < 8 and self.initialized():
+            if self.step < 7 and self.initialized():
                 self.use_active_configuration()
-                self.step = 8
+                self.step = 7
                 self.save()
             self.view.wizard_step(self.step, names)
             self.view.message('Установка: ' + str(self.root), 'dim')
@@ -850,7 +1169,7 @@ class UI:
                 self.save()
                 self.view.message(
                     'Сохранено приватно. Продолжение: sudo python3 '
-                    + shlex.quote(str(self.source / 'misbot.py'))
+                    + shlex.quote(str(self.source_entrypoint()))
                     + ' ui --directory '
                     + shlex.quote(str(self.root))
                 )
@@ -859,7 +1178,7 @@ class UI:
                 self.view.message(
                     'Этап не завершён. Черновик сохранён; исправьте ввод или повторите проверку.'
                     if not self.installation()
-                    else 'Этап не завершён. Выполните sudo misbot config validate и sudo misbot status; данные и ключи сохраняются.'
+                    else 'Этап не завершён. Данные, настройки и ключи сохранены.'
                 )
                 # Show only schema/preflight static safe messages, never SDK bodies.
                 error = sys.exc_info()[1]
@@ -1029,6 +1348,8 @@ class UI:
             self.model = {}
             self.backup = {}
             self.confirmed_domains = set()
+            self.admin_tag = 'admin-panel'
+            self.dns_verified = None
         self.step = 0
         self.save()
         return self.wizard()
@@ -1038,7 +1359,7 @@ class UI:
             self.view.message('Операция недоступна для выбранной установки.', 'yellow')
             return 2
         command = cli_commands.BY_PATH[item.path]
-        self.view.heading(item.title, command.purpose)
+        self.view.heading(item.title, item.hint)
         args = {}
         execution_root = self.root
         if command.backend in ('restore', 'restore-local'):
@@ -1120,7 +1441,9 @@ class UI:
         if command.path == 'check':
             self.check_result(code)
             return code
-        self.view.result(item.title, code, self.continuation())
+        self.view.result(item.title, code, self.operation_continuation(item.path))
+        if command.path == 'users invitation list' and code == 0:
+            self.show_result_lines(item.title)
         if command.backend in ('update', 'release-update') and code == 0:
             self.view.message(
                 'Обновление применено. Откройте sudo misbot ui заново, чтобы использовать новый интерфейс.'
@@ -1140,6 +1463,49 @@ class UI:
                 + ' backup activate --confirm source-stopped'
             )
         return code
+
+    def show_result_lines(self, title):
+        if not self.result_lines:
+            return
+        if self.result_total > len(self.result_lines):
+            self.view.message(
+                'Список ограничен последними 1000 приглашениями. Для полного списка используйте CLI.',
+                'yellow',
+            )
+        if not self.view.fullscreen or self.result_lines == ['Приглашений пока нет.']:
+            for line in self.result_lines:
+                self.view.message(line)
+            return
+        while True:
+            self.view.heading(
+                title,
+                'Коды приглашений не отображаются.'
+                + (
+                    ' Показаны последние 1000 из ' + str(self.result_total) + '.'
+                    if self.result_total > len(self.result_lines)
+                    else ''
+                ),
+            )
+            choice = self.choose(
+                'Приглашения и статусы',
+                [(str(index), line, '') for index, line in enumerate(self.result_lines, 1)],
+            )
+            if choice == '0':
+                return
+            self.view.heading('Приглашение')
+            self.view.message(self.result_lines[int(choice) - 1])
+            self.pause('Enter — вернуться к приглашениям')
+
+    def operation_continuation(self, path):
+        if path == 'remove':
+            return 'Повторите удаление с тем же выбором данных. Сохранённый журнал отмечает завершённые шаги.'
+        if path.startswith('federation '):
+            if (self.root / 'federation-transition.json').exists():
+                return 'Меню: «Продолжить прерванную операцию» → «Федерация после прерывания».'
+            return (
+                'Меню: «Связь с другими серверами». Проверьте выбранный домен или состояние заявки.'
+            )
+        return self.continuation()
 
     def task_menu(self, group):
         title = ui_actions.MENUS[group][0]
@@ -1387,7 +1753,7 @@ def main():
     if ui.view.screen_used:
         text(
             'Мастер закрыт. Продолжение: sudo python3 '
-            + shlex.quote(str(ui.source / 'misbot.py'))
+            + shlex.quote(str(ui.source_entrypoint()))
             + ' ui --directory '
             + shlex.quote(str(ui.root))
         )

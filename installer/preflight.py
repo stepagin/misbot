@@ -15,6 +15,8 @@ import subprocess
 import threading
 from urllib.parse import unquote, urlsplit
 
+_STRICT_RESOLVER_SLOTS = threading.BoundedSemaphore(14)
+
 
 def settings(root):
     import configuration
@@ -71,26 +73,46 @@ def settings_text(text):
     return result
 
 
-def resolve(host, family, timeout=10):
+def resolve(host, family, timeout=10, strict=False):
     # getaddrinfo has no timeout argument. A daemon avoids blocking shutdown on a stuck resolver.
     done = threading.Event()
     result = []
+    gate = _STRICT_RESOLVER_SLOTS if strict else None
+    if gate is not None and not gate.acquire(blocking=False):
+        raise RuntimeError('DNS resolver is busy; retry later')
 
     def query():
         try:
             result.append({row[4][0] for row in socket.getaddrinfo(host, 443, family)})
+        except socket.gaierror as error:
+            result.append(
+                RuntimeError('DNS resolver is temporarily unavailable')
+                if strict
+                and error.errno
+                not in (socket.EAI_NONAME, getattr(socket, 'EAI_NODATA', socket.EAI_NONAME))
+                else set()
+            )
         except OSError:
-            result.append(set())
+            result.append(RuntimeError('DNS resolver is unavailable') if strict else set())
         finally:
+            if gate is not None:
+                gate.release()
             done.set()
 
-    threading.Thread(target=query, daemon=True).start()
+    try:
+        threading.Thread(target=query, daemon=True).start()
+    except Exception:
+        if gate is not None:
+            gate.release()
+        raise
     if not done.wait(timeout):
         raise RuntimeError(
             'DNS query timed out for '
             + host
             + '; check the VPS resolver and retry install.sh preflight'
         )
+    if isinstance(result[0], RuntimeError):
+        raise result[0]
     return result[0]
 
 

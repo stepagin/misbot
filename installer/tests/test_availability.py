@@ -291,6 +291,7 @@ class PresentationTests(unittest.TestCase):
     def test_interrupted_captured_check_drains_child_before_returning(self):
         class Child:
             returncode = None
+            stdout = None
 
             def __init__(self):
                 self.calls, self.signals = 0, []
@@ -313,8 +314,15 @@ class PresentationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             interface = ui.UI(folder, draft=Path(folder) / 'draft')
             child = Child()
+
+            def drain(child, emit):
+                output, _ = child.communicate(timeout=1)
+                emit(output)
+                return child.returncode
+
             with (
                 patch.object(ui.subprocess, 'Popen', return_value=child),
+                patch('terminal_process.read_output', side_effect=drain),
                 redirect_stdout(io.StringIO()),
             ):
                 self.assertEqual(interface.run('check'), 130)

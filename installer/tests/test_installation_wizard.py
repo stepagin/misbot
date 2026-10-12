@@ -284,7 +284,7 @@ class InstallationWizardTests(unittest.TestCase):
             'TELEGRAM_CLIENT_SECRET': 'FICTIONAL_SECRET',
         }
         self.interface.backup = {'S3_BUCKET': 'fictional-backup'}
-        self.answers(['нет', 'нет', '', 'отложить'])
+        self.answers(['нет', 'нет', 'отложить'])
         self.interface.setup_step(4)
         self.interface.setup_step(5)
         saved = self.saved()
@@ -547,7 +547,6 @@ class InstallationWizardTests(unittest.TestCase):
                 '',
                 'нет',
                 'нет',
-                '',
                 'отложить',
                 'применить',
             ]
@@ -583,6 +582,7 @@ class InstallationWizardTests(unittest.TestCase):
             patch('shutil.which', return_value='/usr/bin/fictional'),
             patch.object(preflight, 'system_check'),
             patch.object(preflight, 'dns_check'),
+            patch.object(self.interface, 'wait_dns'),
             patch.object(preflight, 'caa_check'),
             patch.object(preflight, 'network_check'),
             patch.object(self.interface, 'run', side_effect=run),
@@ -640,7 +640,6 @@ class InstallationWizardTests(unittest.TestCase):
                         answers.extend(['FICTIONAL_ID', 'FICTIONAL_SECRET'])
                         if provider == 'TELEGRAM':
                             answers.append('socks5://proxy.example.org:1080')
-                answers.append('604800')
                 answers.append('отложить' if backup == 'defer' else 'да')
                 if backup != 'defer':
                     answers.extend(
@@ -684,6 +683,7 @@ class InstallationWizardTests(unittest.TestCase):
                     patch('shutil.which', return_value='/usr/bin/fictional'),
                     patch.object(preflight, 'system_check'),
                     patch.object(preflight, 'dns_check'),
+                    patch.object(interface, 'wait_dns'),
                     patch.object(preflight, 'caa_check'),
                     patch.object(preflight, 'network_check'),
                     patch.object(interface, 'run', side_effect=run),
