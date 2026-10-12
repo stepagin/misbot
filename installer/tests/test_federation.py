@@ -8,6 +8,7 @@ import tarfile
 import tempfile
 import time
 import unittest
+import subprocess
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -144,6 +145,79 @@ class FederationTests(unittest.TestCase):
         item.update(local_applied=False, remote_applied=False)
         self.a.save(data)
         self.assertEqual(self.a.operate('retry', a)['state'], 'expired')
+
+    def test_default_split_policy_is_available_without_policy_file(self):
+        root = self.a.root
+        (root / 'settings.env').unlink()
+        model = configuration.schema.validate(
+            {'DOMAIN': 'a.example', 'PUBLIC_IP': '', 'ACME_EMAIL': 'operator@example.org'}
+        )
+        configuration.stage_bundle(root / 'settings', model, None)
+        self.assertFalse((root / 'settings/policy.env').exists())
+        self.assertEqual(self.a.operate('servers')['servers'], ['misbot.ru'])
+        # Inviting another peer must reach normal protocol validation, rather
+        # than fail with KeyError because a default setting was not stored.
+        self.assertEqual(self.a.operate('check', 'b.example')['input'], 'valid')
+
+    def test_operations_committed_snapshot_is_available_while_writer_holds_real_lock(self):
+        data = self.a.load()
+        identifier = 'FO-' + 'a' * 32
+        data['jobs'] = {identifier: {'state': 'running'}}
+        self.a.save(data)
+        before = self.a.path.read_bytes()
+        script = (
+            'import sys; sys.path.insert(0,sys.argv[1]); import state_store; '
+            'guard=state_store.operation_guard(sys.argv[2]); guard.__enter__(); '
+            'print("locked",flush=True); sys.stdin.read(); guard.__exit__(None,None,None)'
+        )
+        owner = subprocess.Popen(
+            [
+                sys.executable,
+                '-B',
+                '-c',
+                script,
+                str(Path(state_store.__file__).parent),
+                str(self.a.root),
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            self.assertEqual(owner.stdout.readline().strip(), 'locked')
+            self.assertEqual(
+                self.a.operate('operations'),
+                {'operations': [{'id': identifier, 'state': 'running', 'result': {}}]},
+            )
+            self.assertIsNone(owner.poll())
+            with self.assertRaisesRegex(RuntimeError, 'Another installer operation'):
+                self.a.operate('add', 'peer.example')
+            self.assertEqual(self.a.path.read_bytes(), before)
+        finally:
+            owner.communicate(timeout=5)
+
+    def test_operations_snapshot_retains_rpc_authorization_and_rejects_invalid_state(self):
+        request = {
+            'action': 'operations',
+            'actor': '@admin:a.example',
+            'event_id': '$operations-fixture',
+        }
+        before = self.a.path.read_bytes()
+        with patch.object(
+            self.a, 'guard', side_effect=AssertionError('read acquired writer guard')
+        ):
+            self.assertEqual(
+                federation_service.bot_call(self.a, request, 10003), {'operations': []}
+            )
+        self.assertEqual(self.a.path.read_bytes(), before)
+        with self.assertRaises(protocol.ProtocolError):
+            federation_service.bot_call(self.a, dict(request, actor='@other:a.example'), 10003)
+        data = self.a.load()
+        data['jobs'] = {'FO-' + 'a' * 32: {'state': 'unsupported'}}
+        self.a.save(data)
+        with self.assertRaisesRegex(protocol.ProtocolError, 'invalid_operation_state'):
+            self.a.operate('operations')
 
     def test_signature_replay_scope_size_and_unsupported(self):
         rid = 'MB-' + 'a' * 32

@@ -1,6 +1,7 @@
 """One durable, single-use invitation, independent of administrator bootstrap."""
 
 import argparse
+from contextlib import closing
 from datetime import datetime, timezone, timedelta
 import json
 import os
@@ -10,12 +11,174 @@ import signal
 import sys
 import urllib.parse
 import re
+import sqlite3
+import stat
 
 import configuration
 import lifecycle
 import state_store
 
 BASE = '/api/admin/v1/user-registration-tokens'
+
+
+def invitation_issuers(root, domain):
+    """Read public issuer metadata without selecting the private token column."""
+    result = {}
+    path = root / 'data/referral-control/data/bot-control.sqlite3'
+    if path.exists() or path.is_symlink():
+        if path.resolve() != path:
+            raise RuntimeError('Список приглашений не прочитан: путь метаданных содержит ссылку.')
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            info = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.geteuid()
+                or info.st_mode & 0o077
+                or info.st_nlink != 1
+            ):
+                raise RuntimeError(
+                    'Список приглашений не прочитан: проверьте владельца и приватные права файла метаданных.'
+                )
+            with closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=5)) as db:
+                db.execute('PRAGMA query_only=ON')
+                columns = {row[1] for row in db.execute('PRAGMA table_info(invitations)')}
+                if not {'server', 'resource', 'uid'} <= columns:
+                    raise RuntimeError(
+                        'Схема метаданных приглашений не поддерживается. Сохраните базу и проверьте комплект Misbot.'
+                    )
+                name = 'inviter_name' if 'inviter_name' in columns else 'NULL'
+                rows = db.execute(
+                    'SELECT resource,uid,' + name + ' FROM invitations WHERE server=?', (domain,)
+                )
+                for resource, uid, label in rows:
+                    if not resource:
+                        continue
+                    if isinstance(uid, str) and re.fullmatch(
+                        r'@[a-z0-9._=/\-]{1,255}:' + re.escape(domain), uid
+                    ):
+                        issuer = uid
+                    elif isinstance(uid, int) and not isinstance(uid, bool) and uid > 0:
+                        issuer = (
+                            label if isinstance(label, str) and label else 'Telegram ' + str(uid)
+                        )
+                    else:
+                        issuer = 'не указан'
+                    result[resource] = issuer
+        finally:
+            os.close(descriptor)
+    first = root / 'secrets/first-registration.json'
+    if first.exists() or first.is_symlink():
+        record = configuration.read_private_json(first)
+        if record.get('domain') != domain or record.get('format') != 1:
+            raise RuntimeError(
+                'Первое приглашение относится к другой установке. Проверьте выбранный каталог; данные сохранены.'
+            )
+        if record.get('resource'):
+            result[record['resource']] = '@matrix-admin:' + domain
+    return result
+
+
+def list_invitations(root, transport, now=None):
+    domain = configuration.read_private_json(root / 'installation.json')['domain']
+    issuers = invitation_issuers(root, domain)
+    now = now or datetime.now(timezone.utc)
+    invitations = []
+    path = BASE
+    seen_pages = set()
+    seen_ids = set()
+    for _ in range(10000):
+        if path in seen_pages:
+            raise RuntimeError(
+                'Страница приглашений повторилась. Список не подтверждён; повторите просмотр позднее.'
+            )
+        seen_pages.add(path)
+        response = transport(root, path)
+        if response['status'] != 200 or not isinstance(response.get('body'), dict):
+            raise RuntimeError(
+                'Список приглашений недоступен. Проверьте состояние сервера и повторите просмотр.'
+            )
+        items = response['body'].get('data')
+        if not isinstance(items, list):
+            raise RuntimeError(
+                'Формат списка приглашений не поддерживается. Проверьте совместимость MAS и Misbot.'
+            )
+        for item in items:
+            if not isinstance(item, dict) or not isinstance(item.get('attributes'), dict):
+                raise RuntimeError(
+                    'Формат списка приглашений не поддерживается. Проверьте совместимость MAS и Misbot.'
+                )
+            identifier = item['id']
+            if not isinstance(identifier, str) or not re.fullmatch(
+                '[0-9A-HJKMNP-TV-Z]{26}', identifier
+            ):
+                raise RuntimeError(
+                    'Идентификатор приглашения не прошёл проверку. Список не подтверждён; данные сохранены.'
+                )
+            if identifier in seen_ids:
+                continue
+            seen_ids.add(identifier)
+            attributes = item['attributes']
+            expires = attributes.get('expires_at')
+            if expires is not None and not isinstance(expires, str):
+                raise RuntimeError(
+                    'Срок приглашения не прошёл проверку. Список не подтверждён; данные сохранены.'
+                )
+            expiration = datetime.fromisoformat(expires.replace('Z', '+00:00')) if expires else None
+            if expiration and expiration.tzinfo is None:
+                raise RuntimeError(
+                    'Для срока приглашения не указан часовой пояс. Список не подтверждён; данные сохранены.'
+                )
+            usage = attributes.get('usage_limit')
+            used = attributes.get('times_used', 0)
+            if (
+                type(used) is not int
+                or used < 0
+                or (usage is not None and (type(usage) is not int or usage < 0))
+            ):
+                raise RuntimeError(
+                    'Сведения об использовании приглашения не прошли проверку. Данные сохранены.'
+                )
+            state = (
+                'revoked'
+                if attributes.get('revoked_at')
+                else 'used'
+                if usage is not None and used >= usage
+                else 'expired'
+                if expiration and expiration <= now
+                else 'valid'
+            )
+            # Only an explicit allowlist reaches CLI/UI. MAS also returns the
+            # private token; it is never copied into this view or diagnostics.
+            invitations.append(
+                {
+                    'id': identifier,
+                    'issuer': issuers.get(identifier, 'не указан'),
+                    'state': state,
+                    'expires_at': expires,
+                }
+            )
+        links = response['body'].get('links', {})
+        if not isinstance(links, dict):
+            raise RuntimeError(
+                'Формат страниц приглашений не поддерживается. Проверьте совместимость MAS и Misbot.'
+            )
+        next_path = links.get('next')
+        if not next_path:
+            return {'invitations': invitations}
+        if not isinstance(next_path, str) or any(ord(character) < 32 for character in next_path):
+            raise RuntimeError(
+                'Адрес следующей страницы приглашений не прошёл проверку. Список не подтверждён; данные сохранены.'
+            )
+        parsed = urllib.parse.urlsplit(next_path)
+        if parsed.scheme or parsed.netloc or parsed.path != BASE or parsed.fragment:
+            raise RuntimeError(
+                'Адрес следующей страницы приглашений не прошёл проверку. Список не подтверждён; данные сохранены.'
+            )
+        path = next_path
+    raise RuntimeError(
+        'Достигнут предел просмотра страниц приглашений. Список не подтверждён; данные сохранены.'
+    )
 
 
 def api(root, path, method='GET', body=None):
@@ -115,6 +278,8 @@ def manage(root, action, transport=None):
             raise RuntimeError(
                 'Finish initial start or pending recovery before managing invitations'
             )
+        if action == 'list':
+            return list_invitations(root, transport)
         if action == 'new':
             policy = configuration.load(root, True)
             if (
@@ -253,7 +418,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--directory', required=True, type=Path)
     parser.add_argument(
-        'action', choices=('ensure', 'status', 'show', 'revoke', 'new', 'admin-show')
+        'action', choices=('ensure', 'status', 'show', 'revoke', 'new', 'admin-show', 'list')
     )
     args = parser.parse_args()
     try:
@@ -288,9 +453,11 @@ def main():
     except RuntimeError as error:
         print(str(error), file=sys.stderr)
         return 1
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ValueError, KeyError, TypeError, sqlite3.Error):
         print(
-            'Invitation could not be verified safely; retain private checkpoint and retry users invitation ensure',
+            'Список приглашений не удалось проверить безопасно. Сохраните данные и повторите users invitation list.'
+            if args.action == 'list'
+            else 'Invitation could not be verified safely; retain private checkpoint and retry users invitation ensure',
             file=sys.stderr,
         )
         return 1

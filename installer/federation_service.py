@@ -355,12 +355,19 @@ def serve(root):
                 raw = self.rfile.readline(protocol.LIMIT + 1)
                 if len(raw) > protocol.LIMIT or not raw.endswith(b'\n'):
                     raise protocol.ProtocolError('request_too_large')
-                if not work.acquire(blocking=False):
-                    raise RuntimeError('busy')
-                try:
-                    result = bot_call(backend, json.loads(raw), uid)
-                finally:
-                    work.release()
+                request = json.loads(raw)
+                if isinstance(request, dict) and request.get('action') == 'operations':
+                    # This action validates an atomically published snapshot.
+                    # UID, owner and current MAS rights are still checked by
+                    # bot_call; no writer or controller mutex is required.
+                    result = bot_call(backend, request, uid)
+                else:
+                    if not work.acquire(blocking=False):
+                        raise RuntimeError('busy')
+                    try:
+                        result = bot_call(backend, request, uid)
+                    finally:
+                        work.release()
                 value = {'ok': True, 'result': result}
             except protocol.ProtocolError as error:
                 value = {'ok': False, 'code': error.code}

@@ -56,6 +56,8 @@ def failure(code, root=None, action=None):
         'remote_api_disabled': 'API Misbot другого сервера выключен. Его администратор должен включить API перед приглашением.',
         'peer_upgrade_required': 'Другому серверу требуется обновление Misbot для приглашений сроком 30 дней.',
         'unsupported_version': 'Версия протокола другого сервера несовместима. Проверьте версии Misbot обеих установок.',
+        'local_state_or_input': 'Не удалось прочитать сохранённые настройки или состояние федерации. Откройте «Состояние и работа сервера» → «Проверить настройки»; сохраните checkpoints перед восстановлением.',
+        'invalid_operation_state': 'Сохранённое состояние операций не прошло проверку. Сохраните checkpoint федерации и проверьте его приватную копию; новая операция не запускалась.',
     }
     return {
         'stage': 'federation',
@@ -139,7 +141,8 @@ class Backend:
     def load(self):
         data = config.read_private_json(self.path)
         if (
-            data.get('format') != 1
+            not isinstance(data, dict)
+            or data.get('format') != 1
             or data.get('server_name')
             != config.read_private_json(self.root / 'installation.json')['domain']
         ):
@@ -244,7 +247,8 @@ class Backend:
             raise protocol.ProtocolError('admin_unconfirmed')
 
     def servers(self):
-        return config.load(self.root)['FEDERATION_SERVERS'].split(',')
+        # A split bundle deliberately omits policy.env while it uses defaults.
+        return config.load(self.root, complete=True)['FEDERATION_SERVERS'].split(',')
 
     def policy_plan(self, server, add):
         server = schema.domain(server)
@@ -801,6 +805,28 @@ class Backend:
     def operate(self, action, argument=None, actor='root', event_id=None):
         if action not in ACTIONS:
             raise protocol.ProtocolError('unknown_operation')
+        if action == 'operations':
+            # state.json is published by atomic replace. A validated committed
+            # snapshot stays available while a writer owns the operation lock.
+            # Do not perform admission, Docker calls or create any identities.
+            self.authorize(actor)
+            data = self.load()
+            jobs = data.get('jobs', {})
+            if not isinstance(jobs, dict) or any(
+                not isinstance(identifier, str)
+                or not isinstance(job, dict)
+                or job.get('state')
+                not in ('queued', 'running', 'complete', 'failed', 'interrupted')
+                or not isinstance(job.get('result', {}), dict)
+                for identifier, job in jobs.items()
+            ):
+                raise protocol.ProtocolError('invalid_operation_state')
+            return {
+                'operations': [
+                    {'id': identifier, 'state': job['state'], 'result': job.get('result', {})}
+                    for identifier, job in jobs.items()
+                ]
+            }
         with self.guard():
             self.ready(
                 action
@@ -905,13 +931,6 @@ class Backend:
                 return self.invite(data, argument, actor)
             if action == 'requests':
                 return {'requests': self.requests(data)}
-            if action == 'operations':
-                return {
-                    'operations': [
-                        {'id': k, 'state': v['state'], 'result': v.get('result', {})}
-                        for k, v in data.get('jobs', {}).items()
-                    ]
-                }
             if action == 'peers':
                 return {
                     'peers': [

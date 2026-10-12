@@ -201,7 +201,13 @@ def operation_help(command, existing=False):
         'archive': '/root/misbot-backup.tar.gz',
         'sha256': 'ARCHIVE_SHA256',
         'public-ip': '203.0.113.20',
-        'confirm': 'source-stopped' if command.backend == 'restore-activate' else 'target-stopped',
+        'confirm': (
+            'discard-draft'
+            if command.backend == 'draft-reset'
+            else 'source-stopped'
+            if command.backend == 'restore-activate'
+            else 'target-stopped'
+        ),
         'object': 'backup/example/object.enc',
         'output': '/root/verified-backup.tar.gz',
         'tag': 'admin-panel',
@@ -348,6 +354,36 @@ def plan(command, options, values, source=None):
             root = source
         if root is None and command.backend in ('init', 'restore', 'restore-local'):
             root = Path('/opt/matrix-stack')
+    if root is not None and any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in str(root)):
+        raise InputError('Каталог установки не должен содержать управляющие символы.')
+    if command.backend.startswith('draft-'):
+        root = root or Path('/opt/matrix-stack')
+        if not root.is_absolute() or root == Path('/') or root.resolve() != root:
+            raise InputError('Нужен абсолютный каталог установки без symlinks и переходов ..')
+        backend = source
+        if (source / 'command.json').is_file():
+            if not (root / 'wizard_state.py').is_file():
+                raise InputError(
+                    'Черновик хранится отдельно от установки. Для его просмотра или удаления '
+                    'запустите config draft show/reset из проверенного распакованного комплекта '
+                    'с --directory выбранного каталога. Подтверждение удаления: --confirm discard-draft.'
+                )
+            command_wrapper.trusted_runtime(root)
+            backend = root
+        return vocabulary.execution_argv(command, values, root, backend)
+    if command.backend == 'remove' and root is None:
+        root = Path('/opt/matrix-stack')
+    if command.backend == 'remove' and not (root / 'installation.json').exists():
+        if not root.is_absolute() or root == Path('/') or root.resolve() != root:
+            raise InputError('Нужен абсолютный каталог установки без symlinks и переходов ..')
+        if not root.exists() or not any(root.iterdir()):
+            raise InputError(
+                'В каталоге ' + str(root) + ' нет установки Misbot: remove не получил '
+                'сохранённые данные для удаления. Ручное удаление каталога не останавливает службы. '
+                'Черновик мастера хранится отдельно. Просмотр: config draft show; '
+                'удаление: config draft reset --confirm discard-draft '
+                '--directory ' + shlex.quote(str(root)) + '. Новый сервер: ui.'
+            )
     if (
         command.backend == 'wrapper-remove'
         and root is not None

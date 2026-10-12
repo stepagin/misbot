@@ -11,12 +11,13 @@ import os
 from pathlib import Path
 import signal
 import socket
+import struct
 import sys
 import tempfile
 import time
 import unittest
 import uuid
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import federation
@@ -26,6 +27,95 @@ import state_store
 
 
 class ServiceTests(unittest.TestCase):
+    def test_rpc_operations_snapshot_stays_authorized_while_controller_mutex_is_busy(self):
+        handlers = []
+
+        class Listener:
+            def __init__(self, path, handler):
+                handlers.append(handler)
+
+            def serve_forever(self):
+                pass
+
+            def shutdown(self):
+                pass
+
+            def server_close(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            state_store.write_json(root / 'installation.json', {'domain': 'fixture.example'})
+            federation.setup(root, {'domain': 'fixture.example'})
+            backend = federation.Backend(
+                root,
+                admin=lambda actor: actor == '@matrix-admin:fixture.example',
+                admission=False,
+            )
+            real_lock = __import__('threading').Lock
+            busy = real_lock()
+            busy.acquire()
+            created_locks = 0
+
+            def controller_lock():
+                nonlocal created_locks
+                created_locks += 1
+                # Rate owns the first lock; work owns the second. Unrelated
+                # locks (including subprocess waitpid) must remain ordinary.
+                return busy if created_locks == 2 else real_lock()
+
+            with (
+                patch.object(federation, 'backend', return_value=backend),
+                patch.object(federation_runtime, 'validate'),
+                patch.object(federation_service.lifecycle, 'configure'),
+                patch.object(federation_service.socketserver, 'UnixStreamServer', Listener),
+                patch.object(federation_service.threading, 'Thread'),
+                patch.object(federation_service.threading, 'Lock', side_effect=controller_lock),
+                patch.object(federation_service.os, 'chown'),
+                patch.object(federation_service.os, 'chmod'),
+            ):
+                federation_service.serve(root)
+            for action, actor, uid, expected in (
+                (
+                    'operations',
+                    '@matrix-admin:fixture.example',
+                    10003,
+                    {'ok': True, 'result': {'operations': []}},
+                ),
+                (
+                    'operations',
+                    '@other:fixture.example',
+                    10003,
+                    {'ok': False, 'code': 'admin_unconfirmed'},
+                ),
+                (
+                    'operations',
+                    '@matrix-admin:fixture.example',
+                    10001,
+                    {'ok': False, 'code': 'local_authorization_required'},
+                ),
+                (
+                    'requests',
+                    '@matrix-admin:fixture.example',
+                    10003,
+                    {'ok': False, 'code': 'busy_pending_or_operation_failed'},
+                ),
+            ):
+                with self.subTest(action=action, actor=actor, uid=uid):
+                    rpc = handlers[1].__new__(handlers[1])
+                    rpc.connection = Mock()
+                    rpc.connection.getsockopt.return_value = struct.pack('3i', 1, uid, 1)
+                    rpc.rfile = io.BytesIO(
+                        json.dumps(
+                            {'action': action, 'actor': actor, 'event_id': '$fixture'}
+                        ).encode()
+                        + b'\n'
+                    )
+                    rpc.wfile = io.BytesIO()
+                    rpc.handle()
+                    self.assertEqual(json.loads(rpc.wfile.getvalue()), expected)
+            busy.release()
+
     def test_panel_failure_cannot_block_automatic_invitation_expiry(self):
         class Listener:
             def __init__(self, path, handler):

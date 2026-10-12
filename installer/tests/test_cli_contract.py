@@ -108,7 +108,7 @@ class CommandContractTests(unittest.TestCase):
 
     def installation(self, root, existing=False):
         root.mkdir(mode=0o700)
-        names = set(command_wrapper.PUBLIC_FILES) | {'install.sh'}
+        names = set(command_wrapper.PUBLIC_FILES) | {'install.sh', 'wizard_state.py'}
         names.update(
             line.split('  ', 1)[1]
             for line in (BUNDLE / 'SHA256SUMS').read_text().splitlines()
@@ -252,11 +252,16 @@ class CommandContractTests(unittest.TestCase):
                     public = self.planned(command, existing, optional=True, public=True)
                     bundle = self.planned(command, existing, optional=True)
                     # Bootstrap UI is executed from the full bundle; installed UI from its backend.
-                    if command.backend in ('ui', 's3-check', 's3-cleanup') and not existing:
-                        bundle[1] = str(self.root / Path(bundle[1]).name)
+                    if (
+                        command.backend in ('ui', 's3-check', 's3-cleanup') and not existing
+                    ) or command.backend.startswith('draft-'):
+                        bundle[1] = str(
+                            (self.existing if existing else self.root) / Path(bundle[1]).name
+                        )
                     if (
                         not command.installed
                         and not existing
+                        and command.execution is None
                         and command.backend not in ('ui', 's3-check', 's3-cleanup')
                     ):
                         bundle[1] = str(self.root / 'install.sh')

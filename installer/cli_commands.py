@@ -52,6 +52,7 @@ RELEASE_UPDATE = Route(
     'release_update.py', action_position=ActionPosition.OMITTED, installation_script=True
 )
 CONFIGURATION = Route('configuration.py', 'configuration-')
+DRAFT = Route('wizard_state.py', 'draft-', argument_style=ArgumentStyle.NAMED)
 HOMEPAGE = Route(
     'homepage.py',
     'homepage-',
@@ -96,6 +97,23 @@ class Command:
 
 
 COMMANDS = [
+    Command(
+        'config draft show',
+        'draft-show',
+        purpose='Показать расположение и этап черновика без паролей и ключей.',
+        installed=False,
+        execution=DRAFT,
+        existing=DRAFT,
+    ),
+    Command(
+        'config draft reset',
+        'draft-reset',
+        ('confirm',),
+        'Удалить только черновик мастера: --confirm discard-draft. Установка и checkpoints сохраняются.',
+        installed=False,
+        execution=DRAFT,
+        existing=DRAFT,
+    ),
     Command(
         'admin bot show',
         'admin-bot-show',
@@ -458,6 +476,12 @@ COMMANDS = [
         'users invitation status',
         'invitation-status',
         purpose='Проверить действительность первого токена без его вывода.',
+        execution=INVITATION,
+    ),
+    Command(
+        'users invitation list',
+        'invitation-list',
+        purpose='Показать приглашения всех пользователей и их статусы без кодов регистрации.',
         execution=INVITATION,
     ),
     Command(
