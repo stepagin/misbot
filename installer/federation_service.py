@@ -26,7 +26,15 @@ import lifecycle
 import state_store
 
 BOT_ACTIONS = federation.ACTIONS
-MUTATIONS = BOT_ACTIONS - {'servers', 'check', 'requests', 'request-status', 'peers', 'operations'}
+MUTATIONS = BOT_ACTIONS - {
+    'servers',
+    'check',
+    'requests',
+    'request-status',
+    'peers',
+    'operations',
+    'api-status',
+}
 
 
 class Rate:
@@ -62,7 +70,7 @@ def bot_call(backend, request, uid):
                     or not 1 <= len(request['event_id']) <= 255
                 ):
                     raise protocol.ProtocolError('event_required')
-            if action in ('panel-update', 'panel-broadcast'):
+            if action in ('panel-update', 'panel-broadcast', 'panel-server-operation'):
                 backend.ready()
             return admin_panel.Panel(backend.root).handle(
                 action, request.get('argument'), request.get('event_id')
@@ -80,11 +88,7 @@ def bot_call(backend, request, uid):
                 return {'authorized': True}
             if action == 'notifications':
                 return {
-                    'requests': [
-                        backend.view(backend.request(data, k))
-                        for k in data['requests']
-                        if data['requests'][k]['direction'] == 'incoming'
-                    ],
+                    'requests': backend.requests(data),
                     'operations': [
                         {'id': k, 'state': v['state'], 'result': v.get('result', {})}
                         for k, v in data.get('jobs', {}).items()
@@ -259,6 +263,8 @@ def serve(root):
                 job_step(backend)
                 if time.monotonic() - last_panel >= 60:
                     last_panel = time.monotonic()
+                    if not (root / 'update-journal.json').exists():
+                        backend.maintain()
                     metadata = configuration.read_private_json(root / 'installation.json')
                     if metadata.get('federation_provisioned'):
                         with backend.guard():
@@ -301,6 +307,8 @@ def serve(root):
                 metadata = configuration.read_private_json(root / 'installation.json')
                 if metadata.get('restore_pending') or metadata.get('migration_frozen'):
                     raise ValueError()
+                if not backend.api_enabled():
+                    return self.reply(503, {'code': 'api_disabled'})
                 self.reply(200, public_document)
             except Exception:
                 self.reply(503, {'code': 'installation_busy_or_pending'})
@@ -331,7 +339,7 @@ def serve(root):
                     work.release()
                 self.reply(200, result)
             except protocol.ProtocolError as error:
-                self.reply(400, {'code': error.code})
+                self.reply(503 if error.code == 'api_disabled' else 400, {'code': error.code})
             except (ValueError, TypeError, KeyError):
                 self.reply(400, {'code': 'invalid_request'})
             except Exception:

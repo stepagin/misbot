@@ -1,115 +1,84 @@
-"""Allowlisted Misbot calls; raw backend output never reaches Telegram."""
+"""Lazy adapter to the allowlisted backend shared by administrator interfaces."""
 
-import json
+import hashlib
+import importlib.util
+import os
 from pathlib import Path
-import re
+import stat
 import subprocess
+import sys
 
 from common import BotError
 
-COMMANDS = {
-    'status': ['status'],
-    'check': ['check'],
-    'start': ['start'],
-    'stop': ['stop'],
-    'backup': ['backup', 'create'],
-    'backup_verify': ['backup', 'verify'],
-    'storage': ['storage', 'status'],
-    'storage_connect': ['storage', 's3', 'connect'],
-    'components': ['features', 'status'],
-}
-WRITES = frozenset(('start', 'stop', 'backup', 'backup_verify', 'storage_connect'))
+_BACKENDS = {}
 
 
-def run_control(config, operation):
-    if operation not in COMMANDS or operation not in config.get('management_actions', []):
-        raise BotError('Эта команда управления не подключена. Обратитесь к администратору.')
-    root = Path(config['stack_root'])
+def _trust_runtime(root):
     if not root.is_absolute() or root.resolve() != root or root == Path('/'):
-        raise BotError('Каталог установки не подтверждён. Проверьте его через SSH.')
+        raise RuntimeError('Unsafe installation directory')
+    info = root.stat()
+    if info.st_uid != os.geteuid() or info.st_mode & 0o022:
+        raise RuntimeError('Unsafe installation ownership')
+    # Validate executable sources before importing the installation's trust checker.
+    for path in [root / 'command_wrapper.py', root / 'server_management.py', *root.glob('*.py')]:
+        info = path.lstat()
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+            or info.st_uid != os.geteuid()
+            or info.st_mode & 0o022
+        ):
+            raise RuntimeError('Unsafe management runtime')
+
+
+def load_backend(config=None):
+    config = config or {}
+    configured = Path(config['stack_root']) if config.get('stack_root') else None
+    here = Path(__file__).resolve()
+    candidates = []
+    if configured is not None and (configured / 'server_management.py').exists():
+        _trust_runtime(configured)
+        candidates.append(configured)
+    candidates += [here.parents[2] / 'installer', here.parents[1], here.parents[2]]
+    folder = next(
+        (value for value in candidates if (value / 'server_management.py').is_file()), None
+    )
+    if folder is None:
+        raise RuntimeError('The management runtime is not available')
+    source = folder / 'server_management.py'
+    key = str(source.resolve())
+    if key not in _BACKENDS:
+        existing = sys.modules.get('server_management')
+        if existing is not None and Path(existing.__file__).resolve() == source.resolve():
+            module = existing
+        else:
+            if str(folder) not in sys.path:
+                sys.path.insert(0, str(folder))
+            name = '_misbot_server_management_' + hashlib.sha256(key.encode()).hexdigest()[:16]
+            spec = importlib.util.spec_from_file_location(name, source)
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[name] = module
+            spec.loader.exec_module(module)
+        _BACKENDS[key] = module
+    module = _BACKENDS[key]
+    if configured is not None and folder == configured:
+        module.command_wrapper.trusted_installation(configured)
+    return module
+
+
+def __getattr__(name):
+    # Compatibility for source callers; optional management does not affect bridge startup.
+    if name in ('COMMANDS', 'WRITES', 'server_management'):
+        module = load_backend()
+        return module if name == 'server_management' else getattr(module, name)
+    raise AttributeError(name)
+
+
+def run_control(config, operation, *, period='day'):
     try:
-        imported = (
-            json.loads((root / 'installation.json').read_text()).get('backend')
-            == 'existing-compose'
-        )
-    except (OSError, ValueError):
-        imported = False
-    if not imported:
-        raise BotError('Управление службами доступно для подключённого стека existing-compose.')
-    command = [
-        '/usr/bin/python3',
-        str(root / 'misbot.py'),
-        '--directory',
-        str(root),
-        *COMMANDS[operation],
-    ]
-    if operation == 'storage_connect':
-        command += ['--config', str(root / '.misbot/s3/media.env')]
-    try:
-        response = subprocess.run(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            timeout=1200 if operation in WRITES else 85,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return {'operation': operation, 'ok': False, 'recovery_required': True}
-    result = {'operation': operation, 'ok': response.returncode == 0}
-    for line in response.stdout.splitlines():
-        try:
-            item = json.loads(line)
-        except (ValueError, UnicodeError):
-            continue
-        if not isinstance(item, dict):
-            continue
-        if item.get('check') == 'existing_status':
-            result['backup_pending'] = bool(item.get('backup_pending'))
-            result['containers'] = [
-                {
-                    'name': c['name'],
-                    'running': c.get('running') is True,
-                    'healthy': c.get('health') in ('none', 'healthy'),
-                }
-                for c in item.get('containers', [])
-                if isinstance(c, dict)
-                and isinstance(c.get('name'), str)
-                and re.fullmatch(r'[a-zA-Z0-9_.-]{1,80}', c['name'])
-            ]
-        if item.get('check') == 'existing_checks':
-            result['checks'] = [
-                {'name': c['name'], 'passed': c.get('passed') is True}
-                for c in item.get('checks', [])
-                if isinstance(c, dict)
-                and isinstance(c.get('name'), str)
-                and re.fullmatch(r'[a-zA-Z0-9_.-]{1,80}', c['name'])
-            ]
-        if item.get('check') == 'existing_storage_status':
-            result['storage'] = {
-                k: item.get(k) is True
-                for k in (
-                    'media_s3',
-                    'backup_s3',
-                    'media_pending',
-                    'last_backup_verified',
-                    'backup_pending',
-                )
-            }
-        if item.get('check') == 'existing_features':
-            result['components'] = {
-                k: item.get(k) is True
-                for k in ('enabled', 'pending', 'referral_bot', 'federation_bot')
-            }
-            for key in ('admin', 'homepage'):
-                value = item.get(key)
-                if isinstance(value, str) and re.fullmatch(r'[a-z0-9.-]{1,253}', value):
-                    result['components'][key] = value
-    if operation in ('status', 'check') and not result.get(
-        'containers' if operation == 'status' else 'checks'
-    ):
-        result['ok'] = False
-    if operation == 'storage' and 'storage' not in result:
-        result['ok'] = False
-    if operation == 'components' and 'components' not in result:
-        result['ok'] = False
-    return result
+        backend = load_backend(config)
+        return backend.run_control(config, operation, period=period, runner=subprocess.run)
+    except (RuntimeError, OSError, ValueError):
+        raise BotError(
+            'Управляющая операция недоступна. Проверьте режим установки, разрешённые действия и состояние через SSH.'
+        ) from None

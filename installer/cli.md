@@ -266,8 +266,12 @@ JSON предназначен для будущего UI; UI не должен �
 | `misbot federation add` | `federation-add` | `--server` |
 | `misbot federation remove` | `federation-remove` | `--server` |
 | `misbot federation invite` | `federation-invite` | `--server` |
+| `misbot federation api status` | `federation-api-status` | нет |
+| `misbot federation api enable` | `federation-api-enable` | нет |
+| `misbot federation api disable` | `federation-api-disable` | нет |
 | `misbot federation peers` | `federation-peers` | нет |
 | `misbot federation requests` | `federation-requests` | нет |
+| `misbot federation requests clear` | `federation-clear-rejected` | нет |
 | `misbot federation operations` | `federation-operations` | нет |
 | `misbot federation requests status` | `federation-request-status` | `--request` |
 | `misbot federation requests approve` | `federation-approve` | `--request` |

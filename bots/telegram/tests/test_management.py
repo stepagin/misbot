@@ -48,7 +48,7 @@ class ManagementTests(unittest.TestCase):
         for uid in (10, 11):
             self.bridge.db.execute(
                 'INSERT INTO authorizations VALUES (?,?,?,?)',
-                ('example.org', uid, 'MAS-USER', int(time.time()) + 1000),
+                ('example.org', uid, f'MAS-USER-{uid}', int(time.time()) + 1000),
             )
         self.bridge.db.commit()
 
@@ -220,17 +220,24 @@ class ManagementTests(unittest.TestCase):
         with self.assertRaises(BotError):
             self.call('manage_apply', confirmation=confirmation)
         self.api.admin = True
-        with patch('bridge.threading.Thread') as thread:
+        queued = {'operation_id': 'SO-' + 'a' * 32, 'operation': 'backup', 'status': 'queued'}
+        with (
+            patch.object(self.bridge, 'management_runtime', return_value=self.root),
+            patch('server_management.queue_operation', return_value=queued) as enqueue,
+        ):
             job = self.call('manage_apply', confirmation=confirmation)
-            thread.return_value.start.assert_called_once()
+            enqueue.assert_called_once()
+            self.assertEqual(enqueue.call_args.kwargs['actor'], '@member:example.org')
         with self.assertRaises(BotError):
             self.call('manage_apply', confirmation=confirmation)
         with self.assertRaises(BotError):
             self.call('manage_job', uid=11, job=job['job'])
-        self.assertEqual(self.call('manage_job', job=job['job'])['state'], 'running')
-        with patch('bridge.run_control', return_value={'operation': 'backup', 'ok': True}):
-            self.bridge.management_job(job['job'], self.config, 'backup')
-        self.assertTrue(self.call('manage_job', job=job['job'])['result']['ok'])
+        finished = {**queued, 'status': 'complete', 'result': {'ok': True}}
+        with (
+            patch.object(self.bridge, 'management_runtime', return_value=self.root),
+            patch('server_management.operation_status', return_value=finished),
+        ):
+            self.assertTrue(self.call('manage_job', job=job['job'])['result']['ok'])
 
     def test_expired_confirmation_and_write_without_confirmation_rejected(self):
         confirmation = self.call('manage_prepare', operation='start')['confirmation']
@@ -241,16 +248,28 @@ class ManagementTests(unittest.TestCase):
         with self.assertRaises(BotError):
             self.call('manage_read', operation='start')
 
-    def test_one_active_job_and_no_replay_after_service_restart(self):
+    def test_detached_job_survives_bridge_restart_and_is_not_replayed(self):
         first = self.call('manage_prepare', operation='backup')['confirmation']
         second = self.call('manage_prepare', operation='start')['confirmation']
-        with patch('bridge.threading.Thread'):
+        queued = {'operation_id': 'SO-' + 'b' * 32, 'operation': 'backup', 'status': 'queued'}
+        with (
+            patch.object(self.bridge, 'management_runtime', return_value=self.root),
+            patch('server_management.queue_operation', side_effect=[queued, RuntimeError('busy')]),
+        ):
             job = self.call('manage_apply', confirmation=first)
             with self.assertRaises(BotError):
                 self.call('manage_apply', confirmation=second)
         self.bridge.db.close()
         self.bridge = Bridge(self.root / 'bot-config.json', FakeMAS)
-        self.assertEqual(self.call('manage_job', job=job['job'])['state'], 'interrupted')
+        with (
+            patch.object(self.bridge, 'management_runtime', return_value=self.root),
+            patch(
+                'server_management.operation_status', return_value={**queued, 'status': 'running'}
+            ),
+            patch('server_management.queue_operation') as enqueue,
+        ):
+            self.assertEqual(self.call('manage_job', job=job['job'])['state'], 'running')
+            enqueue.assert_not_called()
 
 
 if __name__ == '__main__':

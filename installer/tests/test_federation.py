@@ -8,7 +8,7 @@ import tarfile
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import configuration
@@ -118,27 +118,30 @@ class FederationTests(unittest.TestCase):
         self.assertEqual(self.a.operate('request-status', rid)['state'], 'connected')
 
     def test_reject_cancel_and_preexisting_policy_preserved(self):
-        self.a.operate('add', 'b.example')
         rid = self.invite()
         self.b.operate('reject', rid)
         self.assertEqual(self.a.operate('request-status', rid)['state'], 'rejected')
+        with patch.object(federation.time, 'time', return_value=int(time.time()) + 61):
+            rid = self.invite()
+            self.a.operate('cancel', rid)
+        self.assertEqual(self.b.operate('requests')['requests'][0]['state'], 'rejected')
+        self.assertEqual(len(self.b.operate('requests')['requests']), 1)
+        self.a.operate('add', 'b.example')
+        with self.assertRaisesRegex(protocol.ProtocolError, 'peer_already_connected'):
+            self.invite()
         self.assertIn('b.example', self.a.servers())
-        rid = self.invite()
-        self.b.operate('approve', rid)
-        self.a.operate('cancel', rid)
-        self.assertIn('b.example', self.a.servers())
-        self.assertIn('a.example', self.b.servers())
 
     def test_simultaneous_invites_and_expiration(self):
         a = self.invite()
-        b = self.b.operate('invite', 'a.example')['id']
-        self.assertNotEqual(a, b)
-        self.a.operate('approve', b)
+        with self.assertRaisesRegex(protocol.ProtocolError, 'pending_request_exists'):
+            self.b.operate('invite', 'a.example')
         self.b.operate('approve', a)
         self.assertEqual(self.a.servers().count('b.example'), 1)
+        self.assertEqual(self.a.operate('requests')['requests'], [])
         data = self.a.load()
-        data['requests'][a]['state'] = 'pending'
-        data['requests'][a]['expires_at'] = 0
+        item = data['requests'][a]
+        item.update(state='pending', local_approval=False, remote_approval=False, expires_at=0)
+        item.update(local_applied=False, remote_applied=False)
         self.a.save(data)
         self.assertEqual(self.a.operate('retry', a)['state'], 'expired')
 
@@ -189,6 +192,360 @@ class FederationTests(unittest.TestCase):
             request = protocol.envelope(self.a.doc(), self.a.key, self.b.doc(), body)
         self.b.receive(request)
         self.assertEqual(self.b.operate('request-status', rid)['state'], 'pending')
+
+    def test_thirty_day_deadline_and_persistent_creation_limit(self):
+        now = int(time.time())
+        with patch.object(federation.time, 'time', return_value=now):
+            rid = self.invite()
+            self.assertEqual(self.a.load()['requests'][rid]['expires_at'], now + 30 * 86400)
+            self.assertEqual(self.a.operate('invite', 'b.example')['id'], rid)
+            self.a.operate('cancel', rid)
+            with self.assertRaisesRegex(protocol.ProtocolError, 'invitation_rate_limit'):
+                self.invite()
+            # A newly constructed backend retains the limiter in state.json.
+            fresh = federation.Backend(
+                self.a.root, transport=self.transport, admin=lambda actor: True, admission=False
+            )
+            with self.assertRaisesRegex(protocol.ProtocolError, 'invitation_rate_limit'):
+                fresh.operate('invite', 'b.example')
+        with patch.object(federation.time, 'time', return_value=now + 60):
+            new = self.invite()
+        self.assertNotEqual(rid, new)
+
+    def test_expiry_notifies_peer_and_never_removes_applied_policy(self):
+        now = int(time.time())
+        rid = self.invite()
+        deadline = self.b.load()['requests'][rid]['expires_at']
+        self.b.operate('api-disable')
+        with patch.object(federation.time, 'time', return_value=deadline):
+            self.b.maintain()
+            item = self.b.load()['requests'][rid]
+            self.assertEqual(item['state'], 'expired')
+            self.assertTrue(item['delivery_pending'])
+            self.b.operate('api-enable')
+            self.b.maintain()
+            self.assertNotIn('delivery_pending', self.b.load()['requests'][rid])
+            self.assertEqual(self.a.operate('request-status', rid)['state'], 'expired')
+            self.assertEqual(self.b.operate('requests')['requests'][0]['state'], 'expired')
+        with patch.object(federation.time, 'time', return_value=now + 61):
+            rid = self.invite()
+            self.b.operate('approve', rid)
+        with patch.object(federation.time, 'time', return_value=deadline + 86400):
+            self.assertEqual(self.a.operate('retry', rid)['state'], 'connected')
+            self.assertIn('b.example', self.a.servers())
+
+    def test_approved_interrupted_saga_can_finish_after_invitation_deadline(self):
+        rid = self.invite()
+        deadline = self.a.load()['requests'][rid]['expires_at']
+        self.allowed.remove('@admin:a.example')
+        self.b.operate('approve', rid, actor='@admin:b.example')
+        with patch.object(federation.time, 'time', return_value=deadline + 1):
+            self.b.maintain()
+            self.assertEqual(self.b.load()['requests'][rid]['state'], 'accepted')
+            self.allowed.add('@admin:a.example')
+            self.b.operate('retry', rid)
+            self.assertEqual(self.a.operate('request-status', rid)['state'], 'connected')
+
+    def test_new_invitation_cannot_change_identity_of_pending_peer(self):
+        rid = self.invite()
+        document = self.a.doc()
+        document['instance_id'] = 'f' * 32
+        original = self.b.transport
+
+        def changed(server, path, body=None):
+            return document if path == protocol.DISCOVERY else original(server, path, body)
+
+        self.b.transport = changed
+        with self.assertRaisesRegex(protocol.ProtocolError, 'peer_identity_changed'):
+            self.b.peer(self.b.load(), 'a.example')
+        self.assertEqual(self.b.load()['requests'][rid]['state'], 'pending')
+
+    def test_incoming_new_id_spam_cannot_bypass_creation_interval(self):
+        rid = self.invite()
+        self.b.operate('reject', rid)
+        message = protocol.envelope(
+            self.a.doc(),
+            self.a.key,
+            self.b.doc(),
+            {
+                'action': 'invite',
+                'request_id': 'MB-' + 'f' * 32,
+                'expires_at': int(time.time()) + protocol.REQUEST_TTL,
+                'approved': True,
+                'applied': False,
+            },
+        )
+        with self.assertRaisesRegex(protocol.ProtocolError, 'invitation_rate_limit'):
+            self.b.receive(message)
+        self.assertEqual(len(self.b.load()['requests']), 1)
+
+    def test_delayed_rejection_and_unapplied_status_cannot_regress_connected_peer(self):
+        rid = self.invite()
+        self.b.operate('approve', rid)
+        for action in ('status', 'rejected', 'cancelled'):
+            delayed = protocol.envelope(
+                self.b.doc(),
+                self.b.key,
+                self.a.doc(),
+                {
+                    'action': action,
+                    'request_id': rid,
+                    'expires_at': self.b.load()['requests'][rid]['expires_at'],
+                    'approved': False,
+                    'applied': False,
+                },
+            )
+            self.assertEqual(self.a.receive(delayed)['payload']['body']['state'], 'connected')
+        item = self.a.load()['requests'][rid]
+        self.assertTrue(item['remote_applied'])
+        self.assertEqual(self.a.operate('peers')['peers'][0]['state'], 'connected')
+        self.assertEqual(self.a.operate('requests')['requests'], [])
+
+    def test_clearing_rejections_retains_replay_tombstone_and_allows_new_request(self):
+        now = int(time.time())
+        rid = self.invite()
+        self.b.operate('reject', rid)
+        self.assertEqual(self.b.operate('clear-rejected')['count'], 1)
+        self.assertEqual(self.b.operate('requests')['requests'], [])
+        old = self.a.load()['requests'][rid]
+        delayed = protocol.envelope(
+            self.a.doc(),
+            self.a.key,
+            self.b.doc(),
+            {
+                'action': 'invite',
+                'request_id': rid,
+                'expires_at': old['expires_at'],
+                'approved': True,
+                'applied': False,
+            },
+        )
+        self.assertEqual(self.b.receive(delayed)['payload']['body']['state'], 'rejected')
+        self.assertEqual(self.b.operate('requests')['requests'], [])
+        with patch.object(federation.time, 'time', return_value=now + 61):
+            self.assertNotEqual(self.invite(), rid)
+        self.assertEqual(len(self.b.operate('requests')['requests']), 1)
+
+    def test_cancel_before_invite_delivery_hides_request_at_both_ends(self):
+        original = self.a.transport
+
+        def offline(server, path, body=None):
+            if path == protocol.API:
+                raise protocol.ProtocolError('timeout')
+            return original(server, path, body)
+
+        self.a.transport = offline
+        rid = self.invite()
+        old = self.a.load()['requests'][rid]
+        self.assertEqual(self.b.load()['requests'], {})
+        self.a.transport = original
+        self.a.operate('cancel', rid)
+        delayed = protocol.envelope(
+            self.a.doc(),
+            self.a.key,
+            self.b.doc(),
+            {
+                'action': 'invite',
+                'request_id': rid,
+                'expires_at': old['expires_at'],
+                'approved': True,
+                'applied': False,
+            },
+        )
+        self.assertEqual(self.b.receive(delayed)['payload']['body']['state'], 'cancelled')
+        self.assertEqual(self.a.operate('requests')['requests'], [])
+        self.assertEqual(self.b.operate('requests')['requests'], [])
+
+    def test_rejection_delivery_retries_after_api_off_and_lost_response(self):
+        rid = self.invite()
+        self.a.operate('api-disable')
+        result = self.b.operate('reject', rid)
+        self.assertEqual(result['code'], 'api_disabled')
+        self.assertTrue(self.b.load()['requests'][rid]['delivery_pending'])
+        self.b.operate('clear-rejected', rid)
+        self.a.operate('api-enable')
+        self.lose = True
+        self.b.maintain()
+        self.assertTrue(self.b.load()['requests'][rid]['delivery_pending'])
+        self.assertEqual(self.a.operate('request-status', rid)['state'], 'rejected')
+        with patch.object(federation.time, 'time', return_value=int(time.time()) + 61):
+            self.b.maintain()
+        self.assertNotIn('delivery_pending', self.b.load()['requests'][rid])
+        self.assertEqual(self.b.operate('requests')['requests'], [])
+
+    def test_failed_first_delivery_cannot_starve_later_pending_results(self):
+        original = self.transport
+        now = int(time.time())
+
+        def offline(server, path, body=None):
+            if path == protocol.API:
+                raise protocol.ProtocolError('timeout')
+            return original(server, path, body)
+
+        self.b.transport = offline
+        with patch.object(federation.time, 'time', return_value=now):
+            first = self.invite()
+            self.b.operate('reject', first)
+            self.a.operate('retry', first)
+        with patch.object(federation.time, 'time', return_value=now + 61):
+            second = self.invite()
+            self.b.operate('reject', second)
+        self.assertNotEqual(first, second)
+
+        def first_remains_offline(server, path, body=None):
+            if path == protocol.API and body['payload']['body']['request_id'] == first:
+                raise protocol.ProtocolError('timeout')
+            return original(server, path, body)
+
+        self.b.transport = first_remains_offline
+        with patch.object(federation.time, 'time', return_value=now + 120):
+            self.b.maintain()
+        with patch.object(federation.time, 'time', return_value=now + 180):
+            self.b.maintain()
+        requests = self.b.load()['requests']
+        self.assertTrue(requests[first]['delivery_pending'])
+        self.assertNotIn('delivery_pending', requests[second])
+        self.assertEqual(self.a.operate('request-status', second)['state'], 'rejected')
+
+    def test_api_setting_defaults_and_survives_setup_without_replacing_identity(self):
+        saved = self.a.load()
+        saved.pop('api_enabled', None)
+        self.a.save(saved)
+        key = self.a.key.read_bytes()
+        self.assertEqual(self.a.operate('api-status'), {'enabled': True})
+        self.a.operate('api-disable')
+        federation.setup(self.a.root, {'domain': 'a.example', 'federation_seeded': True})
+        self.assertEqual(self.a.operate('api-status'), {'enabled': False})
+        self.assertEqual(self.a.key.read_bytes(), key)
+        self.assertEqual(self.a.load()['instance_id'], saved['instance_id'])
+        with self.assertRaisesRegex(protocol.ProtocolError, 'api_disabled'):
+            self.invite()
+        self.assertEqual(self.a.operate('servers')['servers'], ['a.example'])
+        self.a.operate('api-enable')
+        self.assertEqual(self.a.operate('api-enable')['status'], 'unchanged')
+
+    def test_connected_stale_requests_cannot_be_accepted_or_rejected(self):
+        rid = self.invite()
+        self.b.operate('add', 'a.example')
+        self.assertEqual(self.b.operate('requests')['requests'], [])
+        for action in ('approve', 'reject'):
+            with self.assertRaisesRegex(protocol.ProtocolError, 'peer_already_connected'):
+                self.b.operate(action, rid)
+        self.b.maintain()
+        self.assertEqual(self.a.operate('requests')['requests'], [])
+        self.assertIn('a.example', self.b.servers())
+
+    def test_legacy_peer_requires_upgrade_before_new_thirty_day_invitation(self):
+        transport = self.a.transport
+
+        def legacy(server, path, body=None):
+            result = transport(server, path, body)
+            if path == protocol.DISCOVERY:
+                result.pop('request_ttl', None)
+            return result
+
+        self.a.transport = legacy
+        with self.assertRaisesRegex(protocol.ProtocolError, 'peer_upgrade_required'):
+            self.invite()
+        self.assertEqual(self.a.load()['requests'], {})
+        self.assertNotIn('last_invitation_at', self.a.load())
+
+    def test_invitation_preflight_rejects_plain_matrix_and_unsupported_peers_before_post(self):
+        document = self.b.doc()
+        original = self.transport
+        cases = [
+            (protocol.ProtocolError('remote_http_404'), 'misbot_not_found'),
+            (protocol.ProtocolError('invalid_json_response'), 'invalid_misbot_discovery'),
+            ({'m.server': 'b.example:443'}, 'invalid_misbot_discovery'),
+            ('<html>Matrix server</html>', 'invalid_misbot_discovery'),
+            ({**document, 'protocol': 99}, 'unsupported_version'),
+            ({**document, 'api_path': '/arbitrary-admin'}, 'invalid_misbot_discovery'),
+            ({**document, 'public_key': None}, 'invalid_misbot_discovery'),
+            ({**document, 'capabilities': {}}, 'invalid_misbot_discovery'),
+            ({**document, 'capabilities': []}, 'invitation_unsupported'),
+            ({k: v for k, v in document.items() if k != 'capabilities'}, 'peer_upgrade_required'),
+            (protocol.ProtocolError('remote_api_disabled'), 'remote_api_disabled'),
+        ]
+        for discovery, code in cases:
+            calls = []
+
+            def transport(server, path, body=None):
+                calls.append((path, body))
+                if path == protocol.DISCOVERY:
+                    if isinstance(discovery, Exception):
+                        raise discovery
+                    return discovery
+                return original(server, path, body)
+
+            with self.subTest(code=code, discovery_type=type(discovery).__name__):
+                self.a.transport = transport
+                preflight = self.a.operate('check', 'b.example')['invitation']
+                self.assertFalse(preflight['ready'])
+                self.assertFalse(preflight['supported'])
+                self.assertEqual(preflight['code'], code)
+                with self.assertRaisesRegex(protocol.ProtocolError, code):
+                    self.invite()
+                self.assertEqual(self.a.load()['requests'], {})
+                self.assertNotIn('last_invitation_at', self.a.load())
+                self.assertTrue(all(path != protocol.API and body is None for path, body in calls))
+
+    def test_preflight_advertises_capability_without_creating_and_rechecks_before_invite(self):
+        document = self.b.doc()
+        self.assertIn(protocol.INVITATION_CAPABILITY, document['capabilities'])
+        preflight = self.a.operate('check', 'b.example')['invitation']
+        self.assertEqual(
+            preflight,
+            {
+                'supported': True,
+                'ready': True,
+                'expires_after': 30 * 86400,
+            },
+        )
+        self.assertEqual(self.a.load()['requests'], {})
+        self.a.operate('api-disable')
+        preflight = self.a.operate('check', 'b.example')['invitation']
+        self.assertTrue(preflight['supported'])
+        self.assertFalse(preflight['ready'])
+        self.assertEqual(preflight['code'], 'api_disabled')
+        self.a.operate('api-enable')
+        document['capabilities'] = []
+        original = self.transport
+        posts = []
+
+        def changed(server, path, body=None):
+            if path == protocol.DISCOVERY:
+                return document
+            posts.append((path, body))
+            return original(server, path, body)
+
+        self.a.transport = changed
+        with self.assertRaisesRegex(protocol.ProtocolError, 'invitation_unsupported'):
+            self.invite()
+        self.assertEqual(posts, [])
+        self.assertEqual(self.a.load()['requests'], {})
+
+    def test_crossed_offline_invites_converge_without_transferring_approval(self):
+        original = self.transport
+
+        def offline(server, path, body=None):
+            if path == protocol.API:
+                raise protocol.ProtocolError('timeout')
+            return original(server, path, body)
+
+        self.a.transport = offline
+        self.b.transport = offline
+        a = self.invite()
+        b = self.b.operate('invite', 'a.example')['id']
+        self.a.transport = original
+        self.b.transport = original
+        winner, loser = (self.a, self.b) if a < b else (self.b, self.a)
+        winner_id, loser_id = (a, b) if a < b else (b, a)
+        winner.operate('retry', winner_id)
+        self.assertEqual(loser.operate('request-status', loser_id)['state'], 'cancelled')
+        self.assertFalse(loser.load()['requests'][winner_id]['local_approval'])
+        self.assertEqual(len(loser.operate('requests')['requests']), 1)
+        loser.operate('approve', winner_id)
+        self.assertEqual(winner.operate('request-status', winner_id)['state'], 'connected')
 
     def test_current_admin_local_uid_and_event_replay(self):
         for actor in (
@@ -462,6 +819,35 @@ class FederationTests(unittest.TestCase):
         with patch('socket.getaddrinfo', return_value=[(2, 1, 6, '', ('127.0.0.1', 443))]):
             with self.assertRaisesRegex(protocol.ProtocolError, 'non_public_destination'):
                 protocol.https('example.org', protocol.DISCOVERY)
+
+    def test_https_discovery_distinguishes_api_off_and_malformed_response_without_network(self):
+        cases = (
+            (
+                503,
+                b'{"code":"api_disabled","detail":"FICTIONAL_PRIVATE_VALUE"}',
+                'remote_api_disabled',
+            ),
+            (503, b'<html>busy</html>', 'remote_http_503'),
+            (200, b'<html>Matrix</html>', 'invalid_misbot_discovery'),
+            (404, b'{}', 'misbot_not_found'),
+        )
+        for status, body, code in cases:
+            connection = Mock()
+            connection.getresponse.return_value.status = status
+            connection.getresponse.return_value.read.return_value = body
+            with (
+                self.subTest(status=status, code=code),
+                patch.object(
+                    protocol.socket, 'getaddrinfo', return_value=[(2, 1, 6, '', ('8.8.8.8', 443))]
+                ),
+                patch.object(protocol.socket, 'socket'),
+                patch.object(protocol.ssl, 'create_default_context'),
+                patch.object(protocol.http.client, 'HTTPSConnection', return_value=connection),
+            ):
+                with self.assertRaisesRegex(protocol.ProtocolError, code) as error:
+                    protocol.discover('b.example')
+                self.assertNotIn('FICTIONAL_PRIVATE_VALUE', str(error.exception))
+            self.assertEqual(connection.request.call_args.args[:2], ('GET', protocol.DISCOVERY))
 
     def test_backup_actual_extract_identity_request_and_keys(self):
         rid = self.invite()

@@ -118,12 +118,156 @@ class ControlTests(unittest.TestCase):
     def call(self, action, uid=10, **extras):
         return self.bridge.handle({'action': action, 'server': 'misbot.ru', 'uid': uid, **extras})
 
-    def authorize(self, uid=10):
+    def authorize(self, uid=10, user_id=None):
         self.bridge.db.execute(
             'INSERT INTO authorizations VALUES (?,?,?,?)',
-            ('misbot.ru', uid, 'MAS-USER', int(time.time()) + 3600),
+            (
+                'misbot.ru',
+                uid,
+                user_id or ('MAS-USER' if uid == 10 else f'MAS-USER-{uid}'),
+                int(time.time()) + 3600,
+            ),
         )
         self.bridge.db.commit()
+
+    def sign_in(self, uid=10, user_id='MAS-USER'):
+        self.call('auth_start', uid=uid)
+        self.bridge.db.execute('UPDATE auth_requests SET next_poll=0')
+        self.api.device_result = (200, {'scope': 'openid'})
+        with patch.object(self.api, 'device_user', return_value=self.api.active_user(user_id)):
+            self.bridge.poll_auths()
+
+    def test_control_configuration_binds_exactly_one_server_before_database_changes(self):
+        original = json.loads((self.root / 'bot-config.json').read_text())
+        for servers in ({}, {'misbot.ru': {}, 'other.example': {}}, []):
+            with self.subTest(servers=servers):
+                (self.root / 'bot-config.json').write_text(json.dumps({'servers': servers}))
+                with self.assertRaisesRegex(BotError, 'ровно к одному серверу'):
+                    Bridge(self.root / 'bot-config.json', FakeMAS)
+        (self.root / 'bot-config.json').write_text(json.dumps(original))
+        policy = json.loads((self.root / 'bot-policy.json').read_text())
+        policy['servers']['other.example'] = policy['servers']['misbot.ru']
+        (self.root / 'bot-policy.json').write_text(json.dumps(policy))
+        with self.assertRaisesRegex(BotError, 'только к его серверу'):
+            Bridge(self.root / 'bot-config.json', FakeMAS)
+
+    def test_new_telegram_login_moves_history_and_revokes_previous_account(self):
+        self.sign_in()
+        invitation = self.call('invite', request_id='before-switch')
+        confirmation = self.call('fed_prepare', operation='add', domain='other.example')[
+            'confirmation'
+        ]
+        self.bridge.db.execute(
+            'INSERT INTO management_jobs VALUES (?,?,?,?,?,?)',
+            ('old-job', 'misbot.ru', 10, 'backup', 'complete', '{}'),
+        )
+        self.bridge.db.execute(
+            'INSERT INTO telegram_federation_jobs VALUES (?,?,?)', ('old-fed-job', 'misbot.ru', 10)
+        )
+        self.bridge.db.execute(
+            'INSERT INTO telegram_notifications (id,server,uid,message) VALUES (?,?,?,?)',
+            ('notice', 'misbot.ru', 10, 'private notice'),
+        )
+        self.bridge.db.commit()
+        self.call('auth_start', uid=11)
+        self.assertTrue(self.call('identity')['authenticated'])
+        self.sign_in(uid=11)
+        self.assertFalse(self.call('identity')['authenticated'])
+        self.assertTrue(self.call('identity', uid=11)['authenticated'])
+        self.assertEqual(self.call('tokens', uid=11)['tokens'], [invitation])
+        for table in ('management_jobs', 'telegram_federation_jobs'):
+            self.assertEqual(self.bridge.db.execute(f'SELECT uid FROM {table}').fetchone()[0], 11)
+        self.assertFalse(self.bridge.db.execute('SELECT 1 FROM telegram_notifications').fetchone())
+        self.assertFalse(
+            self.bridge.db.execute(
+                'SELECT 1 FROM confirmations WHERE id=?', (confirmation,)
+            ).fetchone()
+        )
+        with self.assertRaises(BotError):
+            self.call('fed_apply', uid=11, confirmation=confirmation)
+        self.assertFalse(
+            self.call('revoke', uid=11, resource=invitation['id'])['attributes']['valid']
+        )
+
+    def test_logout_then_new_telegram_account_preserves_mas_ownership_after_restart(self):
+        self.sign_in()
+        invitation = self.call('invite', request_id='before-logout')
+        self.call('logout')
+        self.bridge.db.close()
+        self.bridge = Bridge(self.root / 'bot-config.json', lambda _: self.api)
+        self.sign_in(uid=11)
+        self.assertEqual(self.call('tokens', uid=11)['tokens'], [invitation])
+        self.assertFalse(self.call('identity')['authenticated'])
+
+    def test_another_mas_identity_does_not_inherit_private_history_of_same_telegram_uid(self):
+        self.sign_in()
+        invitation = self.call('invite', request_id='first-identity')
+        self.sign_in(user_id='ANOTHER-MAS-USER')
+        self.assertEqual(self.call('tokens')['tokens'], [])
+        with self.assertRaises(BotError):
+            self.call('revoke', resource=invitation['id'])
+        self.sign_in(uid=11)
+        self.assertEqual(self.call('tokens', uid=11)['tokens'], [invitation])
+        self.assertTrue(self.call('identity')['authenticated'])
+
+    def test_superseded_pending_login_is_not_polled_after_account_move(self):
+        self.sign_in()
+        self.call('auth_start', uid=11)
+        self.call('auth_start', uid=10)
+        self.bridge.db.execute('UPDATE auth_requests SET next_poll=0')
+        with patch.object(self.api, 'device_token', wraps=self.api.device_token) as poll:
+            self.bridge.poll_auths()
+        self.assertEqual(poll.call_count, 1)
+        self.assertFalse(self.call('identity')['authenticated'])
+        self.assertTrue(self.call('identity', uid=11)['authenticated'])
+
+    def test_legacy_duplicate_mas_logins_merge_into_latest_binding_without_history_leak(self):
+        self.authorize()
+        self.authorize(11, user_id='MAS-USER')
+        self.bridge.db.execute('UPDATE authorizations SET expires=expires+100 WHERE uid=11')
+        invitation = self.call('invite', request_id='legacy-owner')
+        self.bridge.db.close()
+        self.bridge = Bridge(self.root / 'bot-config.json', lambda _: self.api)
+        self.assertFalse(self.call('identity')['authenticated'])
+        self.assertEqual(self.call('tokens', uid=11)['tokens'], [invitation])
+        self.sign_in(user_id='ANOTHER-MAS-USER')
+        self.assertEqual(self.call('tokens')['tokens'], [])
+        self.assertEqual(self.call('tokens', uid=11)['tokens'], [invitation])
+
+    def test_legacy_logged_out_history_is_retained_without_granting_unknown_ownership(self):
+        self.authorize()
+        invitation = self.call('invite', request_id='legacy-logged-out')
+        self.call('logout')
+        self.bridge.db.execute('DROP TABLE telegram_accounts')
+        self.bridge.db.commit()
+        self.bridge.db.close()
+        self.bridge = Bridge(self.root / 'bot-config.json', lambda _: self.api)
+        self.sign_in(user_id='ANOTHER-MAS-USER')
+        self.assertEqual(self.call('tokens')['tokens'], [])
+        retained = self.bridge.db.execute(
+            'SELECT uid,resource FROM invitations WHERE resource=?', (invitation['id'],)
+        ).fetchone()
+        self.assertTrue(retained['uid'].startswith('retired:'))
+        self.assertEqual(retained['resource'], invitation['id'])
+
+    def test_legacy_foreign_pending_grant_does_not_block_local_login(self):
+        self.call('auth_start')
+        self.bridge.db.execute(
+            'INSERT INTO auth_requests SELECT ?,?,11,device_code,expires,interval,0,NULL,'
+            'user_code,verification_uri FROM auth_requests LIMIT 1',
+            ('foreign-request', 'other.example'),
+        )
+        self.bridge.db.execute('UPDATE auth_requests SET next_poll=0')
+        self.api.device_result = (200, {'scope': 'openid'})
+        with patch.object(self.api, 'device_token', wraps=self.api.device_token) as poll:
+            self.bridge.poll_auths()
+        self.assertEqual(poll.call_count, 1)
+        self.assertTrue(self.call('identity')['authenticated'])
+        self.assertTrue(
+            self.bridge.db.execute(
+                'SELECT 1 FROM auth_requests WHERE request=?', ('foreign-request',)
+            ).fetchone()
+        )
 
     def test_invitation_policy_unlimited_count_and_idempotent_delivery(self):
         from datetime import datetime

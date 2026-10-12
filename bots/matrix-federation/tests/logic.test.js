@@ -1,7 +1,19 @@
 "use strict";
 const test = require("node:test"),
     assert = require("node:assert/strict");
-const { FederationBot, parse, HELP, MORE, resultText, stateText } = require("../logic");
+const {
+    FederationBot,
+    parse,
+    HELP,
+    MORE,
+    MAINTENANCE,
+    FEDERATION,
+    resultText,
+    stateText,
+    requestsText,
+    serverText,
+    errorText
+} = require("../logic");
 function setup() {
     const cfg = {
             user_id: "@federation-bot:example.org",
@@ -33,7 +45,9 @@ function setup() {
             ? { authorized: true }
             : r.action === "auto-invitation"
               ? { allowed: false }
-              : { status: "applied" };
+              : r.action === "check"
+                ? { invitation: { supported: true, ready: true, expires_after: 2592000 } }
+                : { status: "applied" };
     };
     const bot = new FederationBot(
         client,
@@ -58,11 +72,135 @@ function setup() {
         }
     };
 }
+
+test("server invitation checks Misbot capabilities before creating a confirmation", async () => {
+    for (const code of [
+        "misbot_not_found",
+        "remote_api_disabled",
+        "invitation_unsupported",
+        "unsupported_version"
+    ]) {
+        const x = setup();
+        const control = x.bot.control;
+        x.bot.control = async (request) => {
+            if (request.action === "check") {
+                x.calls.push(request);
+                return { invitation: { supported: false, ready: false, code } };
+            }
+            return control(request);
+        };
+        await x.bot.message("!private", {
+            ...x.event,
+            content: { msgtype: "m.text", body: "пригласить сервер other.example" }
+        });
+        await x.bot.message("!private", {
+            ...x.event,
+            event_id: "$confirm",
+            content: { msgtype: "m.text", body: "выполнить подтверждаю" }
+        });
+        assert.equal(x.calls.filter((request) => request.action === "invite").length, 0);
+        assert.ok(x.sent.some((text) => text.includes("Приглашение не отправлено")));
+    }
+});
+
+test("capability preview uses a different event from the confirmed invitation", async () => {
+    const x = setup();
+    await x.bot.message("!private", {
+        ...x.event,
+        content: { msgtype: "m.text", body: "пригласить сервер other.example" }
+    });
+    await x.bot.message("!private", {
+        ...x.event,
+        event_id: "$confirm",
+        content: { msgtype: "m.text", body: "выполнить подтверждаю" }
+    });
+    const preview = x.calls.find((request) => request.action === "check");
+    const mutation = x.calls.find((request) => request.action === "invite");
+    assert.ok(preview && mutation);
+    assert.notEqual(preview.event_id, mutation.event_id);
+});
+
+test("a failed new write attempt invalidates the previous operation before its preview", async () => {
+    for (const mode of ["unsupported", "timeout", "missing-request", "version-timeout"]) {
+        const x = setup();
+        const control = x.bot.control;
+        x.bot.control = async (request) => {
+            if (["check", "request-status", "panel-version"].includes(request.action)) {
+                x.calls.push(request);
+                assert.equal(x.bot.store.getValue("draft:!private"), null, mode);
+                if (mode !== "unsupported") throw new Error("preview unavailable");
+                return { invitation: { ready: false, code: "misbot_not_found" } };
+            }
+            return control(request);
+        };
+        const send = (body, event_id) =>
+            x.bot.message("!private", {
+                ...x.event,
+                event_id,
+                content: { msgtype: "m.text", body }
+            });
+        await send("api выключить", "$old");
+        const next =
+            mode === "missing-request"
+                ? "подтвердить MB-" + "a".repeat(32)
+                : mode === "version-timeout"
+                  ? "обновить"
+                  : "пригласить сервер unsupported.example";
+        if (mode === "unsupported") await send(next, "$new");
+        else await assert.rejects(send(next, "$new"));
+        await send("выполнить подтверждаю", "$confirm");
+        assert.equal(
+            x.calls.filter((r) =>
+                ["api-disable", "invite", "approve", "panel-update"].includes(r.action)
+            ).length,
+            0,
+            mode
+        );
+        assert.match(x.sent.at(-1), /Действующего предложения нет/, mode);
+    }
+});
+
+test("an unavailable invitation invalidates an earlier update while read commands keep a proposal", async () => {
+    const x = setup();
+    const control = x.bot.control;
+    x.bot.control = async (request) => {
+        if (request.action === "panel-version") {
+            x.calls.push(request);
+            return {
+                installed: "1.1.0",
+                latest: "1.2.0",
+                update_available: true,
+                update_supported: true
+            };
+        }
+        if (request.action === "check") {
+            x.calls.push(request);
+            return { invitation: { ready: false, code: "misbot_not_found" } };
+        }
+        return control(request);
+    };
+    let sequence = 0;
+    const send = (body) =>
+        x.bot.message("!private", {
+            ...x.event,
+            event_id: "$context" + ++sequence,
+            content: { msgtype: "m.text", body }
+        });
+    await send("обновить");
+    await send("пригласить сервер unsupported.example");
+    await send("обновить подтверждаю");
+    assert.equal(x.calls.filter((r) => r.action === "panel-update").length, 0);
+    await send("api выключить");
+    await send("api");
+    await send("выполнить подтверждаю");
+    assert.equal(x.calls.filter((r) => r.action === "api-disable").length, 1);
+});
 test("Russian grammar and opaque IDs", () => {
     assert.equal(parse("подтвердить MB-" + "a".repeat(32)).action, "approve");
     assert.equal(parse("подтвердить 1"), null);
-    assert.match(MORE, /взаимное подключение/);
-    assert.doesNotMatch(HELP + MORE, /копи|backup|перенос/i);
+    assert.match(FEDERATION, /взаимное подключение/);
+    assert.doesNotMatch(HELP, /создать копию|обновить подтверждаю|перезапустить сервер/i);
+    assert.match(MAINTENANCE, /перезапустить сервер/);
 });
 test("all federation command words ignore case without changing their arguments", () => {
     const id = "MB-" + "0123456789abcdef".repeat(2),
@@ -104,7 +242,6 @@ test("all federation command words ignore case without changing their arguments"
 });
 test("removed room commands never dispatch and are absent from help", async () => {
     const commands = [
-        "приглашения",
         "принять комнату !MiXeD:example.org",
         "отклонить комнату !MiXeD:example.org",
         "покинуть комнату !MiXeD:example.org",
@@ -123,7 +260,7 @@ test("removed room commands never dispatch and are absent from help", async () =
     }
     assert.doesNotMatch(
         HELP + MORE,
-        /приглашения|принять комнату|отклонить комнату|покинуть комнату|пригласить бота|автоприём/i
+        /принять комнату|отклонить комнату|покинуть комнату|пригласить бота|автоприём/i
     );
 });
 test("request IDs require their exact case and unknown commands stay unknown", () => {
@@ -146,6 +283,15 @@ test("mixed-case federation commands reach the backend with untouched IDs", asyn
             ...x.event,
             event_id: "$" + action,
             content: { msgtype: "m.text", body }
+        });
+        assert.equal(
+            x.calls.some((c) => c.action === action),
+            false
+        );
+        await x.bot.message("!room", {
+            ...x.event,
+            event_id: "$confirm" + action,
+            content: { msgtype: "m.text", body: "выполнить подтверждаю" }
         });
         assert.equal(x.calls.find((c) => c.action === action)?.argument, argument);
     }
@@ -170,7 +316,11 @@ test("everyday commands and settings work in either case", async () => {
         ["уведомления", "panel-status"],
         ["приветствие", "panel-welcome"],
         ...Object.entries({ день: "day", неделя: "week", месяц: "month", всего: "all" }).map(
-            ([period, value]) => ["статистика " + period, "panel-statistics", value]
+            ([period, value]) => [
+                "статистика " + period,
+                "panel-server-read",
+                { operation: "statistics", period: value }
+            ]
         ),
         ...Object.entries({
             обновления: "updates",
@@ -235,6 +385,11 @@ test("current rights and event replay/self/edit", async () => {
     const x = setup();
     await x.bot.message("!room", x.event);
     await x.bot.message("!room", x.event);
+    await x.bot.message("!room", {
+        ...x.event,
+        event_id: "$confirm",
+        content: { msgtype: "m.text", body: "выполнить подтверждаю" }
+    });
     assert.equal(x.calls.filter((r) => r.action === "add").length, 1);
     for (const sender of [x.cfg.user_id, "@admin:foreign.example"]) {
         await x.bot.message("!room", { ...x.event, event_id: "$foreign", sender });
@@ -353,8 +508,15 @@ test("owner revocation during an operation prevents its reply", async () => {
         if (request.action === "add") x.revoke();
         return result;
     };
-    await assert.rejects(x.bot.message("!room", x.event));
-    assert.equal(x.sent.length, 0);
+    await x.bot.message("!room", x.event);
+    await assert.rejects(
+        x.bot.message("!room", {
+            ...x.event,
+            event_id: "$confirm",
+            content: { msgtype: "m.text", body: "выполнить подтверждаю" }
+        })
+    );
+    assert.equal(x.sent.length, 1);
 });
 
 test("operation presentation separates acceptance, execution and completion", () => {
@@ -448,4 +610,256 @@ test("notifications keep commands, distinct states and deduplication after resta
     assert.equal(x.sent.length, 3);
     assert.match(x.sent[2], /политика применена на обоих серверах \(connected\)/);
     assert.doesNotMatch(x.sent[2], /комнаты проверены/);
+    assert.doesNotMatch(x.sent[2], /подтвердить |отклонить /);
+});
+
+test("grouped menus keep destructive actions inside maintenance and invitations inside more", async () => {
+    const x = setup();
+    for (const [body, expected] of [
+        ["меню", HELP],
+        ["обслуживание", MAINTENANCE],
+        ["ещё", MORE]
+    ]) {
+        await x.bot.message("!room", {
+            ...x.event,
+            event_id: "$" + body,
+            content: { msgtype: "m.text", body }
+        });
+        assert.equal(x.sent.at(-1), expected);
+    }
+    assert.match(HELP, /статистика[\s\S]*состояние[\s\S]*проверить[\s\S]*федерация/);
+    assert.doesNotMatch(HELP, /приглашения —|создать копию|остановить службы/);
+    x.bot.control = async (request) => {
+        x.calls.push(request);
+        return request.action === "authorize"
+            ? { authorized: true }
+            : { url: "https://matrix.to/#/@invites:example.org" };
+    };
+    await x.bot.message("!room", {
+        ...x.event,
+        event_id: "$referral",
+        content: { msgtype: "m.text", body: "приглашения" }
+    });
+    assert.match(x.sent.at(-1), /https:\/\/matrix.to\/#\/@invites:example.org/);
+    assert.equal(x.calls.filter((c) => c.action === "panel-referral").length, 1);
+});
+
+test("server maintenance needs one bound confirmation and returns its saved task identifier", async () => {
+    const x = setup();
+    x.bot.control = async (request) => {
+        x.calls.push(request);
+        return request.action === "authorize"
+            ? { authorized: true }
+            : { status: "queued", operation_id: "SO-fictional" };
+    };
+    const send = (body, event_id) =>
+        x.bot.message("!room", { ...x.event, event_id, content: { msgtype: "m.text", body } });
+    await send("перезапустить сервер", "$restart");
+    assert.equal(x.calls.filter((c) => c.action === "panel-server-operation").length, 0);
+    assert.match(x.sent.at(-1), /перерыв/);
+    await send("выполнить подтверждаю", "$confirm1");
+    await send("выполнить подтверждаю", "$confirm2");
+    const operations = x.calls.filter((c) => c.action === "panel-server-operation");
+    assert.equal(operations.length, 1);
+    assert.deepEqual(operations[0].argument, { operation: "restart" });
+    assert.equal(operations[0].event_id, "$restart");
+    assert.ok(x.sent.some((s) => s.includes("задача SO-fictional")));
+    await send("задача SO-fictional", "$result");
+    assert.equal(x.calls.find((c) => c.action === "panel-server-result").argument, "SO-fictional");
+});
+
+test("expired, cancelled and transferred confirmation drafts never execute", async () => {
+    for (const mode of ["expired", "cancelled", "room", "actor"]) {
+        const x = setup();
+        const send = (body, id) =>
+            x.bot.message("!room", {
+                ...x.event,
+                event_id: id,
+                content: { msgtype: "m.text", body }
+            });
+        await send("api выключить", "$off");
+        const draft = x.bot.store.getValue("draft:!room");
+        if (mode === "expired") draft.created = Date.now() - 301000;
+        if (mode === "room") draft.room = "!different";
+        if (mode === "actor") draft.actor = "@old-owner:example.org";
+        if (mode === "cancelled") await send("отмена", "$cancel");
+        await send("выполнить подтверждаю", "$confirm");
+        assert.equal(x.calls.filter((c) => c.action === "api-disable").length, 0, mode);
+        assert.match(x.sent.at(-1), /Действующего предложения нет/, mode);
+    }
+});
+
+test("an ambiguous confirmation reply retries the exact same proposal event", async () => {
+    const x = setup();
+    let attempts = 0;
+    x.bot.control = async (request) => {
+        x.calls.push(request);
+        if (request.action === "authorize") return { authorized: true };
+        if (request.action === "api-enable" && ++attempts === 1) throw new Error("timeout");
+        return { status: "already_processed" };
+    };
+    const send = (body, id) =>
+        x.bot.message("!room", { ...x.event, event_id: id, content: { msgtype: "m.text", body } });
+    await send("api включить", "$enable");
+    await assert.rejects(send("выполнить подтверждаю", "$confirm1"));
+    await send("выполнить подтверждаю", "$confirm2");
+    const attemptsMade = x.calls.filter((c) => c.action === "api-enable");
+    assert.deepEqual(
+        attemptsMade.map((c) => c.event_id),
+        ["$enable", "$enable"]
+    );
+});
+
+test("server reads and federation request categories remain separate", async () => {
+    const x = setup();
+    x.bot.control = async (request) => {
+        x.calls.push(request);
+        return request.action === "authorize"
+            ? { authorized: true }
+            : request.action === "requests"
+              ? {
+                    requests: [
+                        {
+                            id: "MB-in",
+                            server: "incoming.example",
+                            direction: "incoming",
+                            state: "pending"
+                        },
+                        {
+                            id: "MB-out",
+                            server: "outgoing.example",
+                            direction: "outgoing",
+                            state: "pending"
+                        },
+                        {
+                            id: "MB-no",
+                            server: "rejected.example",
+                            direction: "outgoing",
+                            state: "rejected"
+                        },
+                        {
+                            id: "MB-hidden",
+                            server: "hidden.example",
+                            direction: "incoming",
+                            state: "rejected",
+                            cleared: true
+                        }
+                    ]
+                }
+              : { ok: true, checks: [{ name: "matrix_https", passed: true }] };
+    };
+    for (const [body, expected, absent] of [
+        ["заявки входящие", "incoming.example", "outgoing.example"],
+        ["заявки исходящие", "outgoing.example", "incoming.example"],
+        ["заявки отклонённые", "rejected.example", "hidden.example"]
+    ]) {
+        await x.bot.message("!room", {
+            ...x.event,
+            event_id: "$" + body,
+            content: { msgtype: "m.text", body }
+        });
+        assert.ok(x.sent.at(-1).includes(expected));
+        assert.ok(!x.sent.at(-1).includes(absent));
+    }
+    await x.bot.message("!room", {
+        ...x.event,
+        event_id: "$check",
+        content: { msgtype: "m.text", body: "проверить" }
+    });
+    assert.deepEqual(x.calls.find((c) => c.action === "panel-server-read").argument, {
+        operation: "check"
+    });
+    assert.match(x.sent.at(-1), /matrix_https: проверено/);
+    assert.equal(requestsText({ requests: [] }, "rejected"), "Отклонённые заявки: 0.");
+    assert.match(serverText({ ok: false, recovery_required: true }), /через SSH/);
+});
+
+test("outgoing declines notify without offering invalid incoming actions", async () => {
+    const x = setup();
+    x.client.getJoinedRooms = async () => ["!room"];
+    const id = "MB-" + "b".repeat(32);
+    x.bot.control = async (request) =>
+        request.action === "authorize"
+            ? { authorized: true }
+            : {
+                  requests: [
+                      { id, server: "peer.example", direction: "outgoing", state: "rejected" },
+                      {
+                          id: "pending",
+                          server: "other.example",
+                          direction: "outgoing",
+                          state: "pending"
+                      }
+                  ]
+              };
+    await x.bot.notifications();
+    assert.equal(x.sent.length, 1);
+    assert.match(x.sent[0], /отклонено/);
+    assert.doesNotMatch(x.sent[0], /подтвердить |отклонить /);
+});
+
+test("expected federation refusals are actionable and arbitrary remote error text stays hidden", () => {
+    assert.match(errorText("invitation_rate_limit"), /одного раза в минуту/);
+    assert.match(errorText("pending_request_exists"), /уже есть актуальная заявка/);
+    assert.match(errorText("api_disabled"), /выключен/);
+    assert.match(errorText("peer_upgrade_required"), /обновить Misbot/);
+    assert.doesNotMatch(errorText("FICTIONAL_SECRET"), /FICTIONAL_SECRET/);
+    assert.doesNotMatch(
+        errorText({ toString: null, secret: "FICTIONAL_SECRET" }),
+        /FICTIONAL_SECRET/
+    );
+    assert.match(errorText("FICTIONAL_SECRET"), /задача ID/);
+});
+
+test("statistics keep unavailable activity unknown while rendering actual host resources", () => {
+    const body = serverText({
+        operation: "statistics",
+        ok: false,
+        checked_at: 2000000000,
+        statistics: {
+            disk_free_bytes: 3 * 1073741824,
+            memory_used_bytes: 512 * 1048576,
+            memory_total_bytes: 1024 * 1048576,
+            cpu_load: 0.12,
+            uptime_seconds: 7200,
+            note: "Статистика сообщений недоступна."
+        }
+    });
+    assert.match(body, /Сообщений: недоступно/);
+    assert.match(body, /Регистраций: недоступно/);
+    assert.match(body, /Память: 512 \/ 1024 МиБ/);
+    assert.match(body, /Свободное место: 3.0 ГиБ/);
+    assert.match(body, /Средняя нагрузка за минуту: 0.12/);
+    assert.match(body, /Сервер работает: 2 ч/);
+    assert.doesNotMatch(body, /undefined|NaN|Сообщений: 0/);
+});
+
+test("a request preview cannot consume the mutation event and always identifies the target server", async () => {
+    const x = setup();
+    const consumed = new Set();
+    x.bot.control = async (request) => {
+        x.calls.push(request);
+        if (request.action === "authorize") return { authorized: true };
+        assert.ok(!consumed.has(request.event_id));
+        consumed.add(request.event_id);
+        return request.action === "request-status"
+            ? { server: "target.example", state: "pending" }
+            : { status: "queued" };
+    };
+    const id = "MB-" + "f".repeat(32);
+    await x.bot.message("!room", {
+        ...x.event,
+        event_id: "$proposal",
+        content: { msgtype: "m.text", body: "подтвердить " + id }
+    });
+    assert.match(x.sent.at(-1), /Сервер: target.example/);
+    await x.bot.message("!room", {
+        ...x.event,
+        event_id: "$confirm",
+        content: { msgtype: "m.text", body: "выполнить подтверждаю" }
+    });
+    const read = x.calls.find((c) => c.action === "request-status"),
+        write = x.calls.find((c) => c.action === "approve");
+    assert.notEqual(read.event_id, write.event_id);
+    assert.equal(write.event_id, "$proposal");
 });

@@ -23,6 +23,8 @@ VERSION = 1
 DISCOVERY = '/.well-known/misbot'
 API = '/_misbot/v1/exchange'
 LIMIT = 32768
+REQUEST_TTL = 30 * 86400
+INVITATION_CAPABILITY = 'federation-invites'
 
 
 class ProtocolError(RuntimeError):
@@ -100,17 +102,17 @@ def document(server, identity, key, bot_mxid=None):
         'algorithm': 'RSA-3072-SHA256',
         'public_key': pem,
         'key_id': fingerprint(pem),
+        'request_ttl': REQUEST_TTL,
+        'capabilities': [INVITATION_CAPABILITY],
     }
 
 
 def validate_document(value, server):
     import re
 
-    if (
-        not isinstance(value, dict)
-        or type(value.get('protocol')) is not int
-        or value.get('protocol') != VERSION
-    ):
+    if not isinstance(value, dict) or 'protocol' not in value:
+        raise ProtocolError('invalid_misbot_discovery')
+    if type(value['protocol']) is not int or value['protocol'] != VERSION:
         raise ProtocolError('unsupported_version')
     if (
         value.get('server_name') != server
@@ -120,7 +122,25 @@ def validate_document(value, server):
         or value.get('api_path') != API
         or value.get('algorithm') != 'RSA-3072-SHA256'
         or not re.fullmatch('[0-9a-f]{32}', str(value.get('instance_id', '')))
+        or not isinstance(value.get('public_key'), str)
+        or len(value['public_key']) > 2048
+        or not value['public_key'].startswith('-----BEGIN PUBLIC KEY-----')
         or value.get('key_id') != fingerprint(value.get('public_key', ''))
+        or (
+            'request_ttl' in value
+            and (
+                type(value['request_ttl']) is not int
+                or not 604800 <= value['request_ttl'] <= REQUEST_TTL
+            )
+        )
+    ):
+        raise ProtocolError('discovery_identity')
+    capabilities = value.get('capabilities', [])
+    if (
+        not isinstance(capabilities, list)
+        or len(capabilities) > 16
+        or any(not isinstance(cap, str) or not 1 <= len(cap) <= 100 for cap in capabilities)
+        or len(capabilities) != len(set(capabilities))
     ):
         raise ProtocolError('discovery_identity')
     return value
@@ -158,8 +178,18 @@ def https(server, path, body=None):
             if len(raw) > LIMIT:
                 raise ProtocolError('response_too_large')
             if response.status != 200:
+                if response.status == 503:
+                    try:
+                        reason = json.loads(raw)
+                    except (ValueError, UnicodeError):
+                        reason = None
+                    if isinstance(reason, dict) and reason.get('code') == 'api_disabled':
+                        raise ProtocolError('remote_api_disabled')
                 raise ProtocolError('remote_http_' + str(response.status))
-            return json.loads(raw)
+            try:
+                return json.loads(raw)
+            except (ValueError, UnicodeError):
+                raise ProtocolError('invalid_json_response') from None
         finally:
             connection.close()
     except ProtocolError:
@@ -175,7 +205,15 @@ def https(server, path, body=None):
 
 
 def discover(server, transport=https):
-    return validate_document(transport(server, DISCOVERY), server)
+    try:
+        return validate_document(transport(server, DISCOVERY), server)
+    except ProtocolError as error:
+        code = {
+            'remote_http_404': 'misbot_not_found',
+            'invalid_json_response': 'invalid_misbot_discovery',
+            'discovery_identity': 'invalid_misbot_discovery',
+        }.get(error.code, error.code)
+        raise ProtocolError(code) from None
 
 
 def envelope(doc, key, target, body):

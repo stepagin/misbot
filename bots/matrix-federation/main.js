@@ -10,7 +10,7 @@ const {
     LogService
 } = require("matrix-bot-sdk");
 const { StoreType } = require("@matrix-org/matrix-sdk-crypto-nodejs");
-const { FederationBot } = require("./logic"),
+const { FederationBot, errorText } = require("./logic"),
     { ensureCrossSigning } = require("./signing");
 const { WelcomeBot, DeliveryQueue, privateRoom } = require("./welcome");
 let stage = "configuration";
@@ -24,13 +24,11 @@ function control(request) {
             if (done) return;
             done = true;
             socket.destroy();
-            error
-                ? reject(
-                      new Error(
-                          "Управляющая служба не подтвердила запрос. Проверьте misbot status. Для заявки используйте federation requests retry; для восстановления — federation recover."
-                      )
-                  )
-                : resolve(value);
+            if (error) {
+                const failure = new Error(errorText(error));
+                failure.code = typeof error === "string" ? error : undefined;
+                reject(failure);
+            } else resolve(value);
         };
         socket.setTimeout(300000);
         socket.on("connect", () => socket.write(JSON.stringify(request) + "\n"));
@@ -40,7 +38,10 @@ function control(request) {
             if (!raw.includes("\n")) return;
             try {
                 const value = JSON.parse(raw.split("\n")[0]);
-                finish(!value.ok, value.result);
+                finish(
+                    value.ok === true ? false : typeof value.code === "string" ? value.code : true,
+                    value.result
+                );
             } catch {
                 finish(true);
             }
@@ -98,7 +99,7 @@ async function main() {
         enqueue(async () => {
             try {
                 await bot.message(room, event);
-            } catch {
+            } catch (error) {
                 if (
                     bot.local(event.sender) &&
                     (await bot.authorize(event.sender).then(
@@ -107,12 +108,7 @@ async function main() {
                     )) &&
                     (await bot.privateRoom(room).catch(() => false))
                 )
-                    await client
-                        .sendNotice(
-                            room,
-                            "Результат команды не подтверждён. Выполните sudo misbot status. Если есть идентификатор операции, проверьте sudo misbot federation operations и выполните указанную команду recovery/retry. Справка по вводу: помощь."
-                        )
-                        .catch(() => {});
+                    await client.sendNotice(room, errorText(error?.code)).catch(() => {});
             }
         })
     );

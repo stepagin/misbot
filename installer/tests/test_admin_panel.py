@@ -1,9 +1,11 @@
+from contextlib import nullcontext
 import json
 from pathlib import Path
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import admin_panel
@@ -427,6 +429,106 @@ class PanelTests(unittest.TestCase):
                 self.panel.handle('panel-welcome', body, '$w')
         with self.assertRaises(ValueError):
             self.panel.handle('panel-preferences', {'key': 'updates', 'enabled': 'false'}, '$p')
+
+    def test_referral_link_uses_saved_identity_and_never_returns_session_secrets(self):
+        state_store.write_json(
+            self.root / 'config/referral-bot.json',
+            {'user_id': '@invites:example.org', 'access_token': 'FICTIONAL_SECRET'},
+        )
+        self.assertEqual(
+            self.panel.handle('panel-referral', None, '$referral'),
+            {'url': 'https://matrix.to/#/@invites:example.org'},
+        )
+
+    def test_server_reads_use_the_same_allowlisted_backend_and_statistics_period(self):
+        run = Mock(return_value={'operation': 'statistics', 'ok': True})
+        with patch.dict(sys.modules, {'server_management': SimpleNamespace(run_control=run)}):
+            result = self.panel.handle(
+                'panel-server-read', {'operation': 'statistics', 'period': 'week'}, '$read'
+            )
+        self.assertTrue(result['ok'])
+        args, kwargs = run.call_args
+        self.assertEqual(args[0]['stack_root'], str(self.root))
+        self.assertEqual(
+            set(args[0]['management_actions']), admin_panel.SERVER_READS | admin_panel.SERVER_WRITES
+        )
+        self.assertEqual(args[1], 'statistics')
+        self.assertEqual(kwargs, {'period': 'week'})
+
+    def test_server_writes_queue_the_original_event_and_configured_owner(self):
+        state_store.write_json(
+            self.root / 'config/admin-panel-identity.json',
+            {'administrator_mxid': '@owner:example.org'},
+        )
+        queue = Mock(return_value={'operation_id': 'SO-fictional', 'status': 'queued'})
+        with patch.dict(sys.modules, {'server_management': SimpleNamespace(queue_operation=queue)}):
+            result = self.panel.handle(
+                'panel-server-operation', {'operation': 'backup'}, '$proposal'
+            )
+        self.assertEqual(result['status'], 'queued')
+        queue.assert_called_once_with(
+            self.root, 'backup', actor='@owner:example.org', event_id='$proposal'
+        )
+
+    def test_server_dispatch_rejects_unknown_arguments_and_write_read_confusion(self):
+        for action, value in (
+            ('panel-server-read', {'operation': 'restart'}),
+            ('panel-server-operation', {'operation': 'status'}),
+            ('panel-server-read', {'operation': 'statistics', 'period': 'hour'}),
+            ('panel-server-read', {'operation': 'check', 'period': 'day'}),
+            ('panel-server-operation', {'operation': 'backup', 'command': 'FICTIONAL'}),
+            ('panel-server-read', {'operation': ['status']}),
+            ('panel-server-read', {'operation': 'statistics', 'period': False}),
+            ('panel-server-read', 'status'),
+            ('panel-server-read', None),
+        ):
+            with self.subTest(action=action, value=value), self.assertRaises(ValueError):
+                self.panel.handle(action, value, '$event')
+        with self.assertRaises(ValueError):
+            self.panel.handle('panel-server-operation', {'operation': 'backup'}, None)
+
+    def test_server_result_is_checked_against_the_current_owner(self):
+        read = Mock(return_value={'operation_id': 'SO-fictional', 'state': 'complete'})
+        with patch.dict(sys.modules, {'server_management': SimpleNamespace(operation_status=read)}):
+            self.panel.handle('panel-server-result', 'SO-fictional', '$check')
+        read.assert_called_once_with(self.root, 'SO-fictional', actor='@matrix-admin:example.org')
+        for value in ('', ['SO-fictional'], None, 'x' * 101):
+            with self.assertRaises(ValueError):
+                self.panel.handle('panel-server-result', value, '$check')
+
+    def test_narrow_rpc_checks_owner_uid_and_readiness_before_queuing_server_mutations(self):
+        import federation_service
+
+        backend = SimpleNamespace(
+            root=self.root,
+            guard=nullcontext,
+            authorize=Mock(),
+            ready=Mock(),
+        )
+        request = {
+            'action': 'panel-server-operation',
+            'argument': {'operation': 'restart'},
+            'actor': '@matrix-admin:example.org',
+            'event_id': '$proposal',
+        }
+        with patch.object(admin_panel.Panel, 'handle', return_value={'status': 'queued'}) as handle:
+            for actor, uid in (
+                ('@another-admin:example.org', 10003),
+                ('@matrix-admin:example.org', 10001),
+            ):
+                with self.assertRaises(RuntimeError):
+                    federation_service.bot_call(backend, dict(request, actor=actor), uid)
+            handle.assert_not_called()
+            backend.ready.side_effect = RuntimeError('pending transition')
+            with self.assertRaises(RuntimeError):
+                federation_service.bot_call(backend, request, 10003)
+            handle.assert_not_called()
+            backend.ready.side_effect = None
+            result = federation_service.bot_call(backend, request, 10003)
+            self.assertEqual(result['status'], 'queued')
+            handle.assert_called_once_with(
+                'panel-server-operation', {'operation': 'restart'}, '$proposal'
+            )
 
 
 if __name__ == '__main__':

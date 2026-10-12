@@ -24,11 +24,18 @@ ACTIONS = {
     'panel-welcome',
     'panel-broadcast',
     'panel-statistics',
+    'panel-server-read',
+    'panel-server-operation',
+    'panel-server-result',
+    'panel-referral',
     'panel-update',
     'panel-outbox',
     'panel-ack',
 }
 PREFERENCES = {'updates': True, 'registrations': True, 'statistics': True}
+SERVER_READS = frozenset(('status', 'check', 'statistics', 'storage', 'update_check'))
+SERVER_WRITES = frozenset(('start', 'stop', 'restart', 'backup', 'backup_verify'))
+STATISTICS_PERIODS = frozenset(('day', 'week', 'month', 'all'))
 
 
 def authorize(backend, actor):
@@ -297,8 +304,53 @@ class Panel:
 
         recover_job(self.root)
         result_notice(self)
+        from server_management import operation_notices
+
+        operation_notices(self)
 
     def handle(self, action, argument, event):
+        if action == 'panel-server-result':
+            if not isinstance(argument, str) or not 1 <= len(argument) <= 100:
+                raise ValueError('Invalid operation identifier')
+            from server_management import operation_status
+
+            return operation_status(self.root, argument, actor=owner(self.root))
+        if action == 'panel-referral':
+            return {
+                'url': welcome_context(self.root, self.domain, '{referral_url}').render(
+                    '{referral_url}'
+                ),
+            }
+        if action in ('panel-server-read', 'panel-server-operation'):
+            if not isinstance(argument, dict) or set(argument) - {'operation', 'period'}:
+                raise ValueError('Invalid server operation')
+            operation = argument.get('operation')
+            allowed = SERVER_READS if action == 'panel-server-read' else SERVER_WRITES
+            if not isinstance(operation, str) or operation not in allowed:
+                raise ValueError('Invalid server operation')
+            period = argument.get('period', 'day')
+            if (
+                not isinstance(period, str)
+                or period not in STATISTICS_PERIODS
+                or ('period' in argument and operation != 'statistics')
+            ):
+                raise ValueError('Invalid statistics period')
+            if action == 'panel-server-read':
+                from server_management import run_control
+
+                return run_control(
+                    {
+                        'stack_root': str(self.root),
+                        'management_actions': sorted(SERVER_READS | SERVER_WRITES),
+                    },
+                    operation,
+                    period=period,
+                )
+            if not isinstance(event, str) or not 1 <= len(event) <= 255:
+                raise ValueError('Invalid operation event')
+            from server_management import queue_operation
+
+            return queue_operation(self.root, operation, actor=owner(self.root), event_id=event)
         if action == 'panel-status':
             return {
                 'installed': releases.installed(self.root),

@@ -29,7 +29,7 @@
             "description": "rate_limit"
           },
           "503": {
-            "description": "staged, frozen or unavailable"
+            "description": "api_disabled, or installation_busy_or_pending: preserve checkpoint and retry after enabling API or recovery"
           }
         }
       }
@@ -37,7 +37,7 @@
     "/_misbot/v1/exchange": {
       "post": {
         "summary": "Authenticated peer request/status/decision/cancellation",
-        "description": "Sign every request. Nonce replay protection and UTC timestamp within 300 seconds. Max body 32768 bytes. A remote decision never substitutes local approval. Response signature and reply_to must be verified.",
+        "description": "Sign every request. Nonce replay protection and UTC timestamp within 300 seconds. Max body 32768 bytes. A remote decision never substitutes local approval. Response signature and reply_to must be verified. New invitations expire in 30 days. At most one active request per peer. Persistent creation limit: one outgoing invite per minute; receiver enforces one new invite per peer per minute. Expiry and cancellation never remove applied policies. Unknown cancellation creates a replay tombstone. Before creating or posting a new invite, sender verifies HTTPS discovery, protocol, fixed API path, pinned identity, federation-invites capability and 30-day lifetime. Matrix without Misbot, unavailable discovery or missing capability is never a fallback destination.",
         "requestBody": {
           "required": true,
           "content": {
@@ -60,7 +60,7 @@
             }
           },
           "400": {
-            "description": "Safe code: invalid_signature, signature_identity, unsupported_version, expired_request, replay, request_owner, invalid_request, request_not_found, remote_operation_denied, request_capacity",
+            "description": "Safe code: invalid_signature, signature_identity, unsupported_version, expired_request, replay, request_owner, invalid_request, request_not_found, remote_operation_denied, request_capacity, invalid_expiration, invalid_transition, pending_request_exists, invitation_rate_limit, peer_already_connected",
             "content": {
               "application/json": {
                 "schema": {
@@ -81,7 +81,7 @@
             "description": "rate_limit"
           },
           "503": {
-            "description": "installation_busy_or_pending: retain checkpoint and retry"
+            "description": "api_disabled, or installation_busy_or_pending: preserve checkpoint and retry after enabling API or recovery"
           }
         }
       }
@@ -126,6 +126,28 @@
           },
           "key_id": {
             "type": "string"
+          },
+          "request_ttl": {
+            "type": "integer",
+            "minimum": 604800,
+            "maximum": 2592000,
+            "description": "Optional for legacy readers. New thirty-day invitations require 2592000 and capabilities containing federation-invites."
+          },
+          "capabilities": {
+            "type": "array",
+            "maxItems": 16,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100
+            },
+            "description": "Optional for legacy protocol1 readers. New invitations require federation-invites together with request_ttl=2592000. Enabled Misbot API advertises this capability by default.",
+            "examples": [
+              [
+                "federation-invites"
+              ]
+            ]
           }
         }
       },

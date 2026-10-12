@@ -3,6 +3,8 @@
 import http.client
 import hashlib
 import contextlib
+import io
+from email.message import Message
 import json
 import multiprocessing
 import os
@@ -24,6 +26,125 @@ import state_store
 
 
 class ServiceTests(unittest.TestCase):
+    def test_panel_failure_cannot_block_automatic_invitation_expiry(self):
+        class Listener:
+            def __init__(self, path, handler):
+                pass
+
+            def serve_forever(self):
+                pass
+
+            def shutdown(self):
+                pass
+
+            def server_close(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            state_store.write_json(
+                root / 'installation.json',
+                {
+                    'domain': 'fixture.example',
+                    'federation_provisioned': True,
+                },
+            )
+            federation.setup(root, {'domain': 'fixture.example'})
+            backend = federation.Backend(root, admin=lambda actor: True, admission=False)
+            saved = backend.load()
+            rid = 'MB-' + 'a' * 32
+            saved['api_enabled'] = False
+            saved['requests'][rid] = {
+                'id': rid,
+                'server': 'peer.example',
+                'direction': 'incoming',
+                'state': 'pending',
+                'expires_at': int(time.time()) - 1,
+                'local_approval': False,
+                'remote_approval': True,
+                'local_applied': False,
+                'remote_applied': False,
+            }
+            backend.save(saved)
+            with (
+                patch.object(federation, 'backend', return_value=backend),
+                patch.object(federation_runtime, 'validate'),
+                patch.object(federation_service.lifecycle, 'configure'),
+                patch.object(federation_service.socketserver, 'UnixStreamServer', Listener),
+                patch.object(federation_service.threading, 'Thread') as threads,
+                patch.object(federation_service.os, 'chown'),
+                patch.object(federation_service.os, 'chmod'),
+                patch.object(federation_service, 'job_step'),
+                patch.object(federation_service.admin_panel, 'Panel') as panel,
+                patch('release_update.recover_job'),
+                patch('release_update.result_notice'),
+            ):
+                panel.return_value.maintenance.side_effect = RuntimeError('Statistics unavailable')
+                federation_service.serve(root)
+                jobs = threads.call_args_list[0].kwargs['target']
+                with (
+                    patch.object(
+                        federation_service.time, 'sleep', side_effect=[None, StopIteration]
+                    ),
+                    patch.object(federation_service.time, 'monotonic', return_value=61),
+                    self.assertRaises(StopIteration),
+                ):
+                    jobs()
+                panel.return_value.maintenance.assert_called_once()
+            self.assertEqual(backend.load()['requests'][rid]['state'], 'expired')
+            self.assertTrue(backend.load()['requests'][rid]['delivery_pending'])
+
+    def test_disabled_public_routes_use_persistent_setting_without_network(self):
+        handlers = []
+
+        class Listener:
+            def __init__(self, path, handler):
+                handlers.append(handler)
+
+            def serve_forever(self):
+                pass
+
+            def shutdown(self):
+                pass
+
+            def server_close(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            state_store.write_json(root / 'installation.json', {'domain': 'fixture.example'})
+            federation.setup(root, {'domain': 'fixture.example'})
+            backend = federation.Backend(root, admin=lambda actor: True, admission=False)
+            with (
+                patch.object(federation, 'backend', return_value=backend),
+                patch.object(federation_runtime, 'validate'),
+                patch.object(federation_service.lifecycle, 'configure'),
+                patch.object(federation_service.socketserver, 'UnixStreamServer', Listener),
+                patch.object(federation_service.threading, 'Thread'),
+                patch.object(federation_service.os, 'chown'),
+                patch.object(federation_service.os, 'chmod'),
+            ):
+                federation_service.serve(root)
+            http = handlers[0].__new__(handlers[0])
+            results = []
+            http.reply = lambda status, body: results.append((status, body))
+            http.path = '/.well-known/misbot'
+            http.do_GET()
+            self.assertEqual(results[-1][0], 200)
+            backend.operate('api-disable')
+            http.do_GET()
+            self.assertEqual(results[-1], (503, {'code': 'api_disabled'}))
+            http.path = '/_misbot/v1/exchange'
+            http.headers = Message()
+            http.headers['Content-Length'] = '2'
+            http.rfile = io.BytesIO(b'{}')
+            http.do_POST()
+            self.assertEqual(results[-1], (503, {'code': 'api_disabled'}))
+            backend.operate('api-enable')
+            http.path = '/.well-known/misbot'
+            http.do_GET()
+            self.assertEqual(results[-1][0], 200)
+
     def test_proxy_public_mount_survives_controller_restarts(self):
         if not hasattr(socket, 'SO_PEERCRED') or os.geteuid() != 0:
             self.skipTest('isolated Linux root controller required')
