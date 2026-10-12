@@ -211,6 +211,34 @@ def job_step(backend):
         backend.save(data)
 
 
+def recover_running_jobs(backend):
+    """Interrupt the prior daemon's jobs only after acquiring the writer guard."""
+    with backend.guard():
+        data = backend.load()
+        jobs = data.get('jobs', {})
+        if not isinstance(jobs, dict) or any(
+            not isinstance(identifier, str)
+            or not isinstance(job, dict)
+            or job.get('state') not in ('queued', 'running', 'complete', 'failed', 'interrupted')
+            or not isinstance(job.get('result', {}), dict)
+            for identifier, job in jobs.items()
+        ):
+            raise protocol.ProtocolError('invalid_operation_state')
+        changed = False
+        for job in jobs.values():
+            if job['state'] == 'running':
+                job.update(
+                    state='interrupted',
+                    result={
+                        'code': 'interrupted',
+                        'next_action': 'sudo misbot federation recover; проверьте federation requests',
+                    },
+                )
+                changed = True
+        if changed:
+            backend.save(data)
+
+
 def serve(root):
     root = Path(root)
     backend = federation.backend(root)
@@ -240,26 +268,22 @@ def serve(root):
     rate = Rate()
     work = threading.Lock()
     public_document = backend.doc()
-    with backend.guard():
-        data = backend.load()
-        for job in data.get('jobs', {}).values():
-            if job['state'] == 'running':
-                job.update(
-                    state='interrupted',
-                    result={
-                        'code': 'interrupted',
-                        'next_action': 'sudo misbot federation recover; проверьте federation requests',
-                    },
-                )
-        backend.save(data)
 
     def jobs():
         last_panel = 0
+        recovery_pending = True
+        recovery_reported = False
         while True:
             time.sleep(1)
             if not work.acquire(blocking=False):
                 continue
             try:
+                # UP holds the writer guard while waiting for bot health. Bind
+                # transport first so it can return busy without accepting writes.
+                # Recover old running jobs before executing any queued job.
+                if recovery_pending:
+                    recover_running_jobs(backend)
+                    recovery_pending = False
                 job_step(backend)
                 if time.monotonic() - last_panel >= 60:
                     last_panel = time.monotonic()
@@ -275,7 +299,14 @@ def serve(root):
                                 backend.ready()
                                 panel.maintenance()
             except Exception:
-                pass  # busy external operation; retain queued checkpoint
+                if recovery_pending and not recovery_reported:
+                    print(
+                        'Federation controller startup recovery pending; saved jobs retained',
+                        flush=True,
+                    )
+                    recovery_reported = True
+                # Busy/failed recovery retains the checkpoint and prevents all
+                # automatic job execution until recovery succeeds.
             finally:
                 work.release()
 

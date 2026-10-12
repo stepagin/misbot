@@ -27,6 +27,258 @@ import state_store
 
 
 class ServiceTests(unittest.TestCase):
+    def test_running_job_recovery_is_idempotent_and_preserves_queued_work_and_identity(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            state_store.write_json(root / 'installation.json', {'domain': 'fixture.example'})
+            federation.setup(root, {'domain': 'fixture.example'})
+            backend = federation.Backend(root, admission=False)
+            saved = backend.load()
+            saved['jobs'] = {
+                'FO-' + 'a' * 32: {'state': 'running'},
+                'FO-' + 'b' * 32: {'state': 'queued', 'action': 'api-enable'},
+            }
+            backend.save(saved)
+            key = backend.key.read_bytes()
+            with patch.object(backend, 'save', wraps=backend.save) as save:
+                federation_service.recover_running_jobs(backend)
+                first = backend.path.read_bytes()
+                federation_service.recover_running_jobs(backend)
+                self.assertEqual(save.call_count, 1)
+            actual = backend.load()
+            self.assertEqual(actual['jobs']['FO-' + 'a' * 32]['state'], 'interrupted')
+            self.assertEqual(actual['jobs']['FO-' + 'b' * 32], saved['jobs']['FO-' + 'b' * 32])
+            self.assertEqual(actual['instance_id'], saved['instance_id'])
+            self.assertEqual(backend.key.read_bytes(), key)
+            self.assertEqual(backend.path.read_bytes(), first)
+
+    def test_startup_readiness_failure_does_not_bind_transport_or_modify_state(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            state_store.write_json(root / 'installation.json', {'domain': 'fixture.example'})
+            federation.setup(root, {'domain': 'fixture.example'})
+            backend = federation.Backend(root, admission=False)
+            before = backend.path.read_bytes()
+            with (
+                patch.object(federation, 'backend', return_value=backend),
+                patch.object(federation_service.lifecycle, 'configure'),
+                patch.object(
+                    backend,
+                    'ready',
+                    side_effect=federation.protocol.ProtocolError('installation_pending'),
+                ),
+                self.assertRaisesRegex(federation.protocol.ProtocolError, 'installation_pending'),
+            ):
+                federation_service.serve(root)
+            self.assertFalse((root / 'run/federation/control.sock').exists())
+            self.assertEqual(backend.path.read_bytes(), before)
+
+    def test_invalid_startup_jobs_never_execute_and_diagnostics_exclude_state_values(self):
+        class Listener:
+            def __init__(self, path, handler):
+                pass
+
+            def serve_forever(self):
+                pass
+
+            def shutdown(self):
+                pass
+
+            def server_close(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            state_store.write_json(root / 'installation.json', {'domain': 'fixture.example'})
+            federation.setup(root, {'domain': 'fixture.example'})
+            backend = federation.Backend(root, admission=False)
+            saved = backend.load()
+            saved['jobs'] = {'FO-' + 'a' * 32: {'state': 'PRIVATE_FIXTURE_STATE'}}
+            backend.save(saved)
+            before = backend.path.read_bytes()
+            output = io.StringIO()
+            with (
+                patch.object(federation, 'backend', return_value=backend),
+                patch.object(federation_runtime, 'validate'),
+                patch.object(federation_service.lifecycle, 'configure'),
+                patch.object(federation_service.socketserver, 'UnixStreamServer', Listener),
+                patch.object(federation_service.threading, 'Thread') as threads,
+                patch.object(federation_service.os, 'chown'),
+                patch.object(federation_service.os, 'chmod'),
+                patch.object(federation_service, 'job_step') as execute,
+                contextlib.redirect_stdout(output),
+            ):
+                federation_service.serve(root)
+                jobs = threads.call_args_list[0].kwargs['target']
+                with (
+                    patch.object(
+                        federation_service.time, 'sleep', side_effect=[None, None, StopIteration]
+                    ),
+                    self.assertRaises(StopIteration),
+                ):
+                    jobs()
+                execute.assert_not_called()
+            self.assertEqual(backend.path.read_bytes(), before)
+            self.assertNotIn('PRIVATE_FIXTURE_STATE', output.getvalue())
+            self.assertEqual(output.getvalue().count('startup recovery pending'), 1)
+
+    def test_real_controller_binds_under_writer_lock_then_recovers_before_running_queue(self):
+        if not hasattr(socket, 'SO_PEERCRED'):
+            self.skipTest('Linux Unix peer credentials required')
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            actor = '@matrix-admin:fixture.example'
+            state_store.write_json(root / 'installation.json', {'domain': 'fixture.example'})
+            federation.setup(root, {'domain': 'fixture.example'})
+            backend = federation.Backend(root, admin=lambda value: value == actor, admission=False)
+            saved = backend.load()
+            saved['jobs'] = {
+                'FO-' + 'a' * 32: {
+                    'state': 'running',
+                    'action': 'api-disable',
+                    'argument': None,
+                    'actor': actor,
+                    'event_id': '$old-running',
+                },
+                'FO-' + 'b' * 32: {
+                    'state': 'queued',
+                    'action': 'api-enable',
+                    'argument': None,
+                    'actor': actor,
+                    'event_id': '$queued',
+                },
+            }
+            backend.save(saved)
+            before = backend.path.read_bytes()
+            key = backend.key.read_bytes()
+            context = multiprocessing.get_context('fork')
+            ready, locked = context.Pipe()
+
+            def hold_writer():
+                signal.signal(signal.SIGTERM, signal.SIG_DFL)
+                with state_store.operation_guard(root):
+                    locked.send('locked')
+                    locked.recv()
+
+            def controller():
+                signal.signal(signal.SIGTERM, signal.SIG_DFL)
+                real_call = federation_service.bot_call
+
+                def bot_uid(backend, request, uid):
+                    # Only OS credential assignment is simulated for a normal
+                    # non-root test user. Actual dispatcher/actor authorization,
+                    # operation guards and both Unix listeners remain real.
+                    if uid != os.geteuid():
+                        raise AssertionError('Unexpected fixture peer')
+                    return real_call(backend, request, 10003)
+
+                with (
+                    patch.object(federation, 'backend', return_value=backend),
+                    patch.object(federation_runtime, 'validate'),
+                    patch.object(federation_service.lifecycle, 'configure'),
+                    patch.object(federation_service.os, 'chown'),
+                    patch.object(federation_service, 'bot_call', side_effect=bot_uid),
+                    patch.object(backend, 'maintain'),
+                ):
+                    federation_service.serve(root)
+
+            owner = context.Process(target=hold_writer)
+            server = context.Process(target=controller)
+
+            def rpc(action, sender=actor):
+                with socket.socket(socket.AF_UNIX) as client:
+                    client.settimeout(2)
+                    client.connect(str(root / 'run/federation/control.sock'))
+                    client.sendall(json.dumps({'action': action, 'actor': sender}).encode() + b'\n')
+                    return json.loads(client.recv(32768))
+
+            def request(method, route, body=None):
+                client = http.client.HTTPConnection('fixture', timeout=2)
+                client.sock = socket.socket(socket.AF_UNIX)
+                client.sock.settimeout(2)
+                client.sock.connect(str(root / 'run/federation/http.sock'))
+                try:
+                    client.request(method, route, body=body)
+                    response = client.getresponse()
+                    return response.status, json.loads(response.read())
+                finally:
+                    client.close()
+
+            try:
+                owner.start()
+                self.assertTrue(ready.poll(5), 'fixture writer did not acquire lock')
+                self.assertEqual(ready.recv(), 'locked')
+                server.start()
+                for _ in range(250):
+                    try:
+                        response = rpc('authorize')
+                        break
+                    except (ConnectionRefusedError, FileNotFoundError):
+                        pass
+                    if not server.is_alive():
+                        self.fail('controller exited while the installer owns its lock')
+                    time.sleep(0.02)
+                else:
+                    self.fail('controller did not bind while the installer owns its lock')
+                self.assertEqual(
+                    response, {'ok': False, 'code': 'busy_pending_or_operation_failed'}
+                )
+                status, document = request('GET', '/.well-known/misbot')
+                self.assertEqual(status, 200)
+                self.assertEqual(document['instance_id'], saved['instance_id'])
+                self.assertEqual(document['server_name'], saved['server_name'])
+                self.assertNotIn('jobs', document)
+                self.assertNotIn('private_key', document)
+                # receive() must acquire the real writer guard before validating
+                # or applying even this malformed remote mutation request.
+                self.assertEqual(
+                    request('POST', '/_misbot/v1/exchange', b'{}'),
+                    (503, {'code': 'installation_busy_or_pending'}),
+                )
+                time.sleep(1.1)  # At least one automatic recovery attempt fails busy.
+                self.assertEqual(backend.path.read_bytes(), before)
+                self.assertTrue(owner.is_alive())
+                self.assertTrue(server.is_alive())
+
+                ready.send('release')
+                owner.join(5)
+                self.assertFalse(owner.is_alive())
+                for _ in range(250):
+                    actual = backend.load()
+                    if actual['jobs']['FO-' + 'b' * 32]['state'] == 'complete':
+                        break
+                    time.sleep(0.02)
+                else:
+                    self.fail('queued job did not execute after recovery acquired the guard')
+                self.assertEqual(actual['jobs']['FO-' + 'a' * 32]['state'], 'interrupted')
+                queued_event = hashlib.sha256(b'$queued').hexdigest()
+                self.assertEqual(set(actual['events']), {queued_event})
+                self.assertTrue(actual['api_enabled'])
+                self.assertEqual(actual['instance_id'], saved['instance_id'])
+                self.assertEqual(backend.key.read_bytes(), key)
+                for sender, expected in (
+                    (actor, {'ok': True, 'result': {'authorized': True}}),
+                    ('@other:fixture.example', {'ok': False, 'code': 'admin_unconfirmed'}),
+                ):
+                    for _ in range(100):
+                        response = rpc('authorize', sender)
+                        if response.get('code') != 'busy_pending_or_operation_failed':
+                            break
+                        time.sleep(0.02)
+                    self.assertEqual(response, expected)
+                time.sleep(1.1)
+                self.assertEqual(set(backend.load()['events']), {queued_event})
+            finally:
+                for process in (server, owner):
+                    if process.pid is not None:
+                        process.terminate()
+                        process.join(5)
+                        if process.is_alive():
+                            process.kill()
+                            process.join(5)
+                ready.close()
+                locked.close()
+
     def test_rpc_operations_snapshot_stays_authorized_while_controller_mutex_is_busy(self):
         handlers = []
 

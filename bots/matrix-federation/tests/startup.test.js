@@ -34,7 +34,8 @@ function installation(directory, options = {}) {
         notices = [],
         requests = [],
         queues = [];
-    let uploaded = 0,
+    let healthHandler,
+        uploaded = 0,
         created = 0;
     class MatrixClient {
         constructor(url, token) {
@@ -191,6 +192,7 @@ function installation(directory, options = {}) {
             "node:http": {
                 createServer(callback) {
                     handler = callback;
+                    healthHandler = callback;
                     return {
                         listen() {
                             finish(0);
@@ -234,12 +236,13 @@ function installation(directory, options = {}) {
             },
             process: { umask() {}, exit: finish },
             console: { log: (message) => logs.push(message) },
+            Date: options.now ? { now: options.now } : Date,
             setInterval: () => ({ unref() {} })
         });
         const code = await done;
         let status;
         if (handler)
-            handler(
+            healthHandler(
                 { url: "/health" },
                 {
                     writeHead(value) {
@@ -258,6 +261,19 @@ function installation(directory, options = {}) {
         clients,
         notices,
         requests,
+        health: () => {
+            let status;
+            healthHandler(
+                { url: "/health" },
+                {
+                    writeHead(value) {
+                        status = value;
+                    },
+                    end() {}
+                }
+            );
+            return status;
+        },
         idle: () => Promise.all(queues.map((queue) => queue.idle())),
         counts: () => ({ uploaded, created })
     };
@@ -328,6 +344,30 @@ test("actual panel entrypoint reports transient busy only after reauthorizing an
         assert.equal(fixture.notices.length, 2);
         assert.match(fixture.notices[1].body, /Панель администратора Misbot/);
         assert.ok(fixture.logs.includes("Federation bot: command_unconfirmed"));
+    } finally {
+        fs.rmSync(folder, { recursive: true, force: true });
+    }
+});
+
+test("busy controller remains healthy during long installation without bypassing authorization", async () => {
+    const folder = fs.mkdtempSync(path.join(os.tmpdir(), "misbot-startup-health-"));
+    try {
+        let now = 1000;
+        const fixture = installation(folder, {
+            now: () => now,
+            response: () => ({ ok: false, code: "busy_pending_or_operation_failed" })
+        });
+        await fixture.boot();
+        now += 120000;
+        assert.equal(fixture.health(), 503);
+        fixture.clients.get("admin-panel").emit("room.message", "!private", {
+            event_id: "$while-installer-lock-is-held",
+            sender: "@matrix-admin:example.org",
+            content: { msgtype: "m.text", body: "помощь" }
+        });
+        await fixture.idle();
+        assert.equal(fixture.health(), 200);
+        assert.deepEqual(fixture.notices, []);
     } finally {
         fs.rmSync(folder, { recursive: true, force: true });
     }

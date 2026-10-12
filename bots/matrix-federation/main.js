@@ -45,7 +45,11 @@ function control(request) {
                     value.ok === true ? false : typeof value.code === "string" ? value.code : true,
                     value.result
                 );
-                if (value.ok === true) lastControl = Date.now();
+                // A busy installer or denied command is a valid response from
+                // a live controller. Startup holds its writer lock while it
+                // waits for bot health; health must not depend on that lock.
+                if (value.ok === true || (value.ok === false && typeof value.code === "string"))
+                    lastControl = Date.now();
             } catch {
                 finish(true);
             }
