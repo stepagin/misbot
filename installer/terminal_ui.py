@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import shlex
 import signal
 import subprocess
@@ -989,6 +990,49 @@ class UI:
             except SaveExit:
                 return 0
 
+    def restart_without_installation(self):
+        self.view.heading(
+            'Установка отсутствует', 'Сохранён черновик, но installation.json больше нет.'
+        )
+        self.view.message(
+            'Проверку прежней установки продолжить нельзя. Настройку нужно пройти с начала.'
+        )
+        if self.root.exists() and any(self.root.iterdir()):
+            self.view.message(
+                'В каталоге остались файлы. Для новой установки мастер предложит выбрать пустой каталог; оставшиеся файлы сохраняются.',
+                'yellow',
+            )
+        try:
+            choice = self.choose(
+                'Как продолжить?',
+                [
+                    (
+                        '1',
+                        'Проверить сохранённые настройки с начала',
+                        'Параметры черновика сохраняются',
+                    ),
+                    ('2', 'Начать новую настройку', 'Прежний черновик сохраняется отдельно'),
+                ],
+                exit_label='Выйти из Misbot',
+            )
+        except (Back, Cancel, SaveExit, KeyboardInterrupt):
+            return 0
+        if choice == '0':
+            return 0
+        if choice == '2':
+            from configuration import directory, read_private_json
+
+            previous = directory(self.draft.parent / 'previous')
+            state_store.write_json(
+                previous / (secrets.token_hex(16) + '.json'), read_private_json(self.draft)
+            )
+            self.model = {}
+            self.backup = {}
+            self.confirmed_domains = set()
+        self.step = 0
+        self.save()
+        return self.wizard()
+
     def execute(self, item):
         if not self.supported(item.path):
             self.view.message('Операция недоступна для выбранной установки.', 'yellow')
@@ -1378,6 +1422,8 @@ def interaction(ui):
             if ui.draft.exists() and 7 <= ui.step <= 9:
                 return ui.wizard()
             return ui.menu()
+    if ui.draft.exists() and ui.step >= 8 and not ui.installation():
+        return ui.restart_without_installation()
     return ui.wizard() if ui.draft.exists() or ui.installation() else ui.welcome()
 
 

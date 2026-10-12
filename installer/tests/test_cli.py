@@ -28,11 +28,7 @@ class CommandTests(unittest.TestCase):
                 contextlib.redirect_stdout(io.StringIO()) as output,
             ):
                 misbot.operation_help(command)
-                optional = next(
-                    line
-                    for line in output.getvalue().splitlines()
-                    if line.startswith('Необязательные:')
-                )
+                optional = output.getvalue().split('Необязательные:', 1)[1].split('\n\n', 1)[0]
                 for name in command.optional_arguments + command.switches:
                     self.assertIn('--' + name.replace('_', '-'), optional)
                 self.assertEqual('--plain' in optional, command.path == 'ui')
@@ -375,8 +371,9 @@ class CommandTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             cmd, opts, values = misbot.parse(['status', '--directory', str(root)])
-            with self.assertRaises((RuntimeError, OSError)):
+            with self.assertRaises(misbot.InputError) as error:
                 misbot.plan(cmd, opts, values, source=BUNDLE)
+            self.assertIn('нет installation.json', str(error.exception))
         with patch.object(wrapper, 'default_directory', return_value=None):
             cmd, opts, values = misbot.parse(['status'])
             with self.assertRaises(misbot.InputError):

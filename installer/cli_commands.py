@@ -702,6 +702,11 @@ COMMANDS = [
 ]
 BY_PATH = {c.path: c for c in COMMANDS}
 BY_BACKEND = {c.backend: c.path for c in COMMANDS}
+GROUPS = frozenset(
+    ' '.join(command.path.split()[:length])
+    for command in COMMANDS
+    for length in range(1, len(command.path.split()))
+)
 EXISTING_BACKENDS = frozenset(c.backend for c in COMMANDS if c.existing is not None)
 TOPICS = {
     'admin': 'Административная панель и её сохранённая identity',
@@ -715,6 +720,14 @@ TOPICS = {
     'federation': 'Федерация: локальная политика и подписанные заявки Misbot.',
     'homepage': 'Главная страница: локальный лендинг, Element Web или внешний HTTPS URL.',
 }
+
+
+def append_option(args: list[str], option: str, value: str) -> None:
+    """Keep leading dashes in named text values from becoming backend options."""
+    if value.startswith('-'):
+        args.append(option + '=' + value)
+    else:
+        args.extend([option, value])
 
 
 def execution_argv(
@@ -744,18 +757,23 @@ def execution_argv(
         args.extend(['--source', str(backend)])
     if route.action_position is ActionPosition.AFTER_DIRECTORY:
         args.append(action)
-    if route.argument_style is ArgumentStyle.POSITIONAL:
+    dash_positional = route.argument_style is ArgumentStyle.POSITIONAL and any(
+        value.startswith('-') for value in required.values()
+    )
+    if route.argument_style is ArgumentStyle.POSITIONAL and not dash_positional:
         args.extend(required.values())
     elif route.argument_style is ArgumentStyle.NAMED:
         for name, value in required.items():
-            args.extend(['--' + name, value])
+            append_option(args, '--' + name, value)
     for name in route.flags:
         if values.get(name):
             args.append('--' + name.replace('_', '-'))
     for name in route.optional_values:
         option_value = values.get(name)
         if option_value is not None and (route.preserve_empty_values or option_value):
-            args.extend(['--' + name.replace('_', '-'), cast(str, option_value)])
+            append_option(args, '--' + name.replace('_', '-'), cast(str, option_value))
+    if dash_positional:
+        args.extend(['--', *required.values()])
     return args
 
 

@@ -6,6 +6,17 @@ umask 077
 task_source="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 task_action="${1:-help}"
 die() { printf '%s\n' "$*" >&2; exit 1; }
+backend_options() {
+  task_named_args=()
+  while [[ $# -gt 0 ]]; do
+    if [[ "$2" == -* ]]; then
+      task_named_args+=("$1=$2")
+    else
+      task_named_args+=("$1" "$2")
+    fi
+    shift 2
+  done
+}
 if [[ "$task_action" == version || "$task_action" == --version ]]; then
   python3 -c 'import json,sys; print("Misbot " + json.load(open(sys.argv[1]))["version"])' "$task_source/release.json"
   exit 0
@@ -150,8 +161,8 @@ if [[ -f "$task_root/installation.json" ]]; then
   if [[ "$task_backend" == existing-compose ]]; then
     task_existing_args=()
     case "$task_action" in
-      media-s3) task_existing_args=(--config "$task_s3_file") ;;
-      backup-external) task_existing_args=(--config "$task_backup_env" --key "$task_backup_key") ;;
+      media-s3) backend_options --config "$task_s3_file"; task_existing_args=("${task_named_args[@]}") ;;
+      backup-external) backend_options --config "$task_backup_env" --key "$task_backup_key"; task_existing_args=("${task_named_args[@]}") ;;
     esac
     exec python3 -B "$task_root/existing_compose.py" --directory "$task_root" "$task_action" "${task_existing_args[@]}"
   fi
@@ -230,37 +241,47 @@ case "$task_action" in
       backup_dependencies
       storage_dependencies
       task_schedule_mode=external
-      task_schedule_args=(--settings "$task_backup_env" --key-file "$task_backup_key")
+      backend_options --settings "$task_backup_env" --key-file "$task_backup_key"
+      task_schedule_args=("${task_named_args[@]}")
     fi
-    exec python3 "$task_root/backup_schedule.py" configure --directory "$task_root" --mode "$task_schedule_mode" --calendar "$task_backup_calendar" "${task_schedule_args[@]}"
+    backend_options --calendar "$task_backup_calendar"
+    exec python3 "$task_root/backup_schedule.py" configure --directory "$task_root" --mode "$task_schedule_mode" "${task_named_args[@]}" "${task_schedule_args[@]}"
     ;;
   vault-connect|vault-auth|vault-sync|vault-recover|vault-disconnect)
     [[ -f "$task_root/installation.json" ]] || die 'Run init DOMAIN first.'
     task_vault_operation="${task_action#vault-}"
     task_vault_args=()
-    [[ "$task_action" != vault-connect && "$task_action" != vault-auth ]] || task_vault_args=(--settings "$task_vault_env")
+    if [[ "$task_action" == vault-connect || "$task_action" == vault-auth ]]; then
+      backend_options --settings "$task_vault_env"
+      task_vault_args=("${task_named_args[@]}")
+    fi
     exec python3 "$task_root/vault_cache.py" "$task_vault_operation" --directory "$task_root" "${task_vault_args[@]}"
     ;;
   backup-key|backup-external|backup-fetch|backup-cleanup)
     backup_dependencies
     if [[ "$task_action" == backup-key ]]; then
-      exec python3 "$task_source/external_backup.py" key --key-file "$task_backup_key"
+      backend_options --key-file "$task_backup_key"
+      exec python3 "$task_source/external_backup.py" key "${task_named_args[@]}"
     fi
     storage_dependencies
     if [[ "$task_action" == backup-fetch ]]; then
-      exec python3 "$task_source/external_backup.py" fetch --settings "$task_backup_env" --key-file "$task_backup_key" --object-key "$task_backup_object" --sha256 "$task_backup_digest" --destination "$task_backup_destination"
+      backend_options --settings "$task_backup_env" --key-file "$task_backup_key" --object-key "$task_backup_object" --sha256 "$task_backup_digest" --destination "$task_backup_destination"
+      exec python3 "$task_source/external_backup.py" fetch "${task_named_args[@]}"
     fi
     [[ -f "$task_root/installation.json" ]] || die 'Run init DOMAIN first.'
     if [[ "$task_action" == backup-cleanup ]]; then
-      exec python3 "$task_root/external_backup.py" cleanup --directory "$task_root" --settings "$task_backup_env" --catalog "$task_backup_catalog"
+      backend_options --settings "$task_backup_env" --catalog "$task_backup_catalog"
+      exec python3 "$task_root/external_backup.py" cleanup --directory "$task_root" "${task_named_args[@]}"
     fi
-    exec python3 "$task_root/external_backup.py" export --directory "$task_root" --settings "$task_backup_env" --key-file "$task_backup_key"
+    backend_options --settings "$task_backup_env" --key-file "$task_backup_key"
+    exec python3 "$task_root/external_backup.py" export --directory "$task_root" "${task_named_args[@]}"
     ;;
   media-local|media-recover|media-s3)
     [[ -f "$task_root/installation.json" ]] || die 'Run init DOMAIN first.'
     if [[ "$task_action" == media-s3 ]]; then
       storage_dependencies
-      exec python3 "$task_root/media.py" --directory "$task_root" --settings "$task_s3_file" s3
+      backend_options --settings "$task_s3_file"
+      exec python3 "$task_root/media.py" --directory "$task_root" "${task_named_args[@]}" s3
     fi
     task_media_operation=local
     [[ "$task_action" != media-recover ]] || task_media_operation=recover
@@ -271,7 +292,8 @@ case "$task_action" in
     task_s3_credentials_operation=rotate
     task_s3_credentials_args=()
     if [[ "$task_action" == s3-credentials ]]; then
-      task_s3_credentials_args=(--settings "$task_s3_file")
+      backend_options --settings "$task_s3_file"
+      task_s3_credentials_args=("${task_named_args[@]}")
     elif [[ "$task_action" == s3-credentials-recover ]]; then
       task_s3_credentials_operation=recover
     else
@@ -288,7 +310,10 @@ case "$task_action" in
   database-external|database-recover|database-abort)
     [[ -f "$task_root/installation.json" ]] || die 'An existing portable installation is required.'
     task_database_args=()
-    [[ "$task_action" != database-external ]] || task_database_args=(--settings "$task_postgres_file")
+    if [[ "$task_action" == database-external ]]; then
+      backend_options --settings "$task_postgres_file"
+      task_database_args=("${task_named_args[@]}")
+    fi
     exec python3 "$task_root/database.py" "${task_action#database-}" --directory "$task_root" "${task_database_args[@]}"
     ;;
   restore|restore-local)
@@ -296,7 +321,8 @@ case "$task_action" in
     docker_dependencies
     task_restore_args=()
     [[ "$task_action" != restore-local ]] || task_restore_args=(--local-postgres)
-    exec python3 "$task_source/restore.py" --archive "$task_archive" --directory "$task_root" --sha256 "$task_digest" --public-ip "$task_public_ip" "${task_restore_args[@]}"
+    backend_options --archive "$task_archive" --directory "$task_root" --sha256 "$task_digest" --public-ip "$task_public_ip"
+    exec python3 "$task_source/restore.py" "${task_named_args[@]}" "${task_restore_args[@]}"
     ;;
   restore-activate|move-abort)
     [[ -f "$task_root/installation.json" ]] || die 'Restore into an empty target first.'
@@ -355,14 +381,16 @@ except (ValueError, UnicodeError):
   admin-password|admin-password-recover)
     [[ -f "$task_root/installation.json" ]] || die 'Run init DOMAIN first.'
     if [[ "$task_action" == admin-password ]]; then
-      exec python3 "$task_root/credentials.py" --directory "$task_root" --password-file "$task_password_file" rotate
+      backend_options --password-file "$task_password_file"
+      exec python3 "$task_root/credentials.py" --directory "$task_root" "${task_named_args[@]}" rotate
     fi
     exec python3 "$task_root/credentials.py" --directory "$task_root" recover
     ;;
   user-password|user-password-recover)
     [[ -f "$task_root/installation.json" ]] || die 'Run init DOMAIN first.'
     if [[ "$task_action" == user-password ]]; then
-      exec python3 "$task_root/user_credentials.py" --directory "$task_root" --password-file "$task_password_file" reset
+      backend_options --password-file "$task_password_file"
+      exec python3 "$task_root/user_credentials.py" --directory "$task_root" "${task_named_args[@]}" reset
     fi
     exec python3 "$task_root/user_credentials.py" --directory "$task_root" recover
     ;;
