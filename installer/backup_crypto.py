@@ -6,10 +6,6 @@ import stat
 import struct
 import tempfile
 
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-
 MAGIC = b'MATRIX-BACKUP\x01'
 CHUNK = 1024 * 1024
 
@@ -54,6 +50,11 @@ def read_key(path):
 
 
 def cipher(key, salt):
+    # Plain backups and decommissioning do not require the encryption package.
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
     archive_key = HKDF(algorithm=hashes.SHA256(), length=32, salt=salt, info=MAGIC).derive(key)
     return AESGCM(archive_key)
 

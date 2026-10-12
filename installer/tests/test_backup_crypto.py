@@ -1,15 +1,44 @@
 """Backup encryption must reject tampering before publishing plaintext."""
 
+import builtins
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import backup_crypto
 
 
 class BackupCryptoTests(unittest.TestCase):
+    def test_missing_encryption_package_never_publishes_an_unencrypted_backup(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / 'source'
+            source.write_bytes(b'Fictional private archive data')
+            key = b'X' * 32
+            backup_crypto.encrypt(source, root / 'encrypted', key)
+            original_import = builtins.__import__
+
+            def restricted_import(name, *args, **kwargs):
+                if name.startswith('cryptography'):
+                    raise ModuleNotFoundError('Encryption unavailable', name=name)
+                return original_import(name, *args, **kwargs)
+
+            with patch('builtins.__import__', side_effect=restricted_import):
+                for name, operation in (
+                    ('new-backup', backup_crypto.encrypt),
+                    ('plaintext', backup_crypto.decrypt),
+                ):
+                    incoming = source if name == 'new-backup' else root / 'encrypted'
+                    with self.subTest(operation=name):
+                        with self.assertRaises(ModuleNotFoundError):
+                            operation(incoming, root / name, key)
+                        self.assertFalse((root / name).exists())
+            self.assertEqual({path.name for path in root.iterdir()}, {'source', 'encrypted'})
+            self.assertEqual(source.read_bytes(), b'Fictional private archive data')
+
     def test_multiframe_round_trip_and_fresh_archive_salt(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

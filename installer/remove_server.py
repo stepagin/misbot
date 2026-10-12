@@ -1,6 +1,7 @@
 """Interactive decommissioning, including init-only installs; keep product sources."""
 
 import argparse
+import errno
 import json
 import os
 from pathlib import Path
@@ -29,6 +30,74 @@ LOCAL = {
         ('backups', 'stages'),
     ),
 }
+
+REMOVAL_STAGES = {
+    'services-stopped': 'Остановка служб',
+    'external-database': 'Удаление выбранных внешних баз',
+    'vault': 'Удаление выбранного snapshot в Vault',
+    'containers-removed': 'Удаление контейнеров',
+    'host-cleanup': 'Удаление служебных настроек хоста',
+    'local-data': 'Удаление локальных данных',
+    'local-secrets': 'Удаление локальных секретов и настроек',
+    'local-archives': 'Удаление локальных копий и checkpoints',
+    'finalization': 'Завершение удаления',
+}
+
+
+class RemovalError(RuntimeError):
+    def __init__(self, stage, cause):
+        self.stage = stage
+        self.cause = cause
+        super().__init__('Removal step unconfirmed')
+
+
+def removal_operation(stage, operation):
+    try:
+        return operation()
+    except (Exception, KeyboardInterrupt) as error:
+        raise RemovalError(stage, error) from error
+
+
+def failure_message(error):
+    stage = 'Подготовка и подтверждение'
+    if isinstance(error, RemovalError):
+        stage = REMOVAL_STAGES.get(error.stage, 'Выполнение удаления')
+        if re.fullmatch(r's3-[0-9]+', error.stage):
+            stage = 'Удаление выбранного каталога S3'
+        error = error.cause
+    if isinstance(error, (KeyboardInterrupt, state_store.OperationInterrupted)):
+        reason = 'Операция прервана.'
+    elif isinstance(error, ModuleNotFoundError):
+        # Never interpolate exception text, filenames or arbitrary module names.
+        package = {
+            'cryptography': 'python3-cryptography',
+            'boto3': 'python3-boto3',
+            'yaml': 'python3-yaml',
+        }.get((error.name or '').split('.')[0])
+        reason = (
+            'Не установлен необходимый Python-пакет. Установите ' + package + '.'
+            if package
+            else 'Не удалось загрузить необходимый Python-модуль. Проверьте комплект установки.'
+        )
+    elif isinstance(error, PermissionError):
+        reason = 'Не хватает прав. Запустите команду через sudo и проверьте права файлов.'
+    elif isinstance(error, OSError) and error.errno == errno.ENOSPC:
+        reason = 'Недостаточно свободного места. Освободите место вне данных установки.'
+    else:
+        reason = (
+            'Операция не подтверждена. Проверьте состояние служб и выбранных внешних ресурсов; '
+            'журналы просматривайте только приватно.'
+        )
+    return (
+        'Удаление не завершено. Этап: '
+        + stage
+        + '.\n'
+        + reason
+        + '\n'
+        + 'Сохраните оставшиеся настройки и ключи. После устранения причины повторите ту же '
+        'команду с прежними профилями. Если создан remove-journal.json, подтверждённые шаги '
+        'будут пропущены; незавершённый шаг будет выполнен снова.'
+    )
 
 
 def yes(question, ask=input):
@@ -367,9 +436,13 @@ def execute(root, record, targets, stop=None):
     def step(name, operation):
         if name in record['completed']:
             return
-        operation()
-        record['completed'].append(name)
-        state_store.write_json(journal, record)
+
+        def perform():
+            operation()
+            record['completed'].append(name)
+            state_store.write_json(journal, record)
+
+        removal_operation(name, perform)
         print('Выполнено: ' + name, flush=True)
 
     state_store.write_json(journal, record)
@@ -392,18 +465,22 @@ def execute(root, record, targets, stop=None):
     for key, (_, names) in LOCAL.items():
         if record['local'][key]:
             step('local-' + key, lambda names=names: [remove_path(root / name) for name in names])
-    if all(record['local'].values()):
-        # Preserve only the verified allowlisted utility and its public entry point.
-        prune_runtime(root, sources)
-        state_store.write_json(
-            root / '.misbot-empty.json', {'family': 'misbot-matrix-portable', 'format': 1}
-        )
-        (root / 'installation.json').unlink(missing_ok=True)
-    else:
-        metadata = configuration.read_private_json(root / 'installation.json')
-        metadata['decommissioned'] = True
-        state_store.write_json(root / 'installation.json', metadata)
-    journal.unlink()
+
+    def finalize():
+        if all(record['local'].values()):
+            # Preserve only the verified allowlisted utility and its public entry point.
+            prune_runtime(root, sources)
+            state_store.write_json(
+                root / '.misbot-empty.json', {'family': 'misbot-matrix-portable', 'format': 1}
+            )
+            (root / 'installation.json').unlink(missing_ok=True)
+        else:
+            metadata = configuration.read_private_json(root / 'installation.json')
+            metadata['decommissioned'] = True
+            state_store.write_json(root / 'installation.json', metadata)
+        journal.unlink()
+
+    removal_operation('finalization', finalize)
     print(
         'Удаление выбранных ресурсов завершено. Утилита misbot сохранена.'
         + (
@@ -581,13 +658,17 @@ def main():
             execute(args.directory, record, targets)
 
 
-if __name__ == '__main__':
+def entrypoint():
     try:
         main()
-    except (Exception, KeyboardInterrupt):
-        print(
-            'Удаление отменено или не завершено. Выполненные шаги записаны в remove-journal.json; '
-            'повторите sudo misbot remove с прежними профилями. До завершения сохраните оставшиеся credentials.',
-            file=sys.stderr,
+    except (Exception, KeyboardInterrupt) as error:
+        print(failure_message(error), file=sys.stderr)
+        cause = error.cause if isinstance(error, RemovalError) else error
+        return (
+            130 if isinstance(cause, (KeyboardInterrupt, state_store.OperationInterrupted)) else 1
         )
-        raise SystemExit(1)
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(entrypoint())
