@@ -40,7 +40,11 @@ function setup() {
     };
     const control = async (r) => {
         calls.push(r);
-        if (r.action === "authorize" && !allowed) throw new Error();
+        if (r.action === "authorize" && !allowed) {
+            const error = new Error("denied");
+            error.code = "admin_unconfirmed";
+            throw error;
+        }
         return r.action === "authorize"
             ? { authorized: true }
             : r.action === "auto-invitation"
@@ -101,6 +105,32 @@ test("server invitation checks Misbot capabilities before creating a confirmatio
         assert.equal(x.calls.filter((request) => request.action === "invite").length, 0);
         assert.ok(x.sent.some((text) => text.includes("Приглашение не отправлено")));
     }
+});
+
+test("unavailable authorization is visible to the safe adapter and a later command recovers", async () => {
+    const x = setup();
+    const control = x.bot.control;
+    let unavailable = true;
+    x.bot.control = async (request) => {
+        if (request.action === "authorize" && unavailable) {
+            const error = new Error("private transport payload");
+            error.code = "control_unavailable";
+            throw error;
+        }
+        return control(request);
+    };
+    const event = { ...x.event, content: { msgtype: "m.text", body: "помощь" } };
+    await assert.rejects(x.bot.message("!private", event), { code: "control_unavailable" });
+    assert.equal(x.sent.length, 0);
+    unavailable = false;
+    await x.bot.message("!private", event);
+    assert.equal(x.sent.length, 1);
+    assert.equal(x.sent[0], HELP);
+    x.revoke();
+    await x.bot.message("!private", { ...event, event_id: "$after-revocation" });
+    assert.equal(x.sent.length, 1);
+    assert.match(errorText("control_unavailable"), /Повторите команду позже/);
+    assert.doesNotMatch(errorText("private transport payload"), /private transport payload/);
 });
 
 test("capability preview uses a different event from the confirmed invitation", async () => {

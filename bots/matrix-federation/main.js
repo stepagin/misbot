@@ -7,13 +7,16 @@ const {
     MatrixClient,
     SimpleFsStorageProvider,
     RustSdkCryptoStorageProvider,
+    EncryptedRoomEvent,
     LogService
 } = require("matrix-bot-sdk");
 const { StoreType } = require("@matrix-org/matrix-sdk-crypto-nodejs");
 const { FederationBot, errorText } = require("./logic"),
     { ensureCrossSigning } = require("./signing");
 const { WelcomeBot, DeliveryQueue, privateRoom } = require("./welcome");
+const { SerialQueue, controlTimeout, DecryptionRetry } = require("./runtime");
 let stage = "configuration";
+let lastControl = Date.now();
 LogService.setLogger({ trace() {}, debug() {}, info() {}, warn() {}, error() {} });
 function control(request) {
     return new Promise((resolve, reject) => {
@@ -30,7 +33,7 @@ function control(request) {
                 reject(failure);
             } else resolve(value);
         };
-        socket.setTimeout(300000);
+        socket.setTimeout(controlTimeout(request.action));
         socket.on("connect", () => socket.write(JSON.stringify(request) + "\n"));
         socket.on("data", (chunk) => {
             raw += chunk.toString();
@@ -42,12 +45,13 @@ function control(request) {
                     value.ok === true ? false : typeof value.code === "string" ? value.code : true,
                     value.result
                 );
+                if (value.ok === true) lastControl = Date.now();
             } catch {
                 finish(true);
             }
         });
-        socket.on("timeout", () => finish(true));
-        socket.on("error", () => finish(true));
+        socket.on("timeout", () => finish("control_timeout"));
+        socket.on("error", () => finish("control_unavailable"));
         socket.on("end", () => {
             if (!done) finish(true);
         });
@@ -87,31 +91,49 @@ async function main() {
         lastSync = Date.now();
         return result;
     };
-    // One queue also serializes crypto/membership operations and duplicate deliveries.
-    let queue = Promise.resolve();
-    const enqueue = (fn) => {
-        queue = queue
-            .then(fn)
-            .catch(() => console.log("Federation operation not confirmed; use CLI status/retry"));
+    const queue = new SerialQueue((code) => console.log("Federation bot: " + code));
+    const message = async (room, event) => {
+        try {
+            await bot.message(room, event);
+        } catch (error) {
+            console.log("Federation bot: command_unconfirmed");
+            if (
+                bot.local(event.sender) &&
+                (await bot.authorize(event.sender).then(
+                    () => true,
+                    () => false
+                )) &&
+                (await bot.privateRoom(room).catch(() => false))
+            )
+                await client.sendNotice(room, errorText(error?.code)).catch(() => {});
+            throw new Error("command_unconfirmed");
+        }
     };
-    client.on("room.invite", (room, event) => enqueue(() => bot.invitation(room, event)));
-    client.on("room.message", (room, event) =>
-        enqueue(async () => {
-            try {
-                await bot.message(room, event);
-            } catch (error) {
-                if (
-                    bot.local(event.sender) &&
-                    (await bot.authorize(event.sender).then(
-                        () => true,
-                        () => false
-                    )) &&
-                    (await bot.privateRoom(room).catch(() => false))
-                )
-                    await client.sendNotice(room, errorText(error?.code)).catch(() => {});
-            }
-        })
+    const decrypted = new DecryptionRetry(
+        {
+            getValue: (key) => store.readValue(key),
+            setValue: (key, value) => store.storeValue(key, value)
+        },
+        (room, event) => client.crypto.decryptRoomEvent(new EncryptedRoomEvent(event), room),
+        message,
+        (sender) => bot.local(sender)
     );
+    client.on("room.invite", (room, event) => {
+        queue.add("invite:" + event.event_id, () => bot.invitation(room, event));
+    });
+    client.on("room.message", (room, event) => {
+        if (!bot.local(event.sender)) return;
+        queue.add("message:" + event.event_id, async () => {
+            await message(room, event);
+            decrypted.forget(event);
+        });
+    });
+    client.on("room.failed_decryption", (room, event) => {
+        if (decrypted.remember(room, event)) console.log("Federation bot: decryption_pending");
+    });
+    client.on("to_device.decrypted", () => {
+        queue.add("decryption", () => decrypted.retry(), true);
+    });
     stage = "profile";
     await client.setDisplayName("Панель администратора Misbot");
     stage = "sync";
@@ -211,19 +233,56 @@ async function main() {
         control,
         { getValue: (k) => store.readValue(k), setValue: (k, v) => store.storeValue(k, v) },
         config,
-        bot
+        bot,
+        (code) => console.log("Federation bot: " + code)
     );
+    welcomeClient.on("room.event", (room, event) => {
+        if (event.type === "m.room.member" && event.content?.membership === "join")
+            queue.add(
+                "welcome-keys:" + room,
+                async () => {
+                    if (await welcome.shareCurrentKeys(room))
+                        queue.add("deliveries", () => deliveries.poll(), true);
+                },
+                true
+            );
+    });
+    client.on("room.event", (room, event) => {
+        if (
+            event.type === "m.room.member" &&
+            event.content?.membership === "join" &&
+            bot.local(event.state_key)
+        )
+            queue.add("deliveries", () => deliveries.poll(), true);
+    });
+    let recoverRooms,
+        recoveryIndex = 0;
+    const recoverWelcomeKeys = async () => {
+        recoverRooms ??= await welcomeClient.getJoinedRooms();
+        const room = recoverRooms.shift();
+        try {
+            if (room) await welcome.shareCurrentKeys(room);
+        } finally {
+            // Let input run between rooms; a large installation or one
+            // unavailable DM must not block all startup key recovery.
+            if (recoverRooms.length)
+                queue.add("welcome-keys-recovery:" + ++recoveryIndex, recoverWelcomeKeys, true);
+        }
+    };
+    queue.add("welcome-keys-recovery:0", recoverWelcomeKeys, true);
     // Same queue serializes encryption and room state; at most two messages / 5s.
-    setInterval(() => enqueue(() => deliveries.poll()), 5000).unref();
+    setInterval(() => queue.add("deliveries", () => deliveries.poll(), true), 5000).unref();
+    setInterval(() => queue.add("decryption", () => decrypted.retry(), true), 10000).unref();
     ready = true;
-    setInterval(() => enqueue(() => bot.notifications()), 30000).unref();
+    setInterval(() => queue.add("notifications", () => bot.notifications(), true), 30000).unref();
     http.createServer((req, res) => {
         const ok =
             ready &&
             client.crypto.isReady &&
             welcomeClient.crypto.isReady &&
             Date.now() - lastSync < 180000 &&
-            Date.now() - welcomeSync < 180000;
+            Date.now() - welcomeSync < 180000 &&
+            Date.now() - lastControl < 60000;
         res.writeHead(req.url === "/health" ? (ok ? 200 : 503) : 404, {
             "Content-Type": "application/json"
         });

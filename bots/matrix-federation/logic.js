@@ -326,6 +326,12 @@ function errorText(code) {
             "Версия API другого сервера не поддерживается. Приглашение не отправлено.",
         request_capacity: "Достигнут предел сохранённых заявок. Нужна проверка состояния через SSH."
     };
+    if (
+        ["control_timeout", "control_unavailable", "busy_pending_or_operation_failed"].includes(
+            code
+        )
+    )
+        return "Управляющая служба сейчас недоступна или занята. Ответ не получен. Повторите команду позже; результат ранее принятой задачи можно проверить командой «задача ID».";
     return typeof code === "string" && Object.hasOwn(messages, code)
         ? messages[code]
         : "Результат команды не подтверждён. Проверьте состояние сервера и сохранённой задачи. Команды: состояние, задача ID, операции. Для восстановления используйте SSH. Справка: помощь.";
@@ -342,9 +348,14 @@ class FederationBot {
         );
     }
     async authorize(sender) {
-        if (!this.local(sender)) throw new Error("admin_unconfirmed");
+        const denied = () => {
+            const error = new Error("admin_unconfirmed");
+            error.code = "admin_unconfirmed";
+            return error;
+        };
+        if (!this.local(sender)) throw denied();
         const result = await this.control({ action: "authorize", actor: sender });
-        if (!result.authorized) throw new Error("admin_unconfirmed");
+        if (result.authorized !== true) throw denied();
     }
     async privateRoom(room) {
         const state = await this.client.getRoomState(room);
@@ -405,8 +416,9 @@ class FederationBot {
         try {
             await this.authorize(event.sender);
             if (!(await this.privateRoom(room))) return;
-        } catch {
-            return;
+        } catch (error) {
+            if (error?.code === "admin_unconfirmed") return;
+            throw error;
         }
         const reply = async (body) => {
             await this.authorize(event.sender);

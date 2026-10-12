@@ -4,10 +4,11 @@ const test = require("node:test"),
     fs = require("node:fs"),
     os = require("node:os"),
     path = require("node:path"),
-    vm = require("node:vm");
+    vm = require("node:vm"),
+    { EventEmitter } = require("node:events");
 
 // Execute the actual entrypoint and signing helper, replacing only external I/O.
-function installation(directory) {
+function installation(directory, options = {}) {
     const files = new Proxy(fs, {
         get(target, name) {
             if (["existsSync", "readFileSync", "writeFileSync", "mkdirSync"].includes(name))
@@ -29,7 +30,10 @@ function installation(directory) {
     const keys = signing.exports,
         clients = new Map(),
         rooms = new Map(),
-        logs = [];
+        logs = [],
+        notices = [],
+        requests = [],
+        queues = [];
     let uploaded = 0,
         created = 0;
     class MatrixClient {
@@ -48,6 +52,16 @@ function installation(directory) {
                 isReady: true,
                 clientDeviceId: device,
                 clientDeviceEd25519: identity.public,
+                decryptRoomEvent: async (event) => {
+                    if (!options.canDecrypt) throw new Error("private crypto payload");
+                    return {
+                        raw: {
+                            ...event.raw,
+                            type: "m.room.message",
+                            content: { msgtype: "m.text", body: "помощь" }
+                        }
+                    };
+                },
                 sign: async (object) => ({
                     [this.user]: {
                         ["ed25519:" + device]: keys.signed(object, identity, this.user).signatures[
@@ -62,7 +76,28 @@ function installation(directory) {
             return this.user;
         }
         async setDisplayName() {}
-        on() {}
+        on(name, handler) {
+            this.handlers ??= new Map();
+            this.handlers.set(name, handler);
+        }
+        emit(name, ...args) {
+            this.handlers.get(name)?.(...args);
+        }
+        async getRoomState() {
+            return [this.user, "@matrix-admin:example.org"]
+                .map((state_key) => ({
+                    type: "m.room.member",
+                    state_key,
+                    content: { membership: "join" }
+                }))
+                .concat({
+                    type: "m.room.encryption",
+                    content: { algorithm: "m.megolm.v1.aes-sha2" }
+                });
+        }
+        async sendNotice(room, body) {
+            notices.push({ room, body });
+        }
         async doSync() {
             return {};
         }
@@ -136,7 +171,21 @@ function installation(directory) {
             "node:fs": files,
             "node:net": {
                 createConnection() {
-                    throw new Error("Unexpected control request");
+                    if (!options.response) throw new Error("Unexpected control request");
+                    const socket = new EventEmitter();
+                    socket.destroy = () => {};
+                    socket.setTimeout = (timeout) => {
+                        socket.timeout = timeout;
+                    };
+                    socket.write = (raw) => {
+                        const request = JSON.parse(raw);
+                        requests.push({ request, timeout: socket.timeout });
+                        const response = options.response(request, requests.length);
+                        if (response === "timeout") socket.emit("timeout");
+                        else socket.emit("data", Buffer.from(JSON.stringify(response) + "\n"));
+                    };
+                    queueMicrotask(() => socket.emit("connect"));
+                    return socket;
                 }
             },
             "node:http": {
@@ -153,11 +202,25 @@ function installation(directory) {
                 MatrixClient,
                 SimpleFsStorageProvider: Storage,
                 RustSdkCryptoStorageProvider: class {},
+                EncryptedRoomEvent: class {
+                    constructor(raw) {
+                        this.raw = raw;
+                    }
+                },
                 LogService: { setLogger() {} }
             },
             "@matrix-org/matrix-sdk-crypto-nodejs": { StoreType: { Sqlite: "sqlite" } },
             "./signing": keys,
-            "./logic": { FederationBot: class {} },
+            "./runtime": {
+                ...require("../runtime"),
+                SerialQueue: class extends require("../runtime").SerialQueue {
+                    constructor(...args) {
+                        super(...args);
+                        queues.push(this);
+                    }
+                }
+            },
+            "./logic": options.response ? require("../logic") : { FederationBot: class {} },
             "./welcome": {
                 WelcomeBot: class {},
                 DeliveryQueue: class {},
@@ -189,7 +252,15 @@ function installation(directory) {
             );
         return { code, status };
     }
-    return { boot, logs, clients, counts: () => ({ uploaded, created }) };
+    return {
+        boot,
+        logs,
+        clients,
+        notices,
+        requests,
+        idle: () => Promise.all(queues.map((queue) => queue.idle())),
+        counts: () => ({ uploaded, created })
+    };
 }
 
 test(
@@ -225,6 +296,124 @@ test(
         }
     }
 );
+
+test("actual panel entrypoint reports transient busy only after reauthorizing and recovers", async () => {
+    const folder = fs.mkdtempSync(path.join(os.tmpdir(), "misbot-entrypoint-"));
+    try {
+        let busy = true;
+        const fixture = installation(folder, {
+            response: (request) => {
+                assert.equal(request.action, "authorize");
+                if (busy) {
+                    busy = false;
+                    return { ok: false, code: "busy_pending_or_operation_failed" };
+                }
+                return { ok: true, result: { authorized: true } };
+            }
+        });
+        await fixture.boot();
+        const client = fixture.clients.get("admin-panel");
+        const event = {
+            event_id: "$request",
+            sender: "@matrix-admin:example.org",
+            content: { msgtype: "m.text", body: "помощь" }
+        };
+        client.emit("room.message", "!private", event);
+        await fixture.idle();
+        assert.equal(fixture.notices.length, 1);
+        assert.match(fixture.notices[0].body, /Повторите команду позже/);
+        assert.ok(fixture.requests.every((call) => call.timeout === 10000));
+        client.emit("room.message", "!private", event);
+        await fixture.idle();
+        assert.equal(fixture.notices.length, 2);
+        assert.match(fixture.notices[1].body, /Панель администратора Misbot/);
+        assert.ok(fixture.logs.includes("Federation bot: command_unconfirmed"));
+    } finally {
+        fs.rmSync(folder, { recursive: true, force: true });
+    }
+});
+
+test("actual panel entrypoint never sends fallback text after authorization is denied", async () => {
+    const folder = fs.mkdtempSync(path.join(os.tmpdir(), "misbot-entrypoint-"));
+    try {
+        const fixture = installation(folder, {
+            response: () => ({ ok: false, code: "admin_unconfirmed" })
+        });
+        await fixture.boot();
+        fixture.clients.get("admin-panel").emit("room.message", "!private", {
+            event_id: "$denied",
+            sender: "@matrix-admin:example.org",
+            content: { msgtype: "m.text", body: "помощь" }
+        });
+        await fixture.idle();
+        assert.deepEqual(fixture.notices, []);
+    } finally {
+        fs.rmSync(folder, { recursive: true, force: true });
+    }
+});
+
+test("actual panel entrypoint uses a short timeout and gives safe feedback after authorization recovers", async () => {
+    const folder = fs.mkdtempSync(path.join(os.tmpdir(), "misbot-entrypoint-"));
+    try {
+        let timeout = true;
+        const fixture = installation(folder, {
+            response: () => {
+                if (timeout) {
+                    timeout = false;
+                    return "timeout";
+                }
+                return { ok: true, result: { authorized: true } };
+            }
+        });
+        await fixture.boot();
+        fixture.clients.get("admin-panel").emit("room.message", "!private", {
+            event_id: "$timeout",
+            sender: "@matrix-admin:example.org",
+            content: { msgtype: "m.text", body: "помощь" }
+        });
+        await fixture.idle();
+        assert.equal(fixture.requests[0].timeout, 10000);
+        assert.equal(fixture.notices.length, 1);
+        assert.match(fixture.notices[0].body, /Ответ не получен/);
+        assert.ok(fixture.logs.every((line) => !line.includes("access_token")));
+    } finally {
+        fs.rmSync(folder, { recursive: true, force: true });
+    }
+});
+
+test("actual panel entrypoint retries encrypted commands after key arrival without duplicate replies", async () => {
+    const folder = fs.mkdtempSync(path.join(os.tmpdir(), "misbot-entrypoint-"));
+    try {
+        const options = {
+            canDecrypt: false,
+            response: () => ({ ok: true, result: { authorized: true } })
+        };
+        const fixture = installation(folder, options);
+        await fixture.boot();
+        const client = fixture.clients.get("admin-panel");
+        client.emit("room.failed_decryption", "!private", {
+            event_id: "$encrypted",
+            sender: "@matrix-admin:example.org",
+            type: "m.room.encrypted",
+            content: {
+                algorithm: "m.megolm.v1.aes-sha2",
+                ciphertext: "encrypted-payload",
+                session_id: "session"
+            }
+        });
+        options.canDecrypt = true;
+        client.emit("to_device.decrypted", {});
+        await fixture.idle();
+        client.emit("to_device.decrypted", {});
+        await fixture.idle();
+        assert.equal(fixture.notices.length, 1);
+        assert.match(fixture.notices[0].body, /Панель администратора Misbot/);
+        assert.ok(fixture.logs.includes("Federation bot: decryption_pending"));
+        assert.doesNotMatch(fixture.logs.join("\n"), /encrypted-payload|private crypto payload/);
+    } finally {
+        fs.rmSync(folder, { recursive: true, force: true });
+    }
+});
 
 test(
     "welcome owner mismatch fails closed and preserves both accounts' keys",

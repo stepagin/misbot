@@ -408,14 +408,20 @@ class Panel:
                         dict(row)
                         for row in db.execute(
                             'SELECT id,recipient,via,body FROM outbox '
-                            "WHERE state='pending' AND next_at<=? ORDER BY rowid LIMIT 2",
+                            "WHERE state='pending' AND next_at<=? ORDER BY next_at,rowid LIMIT 2",
                             (self.clock(),),
                         )
                     ]
                 }
         if action == 'panel-ack':
             identifier, delivered = argument.get('id'), argument.get('delivered')
-            if not isinstance(identifier, str) or not isinstance(delivered, bool):
+            waiting_for_join = argument.get('waiting_for_join', False)
+            if (
+                not isinstance(identifier, str)
+                or not isinstance(delivered, bool)
+                or not isinstance(waiting_for_join, bool)
+                or (delivered and waiting_for_join)
+            ):
                 raise ValueError('Invalid delivery receipt')
             with self.database() as db:
                 if delivered:
@@ -426,7 +432,7 @@ class Panel:
                 else:
                     db.execute(
                         "UPDATE outbox SET attempts=attempts+1,next_at=? WHERE id=? AND state='pending'",
-                        (self.clock() + 300, identifier),
+                        (self.clock() + (5 if waiting_for_join else 300), identifier),
                     )
             return {'recorded': True}
         raise ValueError('Unknown panel action')

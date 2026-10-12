@@ -146,6 +146,7 @@ for name in (
     'main.js',
     'logic.js',
     'welcome.js',
+    'runtime.js',
     'package.json',
     'package-lock.json',
     'signing.js',
@@ -157,7 +158,7 @@ for name in (
         / 'bots'
         / (
             'matrix-federation'
-            if name in ('Dockerfile', 'main.js', 'logic.js', 'welcome.js')
+            if name in ('Dockerfile', 'main.js', 'logic.js', 'welcome.js', 'runtime.js')
             else 'matrix-referral'
         )
         / name

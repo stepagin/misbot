@@ -46,6 +46,65 @@ class PanelTests(unittest.TestCase):
     def pending(self):
         return self.panel.handle('panel-outbox', None, None)['items']
 
+    def test_waiting_invitations_retry_within_five_seconds_without_starving_other_users(self):
+        with self.panel.database() as db:
+            for index in range(40):
+                self.panel.enqueue(
+                    db,
+                    'welcome:test' + str(index),
+                    '@user' + str(index) + ':example.org',
+                    'welcome',
+                    'Здравствуйте',
+                )
+        visited = set()
+        for _ in range(20):
+            items = self.pending()
+            self.assertEqual(len(items), 2)
+            self.assertFalse(visited & {item['id'] for item in items})
+            visited.update(item['id'] for item in items)
+            for item in items:
+                self.panel.handle(
+                    'panel-ack',
+                    {'id': item['id'], 'delivered': False, 'waiting_for_join': True},
+                    None,
+                )
+            self.now += 5
+        self.assertEqual(len(visited), 40)
+        # Restart keeps pending work. Earlier retry deadlines now win, so the
+        # two first invitations can deliver once their recipients have joined.
+        restarted = admin_panel.Panel(self.root, lambda: self.now)
+        ready = restarted.handle('panel-outbox', None, None)['items']
+        self.assertEqual(
+            {item['recipient'] for item in ready}, {'@user0:example.org', '@user1:example.org'}
+        )
+        for item in ready:
+            restarted.handle('panel-ack', {'id': item['id'], 'delivered': True}, None)
+        self.assertFalse({item['id'] for item in ready} & {item['id'] for item in self.pending()})
+
+    def test_pending_join_receipt_keeps_queue_and_uses_short_deadline(self):
+        self.panel.notice('notice', 'Проверено')
+        item = self.pending()[0]
+        self.panel.handle(
+            'panel-ack', {'id': item['id'], 'delivered': False, 'waiting_for_join': True}, None
+        )
+        self.assertEqual(self.pending(), [])
+        self.now += 4
+        self.assertEqual(self.pending(), [])
+        self.now += 1
+        self.assertEqual(self.pending(), [item])
+        self.panel.handle('panel-ack', {'id': item['id'], 'delivered': False}, None)
+        self.now += 299
+        self.assertEqual(self.pending(), [])
+        self.now += 1
+        self.assertEqual(self.pending(), [item])
+        for argument in (
+            {'id': item['id'], 'delivered': False, 'waiting_for_join': 'yes'},
+            {'id': item['id'], 'delivered': True, 'waiting_for_join': True},
+        ):
+            with self.assertRaisesRegex(ValueError, 'Invalid delivery receipt'):
+                self.panel.handle('panel-ack', argument, None)
+        self.assertEqual(self.pending(), [item])
+
     def test_new_registration_welcome_owner_notification_and_restart_dedupe(self):
         self.users = [
             {'mxid': '@alice:example.org', 'created': self.now, 'active': True},
