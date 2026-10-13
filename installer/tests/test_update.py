@@ -15,6 +15,80 @@ import update
 
 
 class UpdateTests(unittest.TestCase):
+    def test_shared_admission_checks_versions_and_actual_schema_without_mutation(self):
+        import sqlite3
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            installed = {'applied_release_version': '1.2.0'}
+            current = {
+                'family': update.FAMILY,
+                'version': '1.2.0',
+                'update_scope': 'source-and-configuration',
+                'data_schema_version': 1,
+            }
+            (root / 'release.json').write_text(json.dumps(current))
+            database = root / 'data/admin-panel/panel.sqlite'
+            database.parent.mkdir(parents=True)
+            db = sqlite3.connect(database)
+            db.execute('PRAGMA user_version=2')
+            db.close()
+            before = database.read_bytes()
+            for candidate, error in (
+                (dict(current, version='1.1.0'), 'Downgrade'),
+                (dict(current, version='1.3.0', data_schema_version=0), 'schema downgrade'),
+                (dict(current, version='1.3.0'), 'schema downgrade'),
+                (
+                    {
+                        k: v
+                        for k, v in dict(current, version='1.3.0').items()
+                        if k != 'data_schema_version'
+                    },
+                    'schema downgrade',
+                ),
+            ):
+                with self.subTest(candidate=candidate), self.assertRaisesRegex(RuntimeError, error):
+                    update.admit_release(root, installed, candidate)
+            update.admit_release(root, installed, dict(current, data_schema_version=2))
+            update.admit_release(
+                root, installed, dict(current, version='1.3.0', data_schema_version=3)
+            )
+            self.assertEqual(database.read_bytes(), before)
+
+    def test_portable_rejects_downgrade_before_backup_or_migrations(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for candidate in ({'version': '1.1.0'}, {'version': '1.3.0'}):
+                (root / 'release.json').write_text(
+                    json.dumps(
+                        {
+                            'family': update.FAMILY,
+                            'version': '1.2.0',
+                            'data_schema_version': 1,
+                            'update_scope': 'source-and-configuration',
+                        }
+                    )
+                )
+                with (
+                    patch.object(update, 'validate_manifest', return_value=({}, 'revision')),
+                    patch.object(
+                        update,
+                        'release',
+                        side_effect=[candidate, json.loads((root / 'release.json').read_text())],
+                    ),
+                    patch.object(
+                        update, 'state', return_value={'applied_release_version': '1.2.0'}
+                    ),
+                    patch.object(update, 'run_data_migrations') as migrations,
+                    patch.object(update, 'snapshot') as snapshot,
+                    patch.object(update, 'verified_backup') as backup,
+                    self.assertRaisesRegex(RuntimeError, '[Dd]owngrade'),
+                ):
+                    update.perform_update(root / 'source', root, 'apply')
+                for action in (migrations, snapshot, backup):
+                    action.assert_not_called()
+                self.assertFalse((root / 'stages').exists())
+
     def test_command_refresh_uses_verified_backend_and_safe_failure(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

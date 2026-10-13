@@ -169,8 +169,9 @@ def apply(installation, source):
     entries, revision = sources(source)
     if installation.model.get('proxy') and 'existing_proxy.py' not in entries:
         raise Error('Source комплект не поддерживает зарегистрированный Caddy container.')
-    worker_changed = telegram_container.update_needed(installation, entries)
     candidate = update.release(source)
+    update.admit_release(installation.root, installation.state, candidate)
+    worker_changed = telegram_container.update_needed(installation, entries)
     update.run_data_migrations(source, installation.root, candidate, 'check')
     previous, _ = update.validate_manifest(installation.root)
     installation.validate()

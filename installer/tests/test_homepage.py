@@ -40,6 +40,99 @@ class HomepageTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def http_fixture(self, api_response=(503, {'code': 'api_disabled'}), matrix_response=None):
+        from io import BytesIO
+        from unittest.mock import Mock
+        from urllib.error import HTTPError
+
+        def get(url, **kwargs):
+            if '/.well-known/misbot' in url:
+                code, body = api_response
+            elif '/.well-known/matrix/client' in url:
+                code, body = matrix_response or (
+                    200,
+                    {'m.homeserver': {'base_url': 'https://matrix.fictional.example.org'}},
+                )
+            elif '/.well-known/matrix/server' in url:
+                code, body = 200, {'m.server': 'matrix.fictional.example.org:443'}
+            elif '/_matrix/client/versions' in url:
+                code, body = 200, {'versions': ['v1.1']}
+            else:
+                mode = config.load(self.root, True)['HOMEPAGE_MODE']
+                response = Mock()
+                response.status = 200 if mode == 'landing' else 302
+                response.headers = {'Location': 'https://web.fictional.example.org'}
+                response.read.return_value = b'<meta name="misbot-homepage">'
+                context = Mock()
+                context.__enter__ = Mock(return_value=response)
+                context.__exit__ = Mock(return_value=False)
+                return context
+            payload = json.dumps(body).encode()
+            if code != 200:
+                raise HTTPError(url, code, 'fixture', {}, BytesIO(payload))
+            response = Mock(status=code, headers={})
+            response.read.return_value = payload
+            context = Mock()
+            context.__enter__ = Mock(return_value=response)
+            context.__exit__ = Mock(return_value=False)
+            return context
+
+        return Mock(open=Mock(side_effect=get))
+
+    def test_disabled_api_apply_recover_and_rollback_use_saved_setting(self):
+        (self.root / 'data/federation').mkdir(parents=True)
+        state_store.write_json(
+            self.root / 'data/federation/state.json',
+            {'format': 1, 'server_name': 'fictional.example.org', 'api_enabled': False},
+        )
+        self.backend.verify = self.backend.probe
+        with (
+            patch.object(homepage.urllib.request, 'build_opener', return_value=self.http_fixture()),
+            patch.object(self.backend, 'ready'),
+            state_store.operation_guard(self.root),
+        ):
+            self.backend.apply({'HOMEPAGE_MODE': 'landing'})
+            self.assertFalse((self.root / 'homepage-transition.json').exists())
+            for rollback in (False, True):
+                previous_name = config.load(self.root, True)['SITE_NAME']
+                self.backend.activate = lambda: (_ for _ in ()).throw(
+                    state_store.OperationInterrupted()
+                )
+                with self.assertRaises(state_store.OperationInterrupted):
+                    self.backend.apply({'SITE_NAME': 'Interrupted name ' + str(rollback)})
+                self.backend.activate = lambda: None
+                self.backend.recover(rollback=rollback)
+                self.assertEqual(
+                    config.load(self.root, True)['SITE_NAME'],
+                    previous_name if rollback else 'Interrupted name False',
+                )
+                self.assertFalse((self.root / 'homepage-transition.json').exists())
+        state_store.assert_update_allowed(self.root)
+
+    def test_disabled_api_does_not_accept_wrong_error_or_broken_matrix_discovery(self):
+        model = config.load(self.root, True)
+        for enabled, response, matrix in (
+            (False, (503, {'code': 'installation_busy_or_pending'}), None),
+            (False, (200, {'server_name': model['DOMAIN'], 'protocol': 1}), None),
+            (True, (503, {'code': 'api_disabled'}), None),
+            (False, (503, {'code': 'api_disabled'}), (503, {'code': 'api_disabled'})),
+            (
+                False,
+                (503, {'code': 'api_disabled'}),
+                (200, {'m.homeserver': {'base_url': 'https://wrong.example'}}),
+            ),
+        ):
+            with (
+                self.subTest(enabled=enabled, response=response, matrix=matrix),
+                patch.object(
+                    homepage.urllib.request,
+                    'build_opener',
+                    return_value=self.http_fixture(response, matrix),
+                ),
+                self.assertRaises(RuntimeError),
+            ):
+                homepage.probe(model, api_enabled=enabled)
+
     def test_setup_link_follows_release_metadata_and_escapes_query(self):
         source = self.root / 'source'
         (source / 'site').mkdir(parents=True)

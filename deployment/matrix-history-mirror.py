@@ -308,23 +308,14 @@ def reset_side(db, side, room_id=None):
         db.execute('DELETE FROM meta WHERE key=?', (side + '_since',))
 
 
-def refresh_rooms(db, joined):
-    now = int(time.time())
-    for room_id, last_reconcile in db.execute(
-        'SELECT room_id, last_reconcile FROM rooms'
-    ).fetchall():
-        if room_id not in joined:
-            db.execute("UPDATE rooms SET status='WAIT_JOIN' WHERE room_id=?", (room_id,))
-        elif last_reconcile == 0:
-            db.execute('UPDATE rooms SET last_reconcile=? WHERE room_id=?', (now, room_id))
-    db.commit()
-
-
-def reconcile(db):
+def reconcile(db, joined):
     now = int(time.time())
     for room_id, source_done, target_done in db.execute(
         'SELECT room_id, source_done, target_done FROM rooms'
     ).fetchall():
+        if room_id not in joined:
+            db.execute("UPDATE rooms SET status='WAIT_JOIN' WHERE room_id=?", (room_id,))
+            continue
         if not source_done or not target_done:
             status = 'BACKFILLING'
         else:
@@ -338,6 +329,26 @@ def reconcile(db):
             'UPDATE rooms SET status=?, last_success=? WHERE room_id=?', (status, now, room_id)
         )
     db.commit()
+
+
+def full_scan_complete(db, joined):
+    return bool(joined) and all(
+        source_done and target_done
+        for room_id, source_done, target_done in db.execute(
+            'SELECT room_id, source_done, target_done FROM rooms'
+        )
+        if room_id in joined
+    )
+
+
+def schedule_full_scan(db, joined, interval):
+    if not full_scan_complete(db, joined):
+        set_meta(db, 'last_full_scan', 0)
+        return
+    last = int(get_meta(db, 'last_full_scan') or 0)
+    if last and time.time() - last >= interval:
+        reset_for_full_scan(db, joined)
+        set_meta(db, 'last_full_scan', 0)
 
 
 def reset_for_full_scan(db, joined):
@@ -503,12 +514,9 @@ def run(state_dir):
                             (room_id,),
                         )
                     db.commit()
-                    refresh_rooms(db, joined)
+                    reconcile(db, joined)
                     load_media_manifest(db, config)
-                    last = int(get_meta(db, 'last_full_scan') or 0)
-                    if last and time.time() - last >= config['reconcile_interval']:
-                        reset_for_full_scan(db, joined)
-                        set_meta(db, 'last_full_scan', int(time.time()))
+                    schedule_full_scan(db, joined, config['reconcile_interval'])
                     for side, client in clients.items():
                         since = get_meta(db, side + '_since')
                         try:
@@ -530,15 +538,10 @@ def run(state_dir):
                                 else:
                                     raise
                     prefetch_media(db, config, clients['target'])
-                    reconcile(db)
-                    db.execute(
-                        "UPDATE rooms SET status='WAIT_JOIN' WHERE room_id NOT IN ({})".format(
-                            ','.join('?' for _ in joined) or 'NULL'
-                        ),
-                        tuple(joined),
-                    )
-                    db.commit()
-                    if not get_meta(db, 'last_full_scan'):
+                    reconcile(db, joined)
+                    if full_scan_complete(db, joined) and not int(
+                        get_meta(db, 'last_full_scan') or 0
+                    ):
                         set_meta(db, 'last_full_scan', int(time.time()))
                     set_meta(db, 'state', 'RUNNING')
                     pending = db.execute(

@@ -95,6 +95,45 @@ class ExistingUpdateTests(unittest.TestCase):
         page.plan = plan
         return installation, source, entries, page
 
+    def test_downgrade_and_schema_regression_refused_before_backup_or_publication(self):
+        for candidate in (
+            {'version': '1.1.0'},
+            {'version': '1.3.0'},
+            {'version': '1.3.0', 'data_schema_version': 0},
+        ):
+            with self.subTest(candidate=candidate), tempfile.TemporaryDirectory() as temporary:
+                installation, source, entries, _ = self.homepage_fixture(Path(temporary))
+                current = json.loads((installation.root / 'release.json').read_text())
+                current['data_schema_version'] = 1
+                (installation.root / 'release.json').write_text(json.dumps(current))
+                proposed = json.loads((source / 'release.json').read_text())
+                proposed.update(candidate)
+                (source / 'release.json').write_text(json.dumps(proposed))
+                before = {
+                    p.relative_to(installation.root): p.read_bytes()
+                    for p in installation.root.rglob('*')
+                    if p.is_file()
+                }
+                with (
+                    patch.object(update, 'sources', return_value=(entries, 'candidate')),
+                    patch.object(update.update, 'run_data_migrations') as migrate,
+                    patch.object(update.telegram_container, 'prepare_update') as prepare,
+                    self.assertRaisesRegex(RuntimeError, '[Dd]owngrade'),
+                ):
+                    update.apply(installation, source)
+                installation.backup.assert_not_called()
+                installation.validate.assert_not_called()
+                migrate.assert_not_called()
+                prepare.assert_not_called()
+                self.assertEqual(
+                    before,
+                    {
+                        p.relative_to(installation.root): p.read_bytes()
+                        for p in installation.root.rglob('*')
+                        if p.is_file()
+                    },
+                )
+
     def test_source_update_refreshes_default_landing_and_recovers_partial_publication(self):
         for failures in (0, 1, 2):
             with self.subTest(failures=failures), tempfile.TemporaryDirectory() as temporary:
