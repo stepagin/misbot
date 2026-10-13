@@ -643,15 +643,7 @@ def yaml_media_s3():
 
 
 def prepare_host():
-    memory = int(
-        next(
-            line.split()[1]
-            for line in Path('/proc/meminfo').read_text().splitlines()
-            if line.startswith('MemTotal:')
-        )
-    )
-    if memory < 1800000:
-        raise RuntimeError('At least about 2 GiB RAM is required for Misbot 1.1')
+    memory = preflight.check_ram()
     if shutil.disk_usage(ROOT).free < 3 * 1024**3:
         raise RuntimeError('At least 3 GiB free after pulling images is required')
     swap = int(

@@ -12,6 +12,7 @@ import shlex
 import shutil
 import socket
 import subprocess
+import sys
 import threading
 from urllib.parse import unquote, urlsplit
 
@@ -242,11 +243,8 @@ def caa_check(domain, mas_domain='', mas_mode='local'):
             )
 
 
-def system_check(root):
-    if platform.system() != 'Linux' or platform.machine() not in ('x86_64', 'amd64'):
-        raise RuntimeError(
-            'This installer requires a Linux amd64 VPS; use a compatible test machine'
-        )
+def check_ram():
+    """Require sufficient physical RAM unless this process explicitly accepts the risk."""
     memory = int(
         next(
             line.split()[1]
@@ -255,7 +253,23 @@ def system_check(root):
         )
     )
     if memory < 1800000:
-        raise RuntimeError('Less than about 2 GiB RAM; choose a larger VPS before continuing')
+        if os.environ.get('MISBOT_ALLOW_LOW_MEMORY') != '1':
+            raise RuntimeError('Less than about 2 GiB RAM; choose a larger VPS before continuing')
+        print(
+            'WARNING: MISBOT_ALLOW_LOW_MEMORY=1 enables experimental operation below '
+            'about 2 GiB physical RAM. Swap does not replace RAM; slow responses, '
+            'out-of-memory failures and service restarts are possible.',
+            file=sys.stderr,
+        )
+    return memory
+
+
+def system_check(root):
+    if platform.system() != 'Linux' or platform.machine() not in ('x86_64', 'amd64'):
+        raise RuntimeError(
+            'This installer requires a Linux amd64 VPS; use a compatible test machine'
+        )
+    check_ram()
     disk_target = Path(root)
     while not disk_target.exists():
         disk_target = disk_target.parent
