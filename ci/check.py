@@ -155,6 +155,8 @@ def verify_compact_archive(path: Path) -> str:
 
 
 def build_checks() -> None:
+    run('build standalone bootstrap', [sys.executable, 'ci/bootstrap.py'])
+    run('standalone bootstrap syntax', ['bash', '-n', 'dist/install.sh'])
     run('build archive and checksums', [sys.executable, 'installer/build.py', '--release'])
     first = verify_archive(ROOT / 'dist/matrix-installer.tar.gz')
     import json

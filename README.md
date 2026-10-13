@@ -14,10 +14,17 @@ SSH-мастер или административного бота. Для ре
 
 ## Установка на новый сервер
 
-Скачайте `matrix-installer.tar.gz` и
-`matrix-installer.tar.gz.sha256` из [GitHub Releases](https://github.com/stepagin/misbot/releases).
-Сверьте контрольную сумму с опубликованным значением. Для запуска утилиты на
-сервере нужен Python 3.11 или новее.
+Подключитесь к серверу по SSH и выполните:
+
+```bash
+curl -fL https://github.com/stepagin/misbot/releases/latest/download/install.sh -o ~/misbot-install.sh && sudo bash ~/misbot-install.sh
+```
+
+Загрузчик доступен начиная с релиза, содержащего `install.sh`. Он подготовит
+недостающие пакеты, скачает последний стабильный релиз, проверит архив и откроет
+SSH-мастер. Уже установленный Misbot откроется без переустановки и обновления.
+Если `curl` отсутствует: `sudo apt-get update && sudo apt-get install -y curl ca-certificates`.
+Для конкретной версии: `sudo bash ~/misbot-install.sh --version 1.2.0`.
 
 Нужны Linux VPS (Debian/Ubuntu), права root/sudo, SSH, публичный IPv4 и домен с
 доступом к DNS. Практический минимум для небольшого сообщества — **2 vCPU,
@@ -26,22 +33,11 @@ SSH-мастер или административного бота. Для ре
 обслуживания зависит от нагрузки. Требования DNS и портов — в
 [инструкции установки](installer/README.md).
 
-В каталоге с полученными файлами:
-
-```bash
-sha256sum -c matrix-installer.tar.gz.sha256
-sudo install -d -m 700 /root/misbot-setup
-sudo tar -xzf matrix-installer.tar.gz -C /root/misbot-setup
-sudo sh -c 'cd /root/misbot-setup/matrix-installer && sha256sum -c SHA256SUMS'
-sudo apt-get update
-sudo apt-get install -y python3 python3-yaml python3-rich dnsutils iproute2
-sudo python3 /root/misbot-setup/matrix-installer/misbot.py ui
-```
-
-Проверка должна показать `OK` для архива и каждого файла. Затем SSH-мастер
-поможет указать домен, проверить DNS, выбрать хранение медиа, настроить вход и
-резервные копии, запустить сервер. После инициализации команда `misbot` доступна
-из любого каталога. При ошибке действующей установки следуйте `misbot status`;
+В мастере укажите домен и необходимые реквизиты. Misbot проверит DNS, поможет
+выбрать хранение медиа, настроить вход и резервные копии, затем запустить сервер.
+После инициализации команда `misbot` доступна из любого каталога.
+[Ручная установка из архива](installer/README.md#3-загрузка-и-создание-файлов)
+также доступна. При ошибке действующей установки следуйте `misbot status`;
 повторный `init` не нужен.
 
 `misbot ui` предлагает разделы по задачам: состояние сервера, приглашения,

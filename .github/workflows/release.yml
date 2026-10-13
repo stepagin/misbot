@@ -45,6 +45,7 @@ jobs:
           name: misbot-installer
           overwrite: true
           path: |
+            dist/install.sh
             dist/matrix-installer.tar.gz
             dist/matrix-installer.tar.gz.sha256
             dist/misbot-setup-${{ steps.prepare.outputs.version }}.tar.gz
@@ -82,9 +83,11 @@ jobs:
             gh release create "$RELEASE_TAG" --verify-tag --draft --title "Misbot $RELEASE_TAG" --notes-file installer/release-notes.md
           fi
           if [ "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" = true ]; then
-            gh release upload "$RELEASE_TAG" dist/matrix-installer.tar.gz dist/matrix-installer.tar.gz.sha256 dist/misbot-setup-*.tar.gz dist/misbot-setup-*.tar.gz.sha256 --clobber
+            gh release upload "$RELEASE_TAG" dist/install.sh dist/matrix-installer.tar.gz dist/matrix-installer.tar.gz.sha256 dist/misbot-setup-*.tar.gz dist/misbot-setup-*.tar.gz.sha256 --clobber
             gh release edit "$RELEASE_TAG" --draft=false --latest
           else
+            gh release download "$RELEASE_TAG" --pattern 'install.sh' --dir published
+            cmp dist/install.sh published/install.sh
             gh release download "$RELEASE_TAG" --pattern 'matrix-installer.tar.gz*' --dir published
             cmp dist/matrix-installer.tar.gz published/matrix-installer.tar.gz
             cmp dist/matrix-installer.tar.gz.sha256 published/matrix-installer.tar.gz.sha256
