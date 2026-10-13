@@ -7,11 +7,13 @@ from pathlib import Path
 import socket
 import ssl
 import signal
+import subprocess
 import contextlib
 import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
+import venv
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -357,6 +359,91 @@ class DiagnosticTests(unittest.TestCase):
         self.assertEqual(result['stages'][-1]['code'], 'dependency_missing')
         self.assertIn('apt-get install python3-boto3', result['conclusion'])
         self.assert_safe(result)
+
+    def test_missing_sdk_is_installed_before_authentication_and_credentials_are_checked(self):
+        missing = ModuleNotFoundError('fictional missing SDK', name='boto3')
+        service = Service({'head': SDKError('InvalidAccessKeyId')})
+        with (
+            patch.object(diagnostic.sys, 'executable', '/usr/bin/python3'),
+            patch.object(diagnostic.sys, 'prefix', sys.base_prefix),
+            patch.object(diagnostic.media_transfer, 'client', side_effect=[missing, service]),
+            patch.object(diagnostic.os, 'geteuid', return_value=0),
+            patch.object(diagnostic.s3_config, 'read_profile', return_value=self.values),
+            patch.object(
+                diagnostic.platform, 'freedesktop_os_release', return_value={'ID': 'debian'}
+            ),
+            patch.object(
+                diagnostic.startup_process, 'run', return_value=SimpleNamespace(returncode=0)
+            ) as run,
+            patch.object(diagnostic.importlib, 'import_module'),
+        ):
+            result = diagnostic.diagnose(self.config, 'media', transport=transport)
+        self.assertEqual(run.call_count, 2)
+        self.assertIn('python3-boto3', run.call_args.args[0])
+        self.assertNotIn('FICTIONAL_SECRET', str(run.call_args_list))
+        self.assertEqual(result['stages'][-1]['stage'], 'authentication')
+        self.assertIn('sdk_installing', [stage['code'] for stage in result['stages']])
+        self.assertFalse(result['passed'])
+        self.assertEqual(service.puts, [])
+        self.assert_safe(result)
+
+    def test_package_installation_failure_is_safe_and_never_contacts_s3(self):
+        with (
+            patch.object(diagnostic.sys, 'executable', '/usr/bin/python3'),
+            patch.object(diagnostic.sys, 'prefix', sys.base_prefix),
+            patch.object(
+                diagnostic.media_transfer, 'client', side_effect=ModuleNotFoundError(name='boto3')
+            ) as client,
+            patch.object(diagnostic.os, 'geteuid', return_value=0),
+            patch.object(diagnostic.s3_config, 'read_profile', return_value=self.values),
+            patch.object(
+                diagnostic.platform, 'freedesktop_os_release', return_value={'ID': 'ubuntu'}
+            ),
+            patch.object(
+                diagnostic.startup_process,
+                'run',
+                return_value=SimpleNamespace(returncode=1, stderr='FICTIONAL_SECRET'),
+            ) as run,
+        ):
+            result = diagnostic.diagnose(self.config, 'media')
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(client.call_count, 1)
+        self.assertEqual(result['stages'][-1]['code'], 'dependency_install_failed')
+        self.assert_safe(result)
+
+    def test_virtual_environment_never_reinstalls_system_packages_on_retry(self):
+        environment = self.root / 'isolated-python'
+        venv.EnvBuilder(with_pip=False).create(environment)
+        code = """
+import sys
+sys.path.insert(0, sys.argv[1])
+import s3_diagnostics as diagnostic
+def unexpected_package_install(*args, **kwargs):
+    raise AssertionError('must not invoke apt from virtual environment')
+diagnostic.startup_process.run = unexpected_package_install
+for _ in range(2):
+    try:
+        diagnostic.prepare_sdk(lambda *args: None)
+    except diagnostic.Failure as error:
+        assert error.code == 'dependency_interpreter', error.code
+        assert '/usr/bin/python3' in str(error) or 'sudo misbot' in str(error)
+    else:
+        raise AssertionError('virtual environment was accepted')
+"""
+        result = subprocess.run(
+            [str(environment / 'bin/python'), '-c', code, str(Path(diagnostic.__file__).parent)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_bad_configuration_and_available_sdk_never_install_packages(self):
+        with patch.object(diagnostic.startup_process, 'run') as run:
+            self.run_check()
+            self.config.chmod(0o644)
+            diagnostic.diagnose(self.config, 'media')
+        run.assert_not_called()
 
     def test_actual_sigterm_returns_json_and_cleans_probe(self):
         if os.geteuid() != 0:

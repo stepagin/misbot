@@ -90,7 +90,9 @@ class StorageTests(unittest.TestCase):
         with self.assertRaisesRegex(protocol.ProtocolError, 'event_capacity'):
             self.backend.operate('api-disable', event_id='new')
         self.assertEqual(self.backend.operate('api-status', event_id='read'), {'enabled': True})
-        self.assertEqual(self.backend.operate('operations'), {'operations': []})
+        self.assertEqual(
+            self.backend.operate('operations'), {'recovery_available': False, 'operations': []}
+        )
         self.backend.operate('api-disable')
         with patch.object(self.backend, 'recover_policy', return_value={'status': 'recovered'}):
             self.assertEqual(self.backend.operate('recover'), {'status': 'recovered'})

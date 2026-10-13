@@ -68,6 +68,7 @@ names = [
     'terminal_views.py',
     'terminal_diagnostics.py',
     'terminal_process.py',
+    'terminal_output.py',
     'startup_process.py',
     'telegram_login_check.py',
     'wizard_state.py',

@@ -155,6 +155,12 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+class ServiceUnavailable(RuntimeError):
+    def __init__(self, status):
+        super().__init__('Служба временно недоступна; ожидаем готовность сервера.')
+        self.status = status
+
+
 def probe(model, api_enabled=True):
     """Verify actual public origin with normal TLS; never follow the external target."""
     opener = urllib.request.build_opener(NoRedirect)
@@ -164,6 +170,11 @@ def probe(model, api_enabled=True):
             with opener.open(url, timeout=10) as response:
                 return response.status, response.headers, response.read(65537)
         except urllib.error.HTTPError as response:
+            if response.code in (502, 503, 504) and not (
+                not api_enabled and url.endswith('/.well-known/misbot')
+            ):
+                response.close()
+                raise ServiceUnavailable(response.code) from None
             return response.code, response.headers, response.read(65537)
 
     origin = 'https://' + model['DOMAIN']

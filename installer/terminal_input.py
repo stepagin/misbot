@@ -83,13 +83,14 @@ class LineEditor:
 
 
 def read_line(view, prompt, secret=False):
-    """Block on input or SIGWINCH; no timer or redraw runs while idle."""
+    """Block on input or signals; no timer or redraw runs while idle."""
     import sys
 
     fd = sys.stdin.fileno()
     saved = termios.tcgetattr(fd)
-    resize_read, resize_write = os.pipe2(os.O_NONBLOCK | os.O_CLOEXEC)
+    signal_read, signal_write = os.pipe2(os.O_NONBLOCK | os.O_CLOEXEC)
     previous = signal.getsignal(signal.SIGWINCH)
+    previous_wakeup = None
     editor = LineEditor()
     decoder = getattr(view, 'input_decoder', None)
     if decoder is None:
@@ -97,27 +98,28 @@ def read_line(view, prompt, secret=False):
         view.input_decoder = decoder
 
     def resized(signum, frame):
-        try:
-            os.write(resize_write, b'r')
-        except BlockingIOError:
-            pass
+        # The wakeup fd schedules a redraw without writing from a Python handler.
+        pass
 
     try:
         signal.signal(signal.SIGWINCH, resized)
+        # A signal can arrive on Rich's refresh thread. Its Python handler runs
+        # on main, so the C signal handler must wake the blocked selector first.
+        previous_wakeup = signal.set_wakeup_fd(signal_write, warn_on_full_buffer=False)
         tty.setcbreak(fd, termios.TCSANOW)
         view.console.file.write('\x1b[?2004h')
         view.console.file.flush()
         view.draw_input(prompt, editor.value, editor.cursor, secret)
         with selectors.DefaultSelector() as selector:
             selector.register(fd, selectors.EVENT_READ)
-            selector.register(resize_read, selectors.EVENT_READ)
+            selector.register(signal_read, selectors.EVENT_READ)
             while True:
                 pending = view.input_pending
                 view.input_pending = ''
                 if not pending:
                     for key, _ in selector.select():
-                        if key.fd == resize_read:
-                            os.read(resize_read, 4096)
+                        if key.fd == signal_read:
+                            os.read(signal_read, 4096)
                             view.draw_input(prompt, editor.value, editor.cursor, secret)
                         else:
                             data = os.read(fd, 4096)
@@ -135,7 +137,9 @@ def read_line(view, prompt, secret=False):
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, saved)
         signal.signal(signal.SIGWINCH, previous)
-        os.close(resize_read)
-        os.close(resize_write)
+        if previous_wakeup is not None:
+            signal.set_wakeup_fd(previous_wakeup)
+        os.close(signal_read)
+        os.close(signal_write)
         view.console.file.write('\x1b[?2004l')
         view.console.file.flush()

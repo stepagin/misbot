@@ -49,7 +49,7 @@ async function sendOnce(client, store, room, item) {
     let saved = store.getValue(key);
     const retry = !!saved;
     if (!saved) {
-        const content = noticeContent(item.body);
+        const content = noticeContent(item.body, { literal: item.via !== "admin" });
         const encrypted = await client.crypto.encryptRoomEvent(room, "m.room.message", content);
         saved = { room, type: "m.room.encrypted", content: encrypted };
         store.setValue(key, saved);

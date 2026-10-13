@@ -18,6 +18,8 @@ import homepage
 
 def failure_code(error):
     """Classify errors without disclosing URLs, credentials or exception text."""
+    if isinstance(error, homepage.ServiceUnavailable):
+        return 'http_status'
     if isinstance(error, urllib.error.URLError):
         error = error.reason
     if isinstance(error, ssl.SSLCertVerificationError):
@@ -43,6 +45,7 @@ def failed_record(name, error):
         'passed': False,
         'error_type': type(error).__name__,
         'failure_code': failure_code(error),
+        **({'status': error.status} if isinstance(error, homepage.ServiceUnavailable) else {}),
     }
 
 

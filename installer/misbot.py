@@ -561,6 +561,12 @@ def main(argv=None):
             print(message + ' Пароль автоматически не запрашивается.', file=sys.stderr)
             return 77
         args = plan(command, options, values)
+        if (
+            command.backend.startswith('federation-')
+            and sys.stdout.isatty()
+            and not values.get('json')
+        ):
+            args.append('--human')
         os.execv(args[0], args)
     except (InputError, OSError, ValueError, RuntimeError, KeyError):
         # Input/backend selection errors never expose credentials or raw driver text.

@@ -11,6 +11,7 @@ import ssl
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -42,6 +43,53 @@ class ProtocolTests(unittest.TestCase):
                     record = verify.failed_record('synapse', wrapped)
                     self.assertEqual(record['failure_code'], code)
                     self.assertNotIn('PRIVATE_MARKER', json.dumps(record))
+
+    def test_homepage_temporary_http_failure_has_safe_status(self):
+        record = verify.failed_record('homepage_routes', verify.homepage.ServiceUnavailable(503))
+        self.assertEqual(record['failure_code'], 'http_status')
+        self.assertEqual(record['status'], 503)
+
+    def test_readiness_uses_same_deadline_for_docker_and_public_probe(self):
+        deadlines = []
+
+        def run(command, **kwargs):
+            deadlines.append(lifecycle.startup_process.DEADLINE.get())
+            if command[0] == 'docker':
+                return subprocess.CompletedProcess(
+                    [], 0, json.dumps({'Service': 'synapse', 'State': 'running'}), ''
+                )
+            return subprocess.CompletedProcess(
+                [], 0, json.dumps({'check': 'synapse', 'passed': True}), ''
+            )
+
+        with (
+            patch.object(lifecycle, 'ROOT', Path('/opt/fictional-stack'), create=True),
+            patch.object(lifecycle, 'COMPOSE', ['docker', 'compose'], create=True),
+            patch.object(lifecycle, 'emit'),
+            patch.object(lifecycle, 'dns_check'),
+            patch.object(lifecycle.startup_process, 'run', side_effect=run),
+            patch.object(
+                lifecycle.subprocess, 'run', side_effect=AssertionError('unbounded command')
+            ),
+            patch.object(lifecycle, 'expected_services', return_value={'synapse'}),
+            patch.object(lifecycle, 'state', return_value={}),
+            patch.object(lifecycle.referral, 'validate_saved'),
+            patch('federation_runtime.validate'),
+        ):
+            lifecycle.check()
+        self.assertEqual(len(deadlines), 2)
+        self.assertIsNotNone(deadlines[0])
+        self.assertEqual(deadlines[0], deadlines[1])
+
+    def test_expired_readiness_budget_never_runs_another_probe(self):
+        with (
+            patch.object(lifecycle.startup_process, 'run') as run,
+            patch.object(lifecycle, 'service_rows') as rows,
+            self.assertRaisesRegex(RuntimeError, 'timed out'),
+        ):
+            lifecycle.check_services(time.monotonic() - 1)
+        run.assert_not_called()
+        rows.assert_not_called()
 
     def test_public_checks_keep_expected_401_404_and_validate_discovery(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -170,8 +218,197 @@ class ProtocolTests(unittest.TestCase):
         self.assertIn('caddy', inventory['missing'])
         self.assertNotIn('PRIVATE_MARKER', output.getvalue())
 
+    def test_readiness_polls_transient_https_and_service_starting_until_success(self):
+        failed = json.dumps(
+            {'check': 'synapse', 'passed': False, 'failure_code': 'connection_refused'}
+        )
+        passed = json.dumps({'check': 'synapse', 'passed': True})
+        rows = [{'Service': 'synapse', 'State': 'running', 'Health': 'healthy'}]
+        with (
+            patch.object(lifecycle, 'ROOT', Path('/opt/fictional-stack'), create=True),
+            patch.object(lifecycle, 'emit') as emit,
+            patch.object(lifecycle, 'dns_check'),
+            patch.object(
+                lifecycle.startup_process,
+                'run',
+                side_effect=[
+                    subprocess.CompletedProcess([], 1, failed, ''),
+                    subprocess.CompletedProcess([], 0, passed, ''),
+                ],
+            ) as run,
+            patch.object(lifecycle, 'service_rows', return_value=rows),
+            patch.object(lifecycle, 'expected_services', return_value={'synapse'}),
+            patch.object(lifecycle, 'state', return_value={}),
+            patch.object(lifecycle.referral, 'validate_saved'),
+            patch('federation_runtime.validate'),
+            patch.object(lifecycle.time, 'sleep'),
+        ):
+            lifecycle.check()
+        self.assertEqual(run.call_count, 2)
+        self.assertTrue(any(call.args == ('waiting_for_service',) for call in emit.call_args_list))
+        emit.assert_called_with('public_checks', passed=True)
+
+    def test_readiness_never_retries_bad_identity_certificate_or_http_auth(self):
+        for record in (
+            {'failure_code': 'unexpected_response'},
+            {'failure_code': 'tls_certificate'},
+            {'failure_code': 'http_status', 'status': 401},
+            {'failure_code': 'dns_resolution'},
+        ):
+            raw = json.dumps({'check': 'synapse', 'passed': False, **record})
+            with (
+                self.subTest(record=record),
+                patch.object(lifecycle, 'ROOT', Path('/opt/fictional-stack'), create=True),
+                patch.object(lifecycle, 'emit'),
+                patch.object(lifecycle, 'dns_check'),
+                patch.object(
+                    lifecycle.startup_process,
+                    'run',
+                    return_value=subprocess.CompletedProcess([], 1, raw, ''),
+                ) as run,
+                patch.object(
+                    lifecycle,
+                    'service_rows',
+                    return_value=[{'Service': 'synapse', 'State': 'running'}],
+                ),
+                patch.object(lifecycle, 'expected_services', return_value={'synapse'}),
+                patch.object(lifecycle.time, 'sleep') as sleep,
+            ):
+                with self.assertRaisesRegex(RuntimeError, 'Public checks failed'):
+                    lifecycle.check()
+            run.assert_called_once()
+            sleep.assert_not_called()
+
 
 class PresentationTests(unittest.TestCase):
+    def test_long_progress_preserves_dns_and_pending_status_with_final_service_state(self):
+        for command in ('check', 'status'):
+            with self.subTest(command=command), tempfile.TemporaryDirectory() as folder:
+                source = Path(folder)
+                records = [
+                    {'check': 'dns', 'passed': True},
+                    {
+                        'check': 'installation_status',
+                        'operation_running': False,
+                        'installation_complete': True,
+                        'admin_access_recovery_pending': True,
+                    },
+                ]
+                for index in range(400):
+                    records.extend(
+                        [
+                            {
+                                'check': 'command_progress',
+                                'command': 'docker',
+                                'elapsed_seconds': index,
+                            },
+                            {
+                                'check': 'synapse',
+                                'passed': False,
+                                'failure_code': 'connection_refused',
+                            },
+                            {'check': 'service', 'name': 'synapse', 'state': 'restarting'},
+                            {'check': 'fictional_unknown_' + str(index), 'passed': False},
+                        ]
+                    )
+                records.extend(
+                    [
+                        {'check': 'synapse', 'passed': True},
+                        {
+                            'check': 'service',
+                            'name': 'synapse',
+                            'state': 'running',
+                            'health': 'healthy',
+                        },
+                        {'check': 'service_inventory', 'passed': True},
+                    ]
+                )
+                (source / 'misbot.py').write_text(
+                    'import json\n'
+                    + 'records='
+                    + repr(records)
+                    + '\n'
+                    + 'for record in records: print(json.dumps(record))\n'
+                )
+                interface = ui.UI(
+                    source,
+                    source=source,
+                    draft=source / 'draft',
+                    view=views.TerminalView(plain=True),
+                )
+                with redirect_stdout(io.StringIO()):
+                    self.assertEqual(interface.run(command), 0)
+                results = {result.key: result for result in interface.check_results}
+                self.assertEqual(
+                    set(results), {'dns', 'synapse', 'service:synapse', 'service_inventory'}
+                )
+                self.assertTrue(all(result.passed for result in results.values()))
+                if command == 'status':
+                    self.assertIn(
+                        'Изменение доступа администраторов', '\n'.join(interface.result_lines)
+                    )
+
+    def test_retry_output_displays_only_final_check_and_service_state(self):
+        for final_passed in (True, False):
+            with self.subTest(final_passed=final_passed), tempfile.TemporaryDirectory() as folder:
+                source = Path(folder)
+                records = [
+                    {'check': 'dns', 'passed': True},
+                    {'check': 'synapse', 'passed': False, 'failure_code': 'connection_refused'},
+                    {'check': 'service', 'name': 'synapse', 'state': 'restarting'},
+                    {'check': 'service_inventory', 'passed': False},
+                    {'check': 'synapse', 'passed': True},
+                    {
+                        'check': 'service',
+                        'name': 'synapse',
+                        'state': 'running',
+                        'health': 'healthy',
+                    },
+                    {'check': 'service_inventory', 'passed': True},
+                ]
+                if not final_passed:
+                    records += [
+                        {'check': 'synapse', 'passed': False, 'failure_code': 'timeout'},
+                        {'check': 'service', 'name': 'synapse', 'state': 'exited', 'health': ''},
+                        {'check': 'service_inventory', 'passed': False},
+                    ]
+                code = 0 if final_passed else 1
+                (source / 'misbot.py').write_text(
+                    'import sys\n'
+                    + ''.join('print(' + repr(json.dumps(record)) + ')\n' for record in records)
+                    + 'sys.exit('
+                    + str(code)
+                    + ')\n'
+                )
+                output = io.StringIO()
+                interface = ui.UI(
+                    source,
+                    source=source,
+                    draft=source / 'draft',
+                    view=views.TerminalView(plain=True),
+                )
+                with redirect_stdout(output):
+                    observed = interface.run('check')
+                    interface.check_result(observed)
+                self.assertEqual(observed, code)
+                results = {result.key: result for result in interface.check_results}
+                self.assertEqual(len(interface.check_results), 4)
+                self.assertTrue(results['dns'].passed)
+                for key in ('synapse', 'service:synapse', 'service_inventory'):
+                    self.assertEqual(results[key].passed, final_passed)
+                self.assertEqual(
+                    diagnostics.check_summary(interface.check_results, code),
+                    'Успешно: 2. Не пройдено: 0.'
+                    if final_passed
+                    else 'Успешно: 1. Не пройдено: 1.',
+                )
+                self.assertNotIn('TCP 443 отклонено', output.getvalue())
+                self.assertNotIn('Перезапускается', output.getvalue())
+                self.assertIn(
+                    'Доступность подтверждена.' if final_passed else 'Доступность не подтверждена.',
+                    output.getvalue(),
+                )
+
     def test_safe_new_and_legacy_messages_keep_dns_success_and_http_expectations(self):
         output = '\n'.join(
             json.dumps(item)

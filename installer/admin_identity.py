@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import re
+import sys
 
 import configuration
 import federation_runtime
@@ -204,7 +205,11 @@ def main():
     args = parser.parse_args()
     state_store.require_root()
     __import__('command_wrapper').trusted_installation(args.directory)
-    with state_store.operation_guard(args.directory):
+    with state_store.operation_guard(
+        args.directory,
+        wait_seconds=15,
+        progress=lambda message: print(message, file=sys.stderr, flush=True),
+    ):
         if args.action == 'set':
             if not args.tag:
                 raise ValueError('Specify --tag')
@@ -224,10 +229,13 @@ def main():
 if __name__ == '__main__':
     try:
         main()
+    except state_store.OperationBusy:
+        print(
+            'Сервер ещё выполняет другую операцию. Изменение доступа не начато; '
+            'повторите действие после её завершения.'
+        )
+        raise SystemExit(1)
     except (OSError, RuntimeError, ValueError) as error:
         print(str(error))
-        print(
-            'Операция не завершена. Незавершённое изменение доступа: '
-            'sudo misbot admin access recover. Сохранённые теги: sudo misbot admin bot show.'
-        )
+        print('Операция не завершена. Откройте раздел «Администраторы и доступ» в меню Misbot.')
         raise SystemExit(1)

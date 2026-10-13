@@ -79,6 +79,39 @@ def invitation_issuers(root, domain):
     return result
 
 
+def invitation_state(attributes, now=None):
+    """Use the same verified MAS state for list, preparation and secret display."""
+    expires = attributes.get('expires_at')
+    if expires is not None and not isinstance(expires, str):
+        raise RuntimeError('Срок приглашения не прошёл проверку. Данные сохранены.')
+    try:
+        expiration = datetime.fromisoformat(expires.replace('Z', '+00:00')) if expires else None
+    except ValueError:
+        raise RuntimeError('Срок приглашения не прошёл проверку. Данные сохранены.') from None
+    if expiration and expiration.tzinfo is None:
+        raise RuntimeError('Для срока приглашения не указан часовой пояс. Данные сохранены.')
+    used, limit = attributes.get('times_used'), attributes.get('usage_limit')
+    if (
+        (used is not None and (type(used) is not int or used < 0))
+        or (limit is not None and (type(limit) is not int or limit < 0))
+        or ('valid' in attributes and type(attributes['valid']) is not bool)
+    ):
+        raise RuntimeError(
+            'Сведения об использовании приглашения не прошли проверку. Данные сохранены.'
+        )
+    if attributes.get('revoked_at'):
+        return 'revoked'
+    if limit is not None and used is not None and used >= limit:
+        return 'used'
+    if expiration and expiration <= (now or datetime.now(timezone.utc)):
+        return 'expired'
+    if attributes.get('valid') is False:
+        return 'unavailable'
+    if used is None and attributes.get('valid') is not True:
+        return 'unknown'
+    return 'valid'
+
+
 def list_invitations(root, transport, now=None):
     domain = configuration.read_private_json(root / 'installation.json')['domain']
     issuers = invitation_issuers(root, domain)
@@ -119,35 +152,7 @@ def list_invitations(root, transport, now=None):
                 continue
             seen_ids.add(identifier)
             attributes = item['attributes']
-            expires = attributes.get('expires_at')
-            if expires is not None and not isinstance(expires, str):
-                raise RuntimeError(
-                    'Срок приглашения не прошёл проверку. Список не подтверждён; данные сохранены.'
-                )
-            expiration = datetime.fromisoformat(expires.replace('Z', '+00:00')) if expires else None
-            if expiration and expiration.tzinfo is None:
-                raise RuntimeError(
-                    'Для срока приглашения не указан часовой пояс. Список не подтверждён; данные сохранены.'
-                )
-            usage = attributes.get('usage_limit')
-            used = attributes.get('times_used', 0)
-            if (
-                type(used) is not int
-                or used < 0
-                or (usage is not None and (type(usage) is not int or usage < 0))
-            ):
-                raise RuntimeError(
-                    'Сведения об использовании приглашения не прошли проверку. Данные сохранены.'
-                )
-            state = (
-                'revoked'
-                if attributes.get('revoked_at')
-                else 'used'
-                if usage is not None and used >= usage
-                else 'expired'
-                if expiration and expiration <= now
-                else 'valid'
-            )
+            state = invitation_state(attributes, now)
             # Only an explicit allowlist reaches CLI/UI. MAS also returns the
             # private token; it is never copied into this view or diagnostics.
             invitations.append(
@@ -155,7 +160,9 @@ def list_invitations(root, transport, now=None):
                     'id': identifier,
                     'issuer': issuers.get(identifier, 'не указан'),
                     'state': state,
-                    'expires_at': expires,
+                    'expires_at': attributes.get('expires_at'),
+                    'times_used': attributes.get('times_used'),
+                    'usage_limit': attributes.get('usage_limit'),
                 }
             )
         links = response['body'].get('links', {})
@@ -261,7 +268,7 @@ def resource(root, record, transport, create=True):
 def manage(root, action, transport=None):
     root = Path(root)
     transport = transport or api
-    with state_store.operation_guard(root):
+    with state_store.operation_guard(root, wait_seconds=15):
         state_store.assert_update_allowed(root)
         lifecycle.configure(root, 'invitation-' + action)
         lifecycle.ownership_check()
@@ -378,15 +385,7 @@ def manage(root, action, transport=None):
                     'Revocation is not confirmed; retry users invitation revoke before issuing a replacement'
                 )
             attr = response['body']['data']['attributes']
-        record['state'] = (
-            'revoked'
-            if attr.get('revoked_at')
-            else 'used'
-            if attr.get('times_used', 0) >= 1
-            else 'expired'
-            if datetime.fromisoformat(record['expires_at']) <= datetime.now(timezone.utc)
-            else 'valid'
-        )
+        record['state'] = invitation_state(attr)
         state_store.write_json(path, record)
         if action == 'new':
             # Durable replacement intent: after a lost response, `ensure` finishes the SAME token.
@@ -409,7 +408,7 @@ def manage(root, action, transport=None):
             'state': record['state'],
             'expires_at': record['expires_at'],
             'usage_limit': 1,
-            'times_used': attr.get('times_used', 0),
+            'times_used': attr.get('times_used'),
             'private_file': str(path),
         }
 
@@ -446,13 +445,25 @@ def main():
                 print('matrix-admin: ' + record['password'])
             return 0
         result = manage(args.directory, args.action)
-        if args.action == 'show' and result['state'] == 'valid':
+        if args.action == 'show':
+            if result['state'] != 'valid':
+                states = {
+                    'used': 'Этот код уже использован.',
+                    'expired': 'Срок действия кода истёк.',
+                    'revoked': 'Код отозван.',
+                    'absent': 'Код ещё не создан.',
+                }
+                print(states.get(result['state'], 'Код пока не подтверждён.'))
+                print('В UI выберите «Пользователи и приглашения» → «Пригласить пользователя».')
+                return 1
             print(
-                'Токен: '
+                'Код приглашения: '
                 + configuration.read_private_json(
                     args.directory / 'secrets/first-registration.json'
                 )['token']
             )
+            print('Передайте код человеку. Его нужно ввести в форме регистрации.')
+            return 0
         print(json.dumps(result, ensure_ascii=False))
         return 0
     except RuntimeError as error:

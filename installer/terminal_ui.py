@@ -19,7 +19,7 @@ import configuration_schema as schema
 import cli_commands
 import state_store
 from terminal_views import TerminalView, literal
-from terminal_diagnostics import check_summary, parse_checks
+from terminal_diagnostics import CHECKS, SERVICES, check_summary, parse_checks
 import ui_actions
 
 
@@ -649,7 +649,7 @@ class UI:
             'update latest',
             'remove',
         )
-        records = []
+        records = {}
         self.operation_records = []
         self.result_lines = []
         self.result_total = 0
@@ -657,13 +657,48 @@ class UI:
             self.check_results = []
 
         def collect_check(line):
-            records.append(line[:8192])
-            del records[:-256]
+            # Progress can produce hundreds of events while HTTPS starts. Keep
+            # the latest result per known check/service so a one-off DNS result
+            # or pending-operation status cannot be evicted by that history.
+            if len(line) > 8192:
+                return
+            try:
+                record = json.loads(line)
+            except ValueError:
+                return
+            if not isinstance(record, dict) or not isinstance(record.get('check'), str):
+                return
+            name = record['check']
+            if name == 'service':
+                service = record.get('name')
+                if not isinstance(service, str) or service not in SERVICES:
+                    return
+                key = 'service:' + service
+            elif name in CHECKS:
+                if type(record.get('passed')) is not bool:
+                    return
+                key = name
+            elif name in (
+                'installation_status',
+                'existing_status',
+                'server_status',
+                'existing_storage_status',
+                'storage_status',
+                'backup_schedule_status',
+                'failed',
+            ):
+                key = name
+            else:
+                return
+            if key in records or len(records) < 256:
+                records[key] = line
 
         def remember_output(record, messages):
             if not isinstance(record, dict):
                 return
-            if path == 'storage s3 check' and record.get('schema') == 1:
+            if (path == 'storage s3 check' and record.get('schema') == 1) or (
+                path.startswith('users invitation ') and 'state' in record
+            ):
                 self.operation_records.append(record)
                 del self.operation_records[:-100]
             if path != 'users invitation list':
@@ -778,11 +813,11 @@ class UI:
 
                 code = read_output(child, emit)
             if path in ('check', 'status'):
-                self.check_results = parse_checks('\n'.join(records))
+                self.check_results = parse_checks('\n'.join(records.values()))
             if path == 'status':
                 self.result_lines = [
                     message
-                    for line in records
+                    for line in records.values()
                     for message in present_output(path, line)
                     if not any(
                         row.label + ': ' == message[: len(row.label) + 2]
@@ -829,7 +864,7 @@ class UI:
                     except (KeyboardInterrupt, state_store.OperationInterrupted):
                         pass
             if path == 'check':
-                self.check_results = parse_checks('\n'.join(records))
+                self.check_results = parse_checks('\n'.join(records.values()))
             self.view.message(self.continuation())
             return 130
         finally:
@@ -878,11 +913,12 @@ class UI:
                     keep_profile = False
                 directory(path.parent)
                 state_store.write_text(path, serialize(values))
-                with self.view.busy('Проверяем подключение к S3'):
+                with self.view.busy('Проверяем подключение к S3') as progress:
                     result = probe.diagnose(
                         path,
                         purpose,
                         directory=self.root if (self.root / 'installation.json').exists() else None,
+                        progress=lambda record: progress.log(record['explanation']),
                     )
                 keep_profile = bool(result.get('cleanup_pending'))
                 self.view.message('Итог: ' + result['conclusion'])
@@ -1600,24 +1636,53 @@ class UI:
         self.view.details(
             [('Клиент', 'https://web.' + domain), ('Администратор', '@matrix-admin:' + domain)]
         )
-        self.view.message(
-            'Пароль: sudo misbot credentials admin show — только по отдельному запросу.'
-        )
+        self.view.message('Пароль можно открыть кнопкой «Показать пароль администратора».')
         try:
             result = manage(self.root, 'ensure')
             self.view.details(
-                [('Первое приглашение', result['state']), ('Срок до', result['expires_at'])]
+                [
+                    (
+                        'Первое приглашение',
+                        {
+                            'valid': 'готово к выдаче',
+                            'used': 'использовано',
+                            'expired': 'срок истёк',
+                            'revoked': 'отозвано',
+                            'pending': 'ожидает подтверждения',
+                        }.get(result['state'], 'не подтверждено'),
+                    )
+                ]
             )
-            self.view.message(
-                'Пригласить пользователя: sudo misbot ui → Пользователи и приглашения → Показать код приглашения.'
-            )
+            self.view.message('Код: «Пользователи и приглашения» → «Пригласить пользователя».')
             self.view.message(
                 'Пользователь вводит код в форме регистрации клиента. Не добавляйте код в URL.'
             )
         except Exception:
             self.view.message(
-                'Сервер запущен; выдача токена не подтверждена. Сохранённый intent будет продолжен: sudo misbot users invitation ensure. Переустановка не требуется.'
+                'Сервер запущен. Код пока не подготовлен; выберите «Пользователи и приглашения» → «Пригласить пользователя», чтобы продолжить.'
             )
+
+        if self.reader or sys.stdin.isatty():
+            while True:
+                choice = self.choose(
+                    'Что сделать дальше?',
+                    [
+                        ('1', 'Показать пароль администратора', 'Пароль появится в этом терминале'),
+                        ('2', 'Пользователи и приглашения', 'Получить код для регистрации'),
+                        ('3', 'Администраторы и доступ', 'Выдать права личному аккаунту'),
+                    ],
+                    exit_label='Завершить настройку',
+                )
+                if choice == '0':
+                    break
+                if choice == '1':
+                    self.execute(
+                        ui_actions.Action(
+                            'credentials admin show', 'Показать пароль администратора'
+                        )
+                    )
+                else:
+                    self.task_menu('users' if choice == '2' else 'admin')
 
     def wizard(self):
         names = [
@@ -1656,7 +1721,7 @@ class UI:
                     return self.menu()
                 self.previous_step()
                 continue
-            except (Cancel, KeyboardInterrupt):
+            except (Cancel, KeyboardInterrupt, EOFError, state_store.OperationInterrupted):
                 self.view.message(
                     'Ввод отменён; действующая конфигурация не изменена. Draft сохранён.'
                 )
@@ -1666,16 +1731,13 @@ class UI:
                 self.save()
                 self.view.message(self.draft_hints())
                 return 0
-            except (RuntimeError, OSError):
+            except Exception as error:
                 self.view.message(
                     'Этап не завершён. Исправьте ввод или повторите проверку.'
                     if not self.installation()
                     else 'Этап не завершён. Данные, настройки и ключи сохранены.'
                 )
-                # Show only schema/preflight static safe messages, never SDK bodies.
-                error = sys.exc_info()[1]
-                if type(error) is RuntimeError or isinstance(error, schema.InvalidConfiguration):
-                    self.view.message(str(error))
+                self.failure_reason(error)
                 try:
                     self.answer(
                         'Повторить шаг / назад / сохранить и выйти', ('повторить',), 'повторить'
@@ -1684,6 +1746,9 @@ class UI:
                     if self.initialized():
                         return self.menu()
                     self.previous_step()
+                except (EOFError, state_store.OperationInterrupted):
+                    self.save()
+                    return 130
                 except (SaveExit, Cancel, KeyboardInterrupt):
                     self.save()
                     self.view.message(self.draft_hints())
@@ -1694,9 +1759,31 @@ class UI:
         self.view.message('Мастер завершён. Управление: sudo misbot ui')
         try:
             self.pause('Enter — закрыть мастер')
+        except (EOFError, state_store.OperationInterrupted):
+            self.save()
+            return 130
         except (Back, Cancel, SaveExit):
             pass
         return 0
+
+    def failure_reason(self, error):
+        # Exception messages can contain credentials or remote response bodies.
+        # Preserve useful local validation, and identify unexpected failures by
+        # code location only, without serializing values or traceback locals.
+        if type(error) is RuntimeError or isinstance(error, schema.InvalidConfiguration):
+            self.view.message(str(error))
+            return
+        location = error.__traceback__
+        while location and location.tb_next:
+            location = location.tb_next
+        code = type(error).__name__
+        if location:
+            code += ' · ' + Path(location.tb_frame.f_code.co_filename).name
+            code += ':' + str(location.tb_lineno)
+        self.view.message('Шаг не выполнен. Код для диагностики: ' + code, 'yellow')
+        self.view.message(
+            'Сохранённые настройки оставлены. Можно повторить шаг или вернуться назад.'
+        )
 
     def continuation(self):
         if (self.root / 'homepage-transition.json').exists():
@@ -1896,6 +1983,10 @@ class UI:
             return 2
         if item.path in ('storage s3 check', 'storage s3 connect'):
             return self.execute_s3(item)
+        if item.path in ('users password set', 'credentials admin set'):
+            return self.execute_password(item)
+        if item.path == 'users invitation ensure':
+            return self.execute_invitation(item)
         command = cli_commands.BY_PATH[item.path]
         self.view.heading(item.title, item.hint)
         args = {}
@@ -2060,6 +2151,98 @@ class UI:
             self.view.heading(item.title)
             self.view.result(item.title, code, self.operation_continuation(item.path))
 
+    def execute_password(self, item):
+        import tempfile
+        from configuration import directory
+
+        self.view.heading(item.title)
+        self.view.message('Введите новый пароль дважды. Ввод скрыт; файл создавать не нужно.')
+        values = {}
+        if item.path == 'users password set':
+            domain = self.installation()['domain']
+
+            def username(value):
+                name = value.strip()
+                if name.startswith('@'):
+                    suffix = ':' + domain
+                    if not name.endswith(suffix):
+                        raise ValueError('Укажите аккаунт на этом сервере: @имя:' + domain)
+                    name = name[1 : -len(suffix)]
+                if name == 'matrix-admin':
+                    raise ValueError('Для matrix-admin выберите «Изменить пароль администратора».')
+                if not re.fullmatch(r'[a-z0-9][a-z0-9._=-]{0,254}', name):
+                    raise ValueError('Введите имя существующего пользователя или @имя:' + domain)
+                return name
+
+            values['username'] = self.input_value('Аккаунт пользователя', '', username)
+        else:
+            values['username'] = 'matrix-admin'
+        self.view.message('Пароль: от 16 до 1024 символов. Существующие сеансы сохранятся.')
+
+        def password(value):
+            if not 16 <= len(value) <= 1024 or any(ord(char) < 32 for char in value):
+                raise ValueError('Нужно от 16 до 1024 символов без управляющих символов.')
+            return value
+
+        while True:
+            value = self.input_value('Новый пароль', '', password, secret=True)
+            repeated = self.ask('Повторите новый пароль', secret=True)
+            if value == repeated:
+                break
+            self.view.message('Пароли не совпадают. Повторите ввод.', 'yellow')
+        command = cli_commands.BY_PATH[item.path]
+        self.view.details(
+            [
+                ('Аккаунт', '@' + values['username'] + ':' + self.installation()['domain']),
+                ('Перерыв в работе', command.stops),
+                ('Данные', command.data),
+            ]
+        )
+        if not self.confirm():
+            self.view.message('Действие отменено.')
+            return 0
+        values['password'] = value
+        if item.path == 'credentials admin set':
+            del values['username']
+        parent = directory(self.draft.parent)
+        with tempfile.TemporaryDirectory(prefix='.password-operation-', dir=parent) as folder:
+            path = Path(folder) / 'input.json'
+            state_store.write_json(path, values)
+            code = self.run(item.path, input=path)
+        if code == 0:
+            self.view.message('Пароль изменён. Войдите в клиент с новым паролем.')
+        else:
+            self.view.message(
+                'Смена пароля не подтверждена. Если операция началась, её можно продолжить '
+                'в разделе «Продолжить прерванную операцию» → «Пароли и ключи после прерывания».'
+            )
+        self.show_operation_result(item, code)
+        return code
+
+    def execute_invitation(self, item):
+        self.view.heading(item.title)
+        self.view.message(
+            'Код для одной регистрации появится в этом терминале. '
+            'Действующий код будет сохранён; использованный или истёкший будет заменён.'
+        )
+        if not self.confirm():
+            return 0
+        code = self.run('users invitation ensure')
+        records = getattr(self, 'operation_records', [])
+        state = records[-1].get('state') if records else None
+        if code == 0 and state in ('used', 'expired', 'revoked'):
+            code = self.run('users invitation new')
+            records = getattr(self, 'operation_records', [])
+            state = records[-1].get('state') if records else None
+        if code == 0 and state == 'valid':
+            self.view.message('Передайте код человеку. Его нужно ввести в форме регистрации.')
+            return self.run('users invitation show')
+        if code == 0:
+            code = 1
+            self.view.message('Код пока не подтверждён. Повторите «Пригласить пользователя».')
+        self.show_operation_result(item, code)
+        return code
+
     def execute_s3(self, item):
         import tempfile
         import s3_config
@@ -2184,25 +2367,11 @@ class UI:
             for line in self.result_lines:
                 self.view.message(line)
             return
-        while True:
-            self.view.heading(
-                title,
-                'Коды приглашений не отображаются.'
-                + (
-                    ' Показаны последние 1000 из ' + str(self.result_total) + '.'
-                    if self.result_total > len(self.result_lines)
-                    else ''
-                ),
-            )
-            choice = self.choose(
-                'Приглашения и статусы',
-                [(str(index), line, '') for index, line in enumerate(self.result_lines, 1)],
-            )
-            if choice == '0':
-                return
-            self.view.heading('Приглашение')
-            self.view.message(self.result_lines[int(choice) - 1])
-            self.pause('Enter — вернуться к приглашениям')
+        self.report(
+            title,
+            [(str(index), line) for index, line in enumerate(self.result_lines, 1)],
+            messages=['Коды приглашений не отображаются.'],
+        )
 
     def operation_continuation(self, path):
         if path == 'remove':
@@ -2221,6 +2390,7 @@ class UI:
             actions = (
                 self.available_actions(group)
                 if self.adopted()
+                or group == 'admin'
                 or (
                     group == 'restore'
                     and not self.installation()
@@ -2331,16 +2501,16 @@ class UI:
                     self.task_menu('features')
                 else:
                     self.task_menu(ui_actions.MAIN_TARGETS[choice])
+            except (EOFError, state_store.OperationInterrupted):
+                return 130
             except (Back, Cancel, KeyboardInterrupt):
                 self.view.message('Ввод отменён; возвращаемся в главное меню.')
             except SaveExit:
                 self.view.message('Выход из Misbot.')
                 return 0
-            except (RuntimeError, OSError, ValueError):
+            except Exception as error:
                 self.view.message('Операция не завершена.', 'yellow')
-                error = sys.exc_info()[1]
-                if type(error) is RuntimeError or isinstance(error, schema.InvalidConfiguration):
-                    self.view.message(str(error))
+                self.failure_reason(error)
                 self.view.message(self.continuation())
 
     def about(self):
@@ -2560,6 +2730,7 @@ if __name__ == '__main__':
         raise SystemExit(130)
     except (OSError, ValueError, RuntimeError, KeyError):
         text(
-            'Не удалось безопасно открыть мастер. Сохраните файлы; проверьте misbot status и misbot config validate.'
+            'Не удалось прочитать настройки мастера. Сохранённые файлы оставлены. '
+            'Повторите ту же команду ui из распакованного комплекта с тем же --directory.'
         )
         raise SystemExit(1)

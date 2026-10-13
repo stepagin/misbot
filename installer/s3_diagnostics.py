@@ -2,14 +2,17 @@
 
 import argparse
 import hashlib
+import importlib
 import json
 import os
 from pathlib import Path
+import platform
 import shlex
 import signal
 import socket
 import ssl
 import stat
+import sys
 import threading
 from urllib.parse import urlsplit
 import urllib.parse
@@ -20,6 +23,7 @@ import uuid
 import media_transfer
 import s3_config
 import state_store
+import startup_process
 
 NAMESPACE = '.misbot-probes/v1/'
 KNOWN = {
@@ -65,6 +69,76 @@ class Failure(RuntimeError):
     def __init__(self, code, message):
         super().__init__(message)
         self.code = code
+
+
+def prepare_sdk(emit):
+    """Install the supported system SDK before a user-requested S3 operation."""
+    if sys.prefix != sys.base_prefix or (
+        Path(sys.executable).resolve() != Path('/usr/bin/python3').resolve()
+    ):
+        raise Failure(
+            'dependency_interpreter',
+            'Поддержка S3 устанавливается для системного Python. '
+            'Откройте Misbot снова: ' + entry_command() + ' ui. Настройки сохранены.',
+        )
+    if os.geteuid() != 0:
+        raise Failure('dependency_missing', 'Для подготовки S3 запустите Misbot через sudo.')
+    try:
+        distribution = platform.freedesktop_os_release().get('ID')
+    except OSError:
+        distribution = None
+    if distribution not in ('ubuntu', 'debian'):
+        raise Failure(
+            'dependency_missing',
+            'Автоматическая подготовка S3 доступна на Ubuntu/Debian. '
+            'Установите boto3 для системного Python и повторите проверку.',
+        )
+    emit(
+        'dependency', 'running', 'sdk_installing', 'Устанавливаем поддержку S3 из пакетов системы.'
+    )
+    options = [
+        '-o',
+        'Acquire::http::Timeout=30',
+        '-o',
+        'Acquire::https::Timeout=30',
+        '-o',
+        'DPkg::Lock::Timeout=60',
+    ]
+
+    def progress(check, **values):
+        if values.get('elapsed_seconds', 0):
+            emit('dependency', 'running', 'sdk_installing', 'Подготовка S3 продолжается…')
+
+    try:
+        for arguments, timeout in (
+            (['update', '-qq'], 600),
+            (
+                ['install', '-y', '--no-install-recommends', 'python3-boto3'],
+                900,
+            ),
+        ):
+            result = startup_process.run(
+                [
+                    '/usr/bin/env',
+                    'DEBIAN_FRONTEND=noninteractive',
+                    'NEEDRESTART_MODE=l',
+                    '/usr/bin/apt-get',
+                    *options,
+                    *arguments,
+                ],
+                emit=progress,
+                timeout=timeout,
+            )
+            if result.returncode:
+                raise RuntimeError('package installation failed')
+        importlib.invalidate_caches()
+        importlib.import_module('boto3')
+    except (OSError, RuntimeError, ImportError):
+        raise Failure(
+            'dependency_install_failed',
+            'Не удалось подготовить поддержку S3. Проверьте доступ сервера к репозиториям '
+            'пакетов и свободное место, затем повторите проверку. Реквизиты S3 сохранены.',
+        ) from None
 
 
 def explanation(error, stage):
@@ -561,7 +635,14 @@ def diagnose(
             'Файл приватный; bucket, region, credentials, endpoint и prefix проверены.',
         )
         current = 'dependency'
-        service = service or media_transfer.client(values)
+        if service is None:
+            try:
+                service = media_transfer.client(values)
+            except ModuleNotFoundError as error:
+                if error.name not in ('boto3', 'botocore', 'botocore.config'):
+                    raise
+                prepare_sdk(emit)
+                service = media_transfer.client(values)
         emit(
             'dependency', 'passed', 'sdk_available', 'SDK доступен; SigV4 и проверка TLS включены.'
         )

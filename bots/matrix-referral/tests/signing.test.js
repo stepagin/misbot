@@ -159,3 +159,28 @@ test("interrupted child-key publication reuses saved identity and refuses foreig
         fs.rmSync(dir, { recursive: true, force: true });
     }
 });
+
+test("a successful upload response without the device signature fails closed and retries with the same keys", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "referral-signing-test-"));
+    try {
+        const file = path.join(dir, "keys.json"),
+            c = client(),
+            request = c.object.doRequest;
+        let publish = false;
+        c.object.doRequest = async (method, url, query, body) => {
+            if (url.endsWith("/signatures/upload") && !publish) return {};
+            return request(method, url, query, body);
+        };
+        await assert.rejects(
+            ensureCrossSigning(c.object, file),
+            /Cross-signing verification failed/
+        );
+        const saved = fs.readFileSync(file, "utf8");
+        publish = true;
+        assert.equal(await ensureCrossSigning(c.object, file), true);
+        assert.equal(fs.readFileSync(file, "utf8"), saved);
+        assert.equal(c.count(), 1);
+    } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
+});

@@ -160,6 +160,11 @@ def queue_job(backend, request):
             'event_id': event,
         }
         if jid not in jobs:
+            if (
+                action in ('recover', 'rollback')
+                and not (backend.root / 'federation-transition.json').is_file()
+            ):
+                return {'status': 'unchanged', 'recovery_available': False}
             if len(jobs) >= 1000:
                 raise protocol.ProtocolError('operation_capacity')
             jobs[jid] = dict(expected, state='queued')

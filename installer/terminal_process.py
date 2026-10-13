@@ -1,6 +1,7 @@
 """Drain a child without blocking animation or retaining unbounded output."""
 
 import codecs
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -109,6 +110,8 @@ def primary_output(path, line):
         }
         seconds = record.get('elapsed_seconds')
         limit = record.get('timeout_seconds')
+        if seconds == 0:
+            return []
         if type(seconds) is int and type(limit) is int:
             return [f'{labels.get(command, "Команда")}: {seconds} с · предел {limit} с']
         return []
@@ -143,7 +146,11 @@ def primary_output(path, line):
     if record.get('check') == 'waiting_for_service':
         return [
             'Ожидаем готовности: '
-            + str(record.get('service', 'служба'))
+            + (
+                'службы сервера'
+                if path.startswith('federation ')
+                else str(record.get('service', 'служба'))
+            )
             + ' · предел '
             + str(record.get('timeout_seconds', '?'))
             + ' с'
@@ -231,6 +238,10 @@ def primary_output(path, line):
         ] + ['Итог: ' + str(record.get('conclusion', 'Проверка не завершена.'))]
     if record.get('status') == 'error' and record.get('explanation'):
         return [str(record['explanation'])]
+    if path.startswith('federation '):
+        messages = federation_output(path, record)
+        if messages is not None:
+            return messages
     if path == 'admin bot show':
         return [
             'Бот панели: ' + str(record.get('user_id', 'не выбран')),
@@ -251,23 +262,41 @@ def primary_output(path, line):
         ] or ['Сохранённых операций бота нет.']
     if path == 'users invitation list':
         invitations = record.get('invitations', [])
+        from datetime import datetime
+
         states = {
             'valid': 'действует',
             'used': 'использовано',
-            'expired': 'истекло',
+            'expired': 'срок истёк',
             'revoked': 'отозвано',
             'pending': 'ожидает подтверждения',
+            'unavailable': 'недоступно для регистрации',
+            'unknown': 'статус не подтверждён',
         }
-        return [
-            str(item.get('id', ''))
-            + ' · '
-            + str(item.get('issuer', 'администратор'))
-            + ' · '
-            + states.get(item.get('state'), str(item.get('state', 'неизвестно')))
-            + ' · до '
-            + str(item.get('expires_at') or 'без ограничения')
-            for item in invitations
-        ] or ['Приглашений пока нет.']
+        rows = []
+        for item in invitations:
+            parts = [states.get(item.get('state'), 'статус не подтверждён')]
+            issuer = item.get('issuer')
+            if issuer and issuer != 'не указан':
+                parts.append('автор: ' + str(issuer))
+            used, limit = item.get('times_used'), item.get('usage_limit')
+            if type(used) is int:
+                parts.append(
+                    'регистраций: '
+                    + str(used)
+                    + (' из ' + str(limit) if type(limit) is int else '')
+                )
+            expires = item.get('expires_at')
+            if expires:
+                try:
+                    date = datetime.fromisoformat(expires.replace('Z', '+00:00'))
+                    parts.append('до ' + date.strftime('%d.%m.%Y %H:%M %Z'))
+                except (ValueError, TypeError):
+                    parts.append('срок не подтверждён')
+            elif item.get('state') == 'valid':
+                parts.append('без ограничения срока')
+            rows.append(' · '.join(parts))
+        return rows or ['Приглашений пока нет.']
     if record.get('check') == 'failed':
         # RuntimeError messages are deliberate backend guidance; provider errors
         # are never repeated verbatim.
@@ -318,6 +347,145 @@ def primary_output(path, line):
             return ['Подтверждено: ' + title + '.']
         return ['Сведения об операции: ' + title + '.']
     return ['Результат получен.']
+
+
+def federation_output(path, record):
+    """Local policy, mutual approval and actual Matrix exchange are distinct facts."""
+    event = record.get('check')
+    if event == 'federation_policy_plan':
+        return [
+            'Сохраняем проверенную резервную копию и меняем список разрешённых серверов.',
+            'Matrix и веб-клиент кратко перезапустятся. Данные и ключи сохраняются.',
+        ]
+    if event in ('referral_backup_crypto_restore', 'restored_one_time_keys'):
+        return [] if record.get('passed') is True else None
+    if event == 'temporary_database_restore' and record.get('passed') is True:
+        return ['Восстановление базы из резервной копии проверено.']
+    if event:
+        return None
+    if 'servers' in record:
+        messages = []
+        if record.get('status') == 'applied':
+            messages.append('Список разрешённых серверов обновлён.')
+        elif record.get('status') == 'unchanged':
+            messages.append('Список разрешённых серверов уже соответствует запросу.')
+        messages.append('Разрешены: ' + ', '.join(map(str, record['servers'])))
+        if path != 'federation servers':
+            messages.extend(
+                [
+                    'Изменены разрешения только на этом сервере; Misbot API другого сервера не нужен.',
+                    'Обмен сообщениями между серверами ещё не проверен. '
+                    'На другой стороне также должно быть разрешено подключение.',
+                ]
+            )
+        return messages
+    if path == 'federation check':
+        messages = [
+            'Сервер: ' + str(record.get('server', 'не указан')),
+            'Разрешён на этом сервере: ' + ('да' if record.get('policy') else 'нет'),
+            'Matrix по HTTPS: '
+            + ('доступен' if record.get('matrix_https') == 'available' else 'не подтверждён'),
+        ]
+        invitation = record.get('invitation', {})
+        if invitation.get('ready'):
+            messages.append('Взаимное приглашение через Misbot доступно.')
+        elif record.get('code') == 'misbot_not_found':
+            messages.append(
+                'Misbot API отсутствует. Сервер можно добавить в локальный список разрешённых.'
+            )
+        else:
+            messages.append('Взаимное приглашение через Misbot пока недоступно.')
+        messages.append('Доступность HTTPS не подтверждает обмен сообщениями между серверами.')
+        return messages
+    if 'enabled' in record:
+        return [
+            'Приглашения через Misbot API: ' + ('включены.' if record['enabled'] else 'выключены.')
+        ]
+    states = {
+        'pending': 'ожидает подтверждения',
+        'accepted': 'одобрено, подключение ещё не завершено',
+        'applying': 'применяется',
+        'partially_applied': 'применено частично',
+        'connected': 'разрешено обеими сторонами',
+        'rejected': 'отклонено',
+        'cancelled': 'отменено',
+        'expired': 'срок истёк',
+        'queued': 'в очереди',
+        'running': 'выполняется',
+        'complete': 'завершено',
+        'failed': 'не завершено',
+        'interrupted': 'прервано',
+    }
+    for key, empty in (
+        ('requests', 'Заявок нет.'),
+        ('operations', 'Сохранённых операций нет.'),
+        ('peers', 'Согласованных подключений нет.'),
+    ):
+        if key in record:
+            messages = []
+            for item in record[key]:
+                messages.append(
+                    str(item.get('server') or item.get('id', 'Операция'))
+                    + ': '
+                    + states.get(item.get('state'), 'состояние не подтверждено')
+                    + (' · заявка ' + item['id'] if item.get('server') and item.get('id') else '')
+                )
+                messages.extend(federation_details(item))
+                result = item.get('result')
+                if isinstance(result, dict):
+                    if isinstance(result.get('explanation'), str):
+                        messages.append(result['explanation'])
+                    if isinstance(result.get('next_action'), str):
+                        messages.append('Следующий шаг: ' + result['next_action'])
+            if not messages:
+                messages.append(empty)
+            if record.get('recovery_available') is True:
+                messages.append(
+                    'Изменение федерации не завершено. Продолжить: sudo misbot federation recover'
+                )
+            return messages
+    if record.get('state') in states:
+        messages = [str(record.get('server', 'Заявка')) + ': ' + states[record['state']] + '.']
+        if record.get('id'):
+            messages.append('Заявка: ' + record['id'])
+        messages.extend(federation_details(record))
+        if record.get('state') == 'connected':
+            messages.append('Обмен сообщениями между серверами ещё не проверен.')
+        return messages
+    if record.get('status') == 'cleared':
+        return ['Убрано завершённых заявок: ' + str(record.get('count', 0))]
+    return None
+
+
+def federation_details(record):
+    messages = []
+    direction = {'incoming': 'Входящая заявка', 'outgoing': 'Исходящая заявка'}.get(
+        record.get('direction')
+    )
+    if direction:
+        messages.append(direction)
+    expires = record.get('expires_at')
+    if type(expires) is int:
+        try:
+            messages.append(
+                'Срок: до '
+                + datetime.fromtimestamp(expires, timezone.utc).strftime('%d.%m.%Y %H:%M UTC')
+            )
+        except (OverflowError, ValueError, OSError):
+            messages.append('Срок не подтверждён.')
+    if 'local_applied' in record and 'remote_applied' in record:
+        messages.append(
+            'Разрешения применены: на этом сервере — '
+            + ('да' if record['local_applied'] is True else 'нет')
+            + ', на другом — '
+            + ('да' if record['remote_applied'] is True else 'не подтверждено')
+            + '.'
+        )
+    if record.get('delivery_pending') is True:
+        messages.append(
+            'Доставка решения другой стороне ещё не подтверждена; повторите проверку заявки.'
+        )
+    return messages
 
 
 def read_output(child, emit):

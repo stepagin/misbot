@@ -268,10 +268,11 @@ class Panel:
                     + release['notes']
                     + '\n'
                     + release['url']
-                    + '\nОбновление: '
+                    + '\nОбновление: `'
                     + releases.comparison(self.root, release)['command']
+                    + '`'
                     + (
-                        ' или команда «обновить» в этом чате.'
+                        ' или команда «`обновить`» в этом чате.'
                         if releases.comparison(self.root, release)['update_supported']
                         else '.'
                     ),

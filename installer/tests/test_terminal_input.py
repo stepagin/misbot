@@ -53,11 +53,11 @@ class EditorTests(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform.startswith('linux') and terminal_views.Console, 'PTY and Rich')
 class InputTerminalTests(unittest.TestCase):
-    def start(self, secret=False, typeahead=False, unicode_typeahead=False):
+    def start(self, secret=False, typeahead=False, unicode_typeahead=False, worker_signal=None):
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 24, 42, 0, 0))
         script = """
-import fcntl, os, signal, sys, termios, time
+import fcntl, os, signal, sys, termios, threading, time
 os.setsid()
 fcntl.ioctl(0, termios.TIOCSCTTY, 0)
 sys.path.insert(0, sys.argv[1])
@@ -65,6 +65,24 @@ from terminal_views import TerminalView
 view = TerminalView()
 previous = signal.getsignal(signal.SIGWINCH)
 settings = termios.tcgetattr(0)
+wake_read, wake_write = os.pipe2(os.O_NONBLOCK | os.O_CLOEXEC)
+previous_wakeup = signal.set_wakeup_fd(wake_write)
+if int(sys.argv[3]):
+    def interrupt(signum, frame):
+        raise KeyboardInterrupt()
+    signal.signal(int(sys.argv[3]), interrupt)
+    def interrupt_worker():
+        # Deliver to a worker only after the main thread blocks in the input
+        # selector. Python must wake main before it can invoke the handler.
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            with open('/proc/self/task/' + str(os.getpid()) + '/wchan') as stream:
+                wait = stream.read()
+            if 'ep_poll' in wait or 'epoll' in wait:
+                signal.pthread_kill(threading.get_ident(), int(sys.argv[3]))
+                return
+            time.sleep(0.005)
+    threading.Thread(target=interrupt_worker, daemon=True).start()
 try:
     with view.screen():
         view.heading('Page preserved', 'Useful instructions')
@@ -83,7 +101,10 @@ try:
     print('RESULT:' + str(result == expected))
 except KeyboardInterrupt:
     print('INTERRUPTED')
-print('RESTORED:' + str(settings == termios.tcgetattr(0) and previous == signal.getsignal(signal.SIGWINCH)))
+restored_wakeup = signal.set_wakeup_fd(previous_wakeup)
+print('RESTORED:' + str(settings == termios.tcgetattr(0) and previous == signal.getsignal(signal.SIGWINCH) and restored_wakeup == wake_write))
+os.close(wake_read)
+os.close(wake_write)
 """
         process = subprocess.Popen(
             [
@@ -99,6 +120,7 @@ print('RESTORED:' + str(settings == termios.tcgetattr(0) and previous == signal.
                 else 'secret'
                 if secret
                 else 'normal',
+                str(worker_signal or 0),
             ],
             stdin=slave,
             stdout=slave,
@@ -201,6 +223,15 @@ print('RESTORED:' + str(settings == termios.tcgetattr(0) and previous == signal.
         process.send_signal(signal.SIGINT)
         output = self.receive(master, b'RESTORED:True', process)
         self.assertIn(b'INTERRUPTED', output)
+
+    def test_signal_delivered_to_worker_wakes_idle_input_and_restores_signal_state(self):
+        for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            with self.subTest(signum=signum):
+                master, process = self.start(worker_signal=signum)
+                output = self.receive(master, b'RESTORED:True', process)
+                self.assertIn(b'INTERRUPTED', output)
+                process.wait(timeout=3)
+                self.assertEqual(process.returncode, 0)
 
 
 if __name__ == '__main__':

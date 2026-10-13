@@ -83,6 +83,8 @@ class OutputTests(unittest.TestCase):
         self.assertIn('использовано', messages[0])
         self.assertIn('@example:example.org', messages[0])
         self.assertNotIn('FICTIONAL_NOT_FOR_UI', str(messages))
+        self.assertNotIn('INV-1', str(messages))
+        self.assertIn('01.01.2030', str(messages))
         messages = present_output(
             'federation operations',
             'Another installer operation is running for this directory. Technical entry: ...',

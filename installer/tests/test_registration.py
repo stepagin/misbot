@@ -1,6 +1,7 @@
 """Lost API responses must reuse a durable invitation and never grant admin."""
 
 import copy
+import io
 import json
 import os
 from pathlib import Path
@@ -41,6 +42,91 @@ class RegistrationTests(unittest.TestCase):
         )
         self.assertEqual(result['invitations'][0]['state'], 'used')
         self.assertNotIn('PRIVATE_FIXTURE', json.dumps(result))
+
+    def test_invalid_or_missing_usage_never_claims_invitation_is_valid(self):
+        for attributes, expected in (
+            ({'times_used': 1, 'usage_limit': 1, 'valid': True}, 'used'),
+            ({'times_used': 0, 'usage_limit': 1, 'valid': False}, 'unavailable'),
+            ({'usage_limit': 1}, 'unknown'),
+        ):
+            with self.subTest(attributes=attributes):
+                result = registration.list_invitations(
+                    self.root,
+                    lambda *_: {
+                        'status': 200,
+                        'body': {'data': [{'id': '0' * 26, 'attributes': attributes}]},
+                    },
+                )
+                self.assertEqual(result['invitations'][0]['state'], expected)
+
+    def test_show_consumed_code_explains_next_action_without_json_or_secret(self):
+        with (
+            patch('sys.argv', ['registration.py', '--directory', str(self.root), 'show']),
+            patch('sys.stdin.isatty', return_value=True),
+            patch('sys.stdout', new=io.StringIO()) as output,
+            patch.object(registration.sys.stdout, 'isatty', return_value=True),
+            patch('command_wrapper.trusted_installation'),
+            patch('state_store.require_root'),
+            patch.object(registration, 'manage', return_value={'state': 'used'}),
+        ):
+            self.assertEqual(registration.main(), 1)
+        self.assertIn('уже использован', output.getvalue())
+        self.assertIn('Пригласить пользователя', output.getvalue())
+        self.assertNotIn('{', output.getvalue())
+
+    def test_list_ensure_and_show_share_unavailable_and_unknown_states(self):
+        registration.manage(self.root, 'ensure', self.transport)
+        identifier = next(iter(self.items))
+        original = copy.deepcopy(self.items[identifier]['attributes'])
+        for attributes, expected in (
+            (dict(original, valid=False), 'unavailable'),
+            ({key: value for key, value in original.items() if key != 'times_used'}, 'unknown'),
+            (dict(original, times_used=1, valid=True), 'used'),
+        ):
+            with self.subTest(expected=expected):
+                self.items[identifier]['attributes'] = attributes
+                self.assertEqual(
+                    registration.list_invitations(self.root, self.transport)['invitations'][0][
+                        'state'
+                    ],
+                    expected,
+                )
+                for action in ('ensure', 'show'):
+                    result = registration.manage(self.root, action, self.transport)
+                    self.assertEqual(result['state'], expected)
+                self.assertEqual(self.created, 1)
+
+    def test_ui_never_displays_or_replaces_an_unconfirmed_code(self):
+        import terminal_ui
+        import ui_actions
+
+        registration.manage(self.root, 'ensure', self.transport)
+        attributes = next(iter(self.items.values()))['attributes']
+        attributes['valid'] = False
+        interface = terminal_ui.UI(
+            self.root, draft=self.root / 'draft.json', reader=lambda *_: 'да'
+        )
+        calls = []
+
+        def run(path, **kwargs):
+            calls.append(path)
+            result = registration.manage(self.root, path.split()[-1], self.transport)
+            interface.operation_records = [result]
+            return 0
+
+        with (
+            patch.object(interface, 'run', side_effect=run),
+            patch('sys.stdout', new=io.StringIO()) as output,
+        ):
+            self.assertEqual(
+                interface.execute(
+                    ui_actions.Action('users invitation ensure', 'Пригласить пользователя')
+                ),
+                1,
+            )
+        self.assertEqual(calls, ['users invitation ensure'])
+        self.assertEqual(self.created, 1)
+        self.assertNotIn(attributes['token'], output.getvalue())
 
     def test_fifo_issuer_database_is_rejected_without_waiting(self):
         path = self.root / 'data/referral-control/data/bot-control.sqlite3'

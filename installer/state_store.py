@@ -14,6 +14,7 @@ import shlex
 import stat
 import subprocess
 import tempfile
+import time
 import cli_commands
 from typing import cast
 from operation_models import BACKUP_WRITERS, BackupPauseRecord
@@ -21,6 +22,10 @@ from operation_models import BACKUP_WRITERS, BackupPauseRecord
 
 class OperationInterrupted(Exception):
     """Signal exceptions must bypass InterruptedError syscall retry handling."""
+
+
+class OperationBusy(RuntimeError):
+    """No mutation started because another operation owns the installation."""
 
 
 class S3CredentialRecoveryRequired(RuntimeError):
@@ -495,7 +500,7 @@ def reject_existing_backend(root):
 
 
 @contextmanager
-def operation_guard(root):
+def operation_guard(root, wait_seconds=0, progress=None):
     """Serialize mutations; admit only descendants of the current owning process.
 
     The lock lives beside the installation so an interrupted first init or restore
@@ -530,9 +535,29 @@ def operation_guard(root):
             os.close(descriptor)
             descriptor = borrowed
         else:
+            expires = time.monotonic() + wait_seconds
+            announced = False
+            while True:
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    acquired = True
+                    break
+                except BlockingIOError:
+                    # Nested legacy children without pass_fds use the authenticated
+                    # ancestry check below. Never wait for our own parent.
+                    if os.environ.get('MATRIX_INSTALLER_OPERATION_ROOT') == str(root):
+                        break
+                    remaining = expires - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    if progress and not announced:
+                        progress('Ждём завершения текущей операции сервера…')
+                        announced = True
+                    time.sleep(min(0.25, remaining))
             try:
-                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                acquired = True
+                if not acquired:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    acquired = True
             except BlockingIOError:
                 inherited = False
                 try:
@@ -547,7 +572,7 @@ def operation_guard(root):
                 except (ValueError, KeyError, TypeError):
                     pass
                 if not inherited:
-                    raise RuntimeError(
+                    raise OperationBusy(
                         'Another installer operation is running for this directory. '
                         'Use sudo misbot --directory '
                         + shlex.quote(str(root))

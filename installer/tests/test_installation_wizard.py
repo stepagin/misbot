@@ -549,6 +549,7 @@ class InstallationWizardTests(unittest.TestCase):
                 'нет',
                 'отложить',
                 'применить',
+                '0',
             ]
         )
         calls = []
@@ -608,6 +609,72 @@ class InstallationWizardTests(unittest.TestCase):
             before, {path: path.read_bytes() for path in self.root.rglob('*') if path.is_file()}
         )
 
+    def test_real_telegram_check_with_formatted_view_survives_draft_resume_summary_apply(self):
+        from terminal_views import Console
+
+        if Console is None:
+            self.skipTest('Rich is optional')
+        from rich.console import Console as RichConsole
+
+        view = TerminalView(
+            console=RichConsole(file=self.output, force_terminal=True, width=72, height=20)
+        )
+        interface = terminal_ui.UI(self.root, draft=self.base / 'telegram.json', view=view)
+        interface.model = schema.validate(
+            {'DOMAIN': 'fictional.example.org', 'PUBLIC_IP': '8.8.8.8'}
+        )
+        interface.dns_verified = interface.dns_values()
+        interface.step = 4
+        answers = iter(['нет', 'да', 'FICTIONAL_ID', 'FICTIONAL_SECRET', ''])
+        interface.reader = lambda *_: next(answers)
+        response = subprocess.CompletedProcess(
+            [],
+            0,
+            json.dumps(
+                {
+                    'issuer': 'https://oauth.telegram.org',
+                    'token_endpoint': 'https://oauth.telegram.org/token',
+                }
+            ),
+            '',
+        )
+        with (
+            patch.dict(os.environ, {'TERM': 'xterm'}, clear=True),
+            view.screen(),
+            patch('telegram_login_check.subprocess.run', return_value=response) as http,
+        ):
+            interface.setup_step(4)
+            self.assertEqual(http.call_count, 3)
+            self.assertNotIn('FICTIONAL_SECRET', str(http.call_args_list))
+            saved = interface.draft.read_bytes()
+            resumed = terminal_ui.UI(self.root, draft=interface.draft, view=view)
+            self.assertEqual(resumed.model['TELEGRAM_CLIENT_SECRET'], 'FICTIONAL_SECRET')
+            self.assertEqual(resumed.draft.read_bytes(), saved)
+            answers = iter(['нет', 'да', '', '', '', 'отложить', 'применить'])
+            resumed.reader = lambda *_: next(answers)
+            resumed.setup_step(4)
+            resumed.setup_step(5)
+            resumed.setup_step(6)
+            calls = []
+
+            def run(path, **args):
+                calls.append(path)
+                if path == 'config init':
+                    self.root.mkdir(mode=0o700)
+                    state_store.write_json(
+                        self.root / 'installation.json',
+                        {'domain': args['domain'], 'config_format_version': 2},
+                    )
+                return 0
+
+            with patch.object(resumed, 'run', side_effect=run):
+                resumed.setup_step(7)
+            self.assertEqual(calls, ['config init', 'start'])
+            self.assertEqual(
+                configuration.load(self.root, True)['TELEGRAM_CLIENT_SECRET'], 'FICTIONAL_SECRET'
+            )
+        self.assertNotIn('FICTIONAL_SECRET', self.output.getvalue())
+
     def test_wizard_media_oauth_and_backup_combinations_publish_only_valid_settings(self):
         combinations = itertools.product(
             ('local', 's3'),
@@ -648,7 +715,7 @@ class InstallationWizardTests(unittest.TestCase):
                         + profile[4:]
                         + [str(key), 'daily' if backup == 'schedule' else '']
                     )
-                answers.append('применить')
+                answers.extend(['применить', '0'])
                 entries = iter(answers)
                 interface.reader = lambda *args: next(entries)
                 calls = []
@@ -681,7 +748,20 @@ class InstallationWizardTests(unittest.TestCase):
 
                 with (
                     patch('shutil.which', return_value='/usr/bin/fictional'),
-                    patch('telegram_login_check.check'),
+                    patch(
+                        'telegram_login_check.subprocess.run',
+                        return_value=subprocess.CompletedProcess(
+                            [],
+                            0,
+                            json.dumps(
+                                {
+                                    'issuer': 'https://oauth.telegram.org',
+                                    'token_endpoint': 'https://oauth.telegram.org/token',
+                                }
+                            ),
+                            '',
+                        ),
+                    ),
                     patch.object(preflight, 'system_check'),
                     patch.object(preflight, 'dns_check'),
                     patch.object(interface, 'wait_dns'),

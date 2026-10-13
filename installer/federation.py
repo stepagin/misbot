@@ -845,10 +845,11 @@ class Backend:
             ):
                 raise protocol.ProtocolError('invalid_operation_state')
             return {
+                'recovery_available': (self.root / 'federation-transition.json').is_file(),
                 'operations': [
                     {'id': identifier, 'state': job['state'], 'result': job.get('result', {})}
                     for identifier, job in jobs.items()
-                ]
+                ],
             }
         with self.guard():
             self.ready(
@@ -1026,7 +1027,15 @@ def main():
     parser.add_argument('--directory', required=True, type=Path)
     parser.add_argument('action', choices=sorted(ACTIONS))
     parser.add_argument('argument', nargs='?')
+    parser.add_argument('--human', action='store_true')
     args = parser.parse_args()
+    from terminal_output import human_output
+
+    with human_output('federation ' + args.action, enabled=args.human):
+        return execute_cli(args)
+
+
+def execute_cli(args):
     try:
         state_store.require_root()
         __import__('command_wrapper').trusted_installation(args.directory)

@@ -317,7 +317,10 @@ class FederationTests(unittest.TestCase):
             self.assertEqual(owner.stdout.readline().strip(), 'locked')
             self.assertEqual(
                 self.a.operate('operations'),
-                {'operations': [{'id': identifier, 'state': 'running', 'result': {}}]},
+                {
+                    'recovery_available': False,
+                    'operations': [{'id': identifier, 'state': 'running', 'result': {}}],
+                },
             )
             self.assertIsNone(owner.poll())
             with self.assertRaisesRegex(RuntimeError, 'Another installer operation'):
@@ -337,7 +340,8 @@ class FederationTests(unittest.TestCase):
             self.a, 'guard', side_effect=AssertionError('read acquired writer guard')
         ):
             self.assertEqual(
-                federation_service.bot_call(self.a, request, 10003), {'operations': []}
+                federation_service.bot_call(self.a, request, 10003),
+                {'recovery_available': False, 'operations': []},
             )
         self.assertEqual(self.a.path.read_bytes(), before)
         with self.assertRaises(protocol.ProtocolError):

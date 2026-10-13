@@ -25,6 +25,23 @@ class UITests(unittest.TestCase):
                         for argument in ui.cli_commands.BY_PATH[action.path].arguments:
                             self.assertIn(argument, ui_actions.ARGUMENTS)
 
+    def test_administrator_password_and_access_are_in_one_section(self):
+        admin = {item.path for item in ui_actions.MENUS['admin'][1]}
+        users = {item.path for item in ui_actions.MENUS['users'][1]}
+        self.assertTrue(
+            {
+                'credentials admin show',
+                'credentials admin set',
+                'admin access add',
+                'admin access remove',
+            }
+            <= admin
+        )
+        self.assertFalse(
+            any(path.startswith(('credentials admin', 'admin access')) for path in users)
+        )
+        self.assertIn('users password set', users)
+
     def test_navigation_and_read_only_action_do_not_require_confirmation(self):
         with tempfile.TemporaryDirectory() as folder:
             entries = iter(['1', '1', '0', '0'])
@@ -184,7 +201,186 @@ class UITests(unittest.TestCase):
             ):
                 interface.finish()
             self.assertNotIn('FICTIONAL_HIDDEN_TOKEN', output.getvalue())
-            self.assertIn('Показать код приглашения', output.getvalue())
+            self.assertIn('Пригласить пользователя', output.getvalue())
+
+    def test_finish_opens_administrator_password_in_ui(self):
+        answers = iter(['1', 'да', '0'])
+        with tempfile.TemporaryDirectory() as folder:
+            interface = self.initialized_ui(folder, reader=lambda *_: next(answers))
+            with (
+                patch('registration.manage', return_value={'state': 'valid'}),
+                patch.object(interface, 'run', return_value=0) as run,
+                patch('sys.stdout', new=io.StringIO()) as output,
+            ):
+                interface.finish()
+            run.assert_called_once_with('credentials admin show')
+            self.assertNotIn('sudo misbot credentials', output.getvalue())
+
+    def test_password_form_private_file_and_cleanup_on_failure(self):
+        secret = 'fictional-new-password-123'
+        for outcome in (0, 1, OSError('fictional failure')):
+            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as folder:
+                answers = iter(['@alice:example.org', secret, secret, 'да'])
+                interface = self.initialized_ui(folder, reader=lambda *_: next(answers))
+                paths = []
+
+                def run(path, **kwargs):
+                    self.assertEqual(path, 'users password set')
+                    filename = Path(kwargs['input'])
+                    paths.append(filename)
+                    self.assertEqual(filename.stat().st_mode & 0o777, 0o600)
+                    self.assertEqual(
+                        json.loads(filename.read_text()), {'username': 'alice', 'password': secret}
+                    )
+                    if isinstance(outcome, Exception):
+                        raise outcome
+                    return outcome
+
+                with (
+                    patch.object(interface, 'run', side_effect=run),
+                    patch('sys.stdout', new=io.StringIO()) as output,
+                ):
+                    if isinstance(outcome, Exception):
+                        with self.assertRaises(OSError):
+                            interface.execute(ui_actions.Action('users password set', 'Пароль'))
+                    else:
+                        self.assertEqual(
+                            interface.execute(ui_actions.Action('users password set', 'Пароль')),
+                            outcome,
+                        )
+                self.assertNotIn(secret, output.getvalue())
+                self.assertTrue(paths)
+                self.assertFalse(paths[0].parent.exists())
+                self.assertNotIn(secret, interface.draft.read_text())
+
+    def test_password_mismatch_then_cancel_never_calls_backend(self):
+        answers = iter(['alice', 'fictional-new-password', 'different-password', 'отмена'])
+        with tempfile.TemporaryDirectory() as folder:
+            interface = self.initialized_ui(folder, reader=lambda *_: next(answers))
+            with (
+                patch.object(interface, 'run') as run,
+                patch('sys.stdout', new=io.StringIO()) as output,
+            ):
+                with self.assertRaises(ui.Cancel):
+                    interface.execute(ui_actions.Action('users password set', 'Пароль'))
+            run.assert_not_called()
+            self.assertIn('не совпадают', output.getvalue())
+            self.assertNotIn('fictional-new-password', output.getvalue())
+
+    def test_invite_reuses_valid_code_and_replaces_only_consumed_code(self):
+        for initial in ('valid', 'used', 'expired', 'revoked', 'pending'):
+            with self.subTest(initial=initial), tempfile.TemporaryDirectory() as folder:
+                interface = self.initialized_ui(folder, reader=lambda *_: 'да')
+                calls = []
+
+                def run(path, **kwargs):
+                    calls.append(path)
+                    interface.operation_records = [
+                        {'state': initial if path.endswith('ensure') else 'valid'}
+                    ]
+                    return 0
+
+                with (
+                    patch.object(interface, 'run', side_effect=run),
+                    patch('sys.stdout', new=io.StringIO()),
+                ):
+                    result = interface.execute(
+                        ui_actions.Action('users invitation ensure', 'Пригласить пользователя')
+                    )
+                self.assertEqual(result, 1 if initial == 'pending' else 0)
+                self.assertEqual(calls[0], 'users invitation ensure')
+                self.assertEqual(
+                    'users invitation new' in calls, initial in ('used', 'expired', 'revoked')
+                )
+                self.assertEqual('users invitation show' in calls, initial != 'pending')
+
+    def test_interrupted_error_prompt_preserves_draft_and_exits(self):
+        import state_store
+
+        for error in (EOFError(), state_store.OperationInterrupted('fictional')):
+            with self.subTest(error=type(error)), tempfile.TemporaryDirectory() as folder:
+                interface = ui.UI(Path(folder) / 'target', draft=Path(folder) / 'draft.json')
+                interface.model = schema.validate({'DOMAIN': 'example.org'})
+                interface.step = 4
+                interface.save()
+                before = interface.draft.read_bytes()
+                with (
+                    patch.object(interface, 'setup_step', side_effect=ValueError('fictional')),
+                    patch.object(interface, 'answer', side_effect=error),
+                    patch('sys.stdout', new=io.StringIO()),
+                ):
+                    self.assertEqual(interface.wizard(), 130)
+                self.assertEqual(interface.draft.read_bytes(), before)
+
+    def test_interrupted_final_acknowledgement_preserves_completed_draft(self):
+        import state_store
+
+        for error in (EOFError(), state_store.OperationInterrupted('fictional')):
+            with self.subTest(error=type(error)), tempfile.TemporaryDirectory() as folder:
+                interface = ui.UI(Path(folder) / 'target', draft=Path(folder) / 'draft.json')
+                interface.model = schema.validate({'DOMAIN': 'example.org'})
+                interface.step = 10
+                interface.save()
+                before = interface.draft.read_bytes()
+                with (
+                    patch.object(interface, 'pause', side_effect=error),
+                    patch('sys.stdout', new=io.StringIO()),
+                ):
+                    self.assertEqual(interface.wizard(), 130)
+                self.assertEqual(interface.draft.read_bytes(), before)
+
+    def test_password_confirmation_explains_downtime_for_both_account_types(self):
+        for path in ('users password set', 'credentials admin set'):
+            with self.subTest(path=path), tempfile.TemporaryDirectory() as folder:
+                values = (['alice'] if path.startswith('users') else []) + [
+                    'fictional-password',
+                    'fictional-password',
+                    'нет',
+                ]
+                answers = iter(values)
+                interface = self.initialized_ui(folder, reader=lambda *_: next(answers))
+                with (
+                    patch.object(interface, 'run') as run,
+                    patch('sys.stdout', new=io.StringIO()) as output,
+                ):
+                    self.assertEqual(interface.execute(ui_actions.Action(path, 'Пароль')), 0)
+                run.assert_not_called()
+                self.assertIn(ui.cli_commands.BY_PATH[path].stops, output.getvalue())
+                self.assertNotIn('fictional-password', output.getvalue())
+
+    def test_unexpected_telegram_error_keeps_draft_and_returns_to_same_step(self):
+        answers = iter(['нет', 'да', 'FICTIONAL_ID', 'FICTIONAL_SECRET', '', 'сохранить и выйти'])
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            interface = ui.UI(
+                root / 'target', draft=root / 'draft.json', reader=lambda *_: next(answers)
+            )
+            interface.model = schema.validate({'DOMAIN': 'example.org'})
+            interface.step = 4
+            with (
+                patch('telegram_login_check.check', side_effect=ValueError('FICTIONAL_SECRET')),
+                patch('sys.stdout', new=io.StringIO()) as output,
+            ):
+                self.assertEqual(interface.wizard(), 0)
+            saved = json.loads(interface.draft.read_text())
+            self.assertEqual(saved['step'], 4)
+            self.assertEqual(saved['values']['TELEGRAM_CLIENT_SECRET'], 'FICTIONAL_SECRET')
+            self.assertNotIn('FICTIONAL_SECRET', output.getvalue())
+            self.assertNotIn('config validate', output.getvalue())
+            self.assertIn('ValueError', output.getvalue())
+
+    def test_unexpected_action_error_keeps_menu_available(self):
+        answers = iter(['1', '1', '0'])
+        with tempfile.TemporaryDirectory() as folder:
+            interface = self.initialized_ui(folder, reader=lambda *_: next(answers))
+            with (
+                patch.object(interface, 'run', return_value=0),
+                patch.object(interface, 'execute', side_effect=KeyError('FICTIONAL_SECRET')),
+                patch('sys.stdout', new=io.StringIO()) as output,
+            ):
+                self.assertEqual(interface.menu(), 0)
+            self.assertIn('KeyError', output.getvalue())
+            self.assertNotIn('FICTIONAL_SECRET', output.getvalue())
 
     def initialized_ui(self, folder, step=7, reader=None):
         import configuration, state_store

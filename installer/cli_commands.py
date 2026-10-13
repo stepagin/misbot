@@ -246,6 +246,7 @@ COMMANDS = [
         'federation-servers',
         purpose='Показать действующий локальный allowlist.',
         execution=FEDERATION,
+        switches=('json',),
         existing=FEDERATION,
     ),
     Command(
@@ -254,6 +255,7 @@ COMMANDS = [
         ('server',),
         'Проверить Misbot discovery/TLS; факт федеративных комнат отдельно.',
         execution=FEDERATION,
+        switches=('json',),
         existing=FEDERATION,
     ),
     Command(
@@ -263,6 +265,7 @@ COMMANDS = [
         'Добавить Matrix server_name только в локальный allowlist.',
         stops='Копия, Synapse/Web перезапускаются.',
         execution=FEDERATION,
+        switches=('json',),
         existing=FEDERATION,
     ),
     Command(
@@ -272,6 +275,7 @@ COMMANDS = [
         'Удалить одну локальную запись, сохраняя identity и restrictive policy.',
         stops='Копия, Synapse/Web перезапускаются.',
         execution=FEDERATION,
+        switches=('json',),
         existing=FEDERATION,
     ),
     Command(
@@ -280,6 +284,7 @@ COMMANDS = [
         ('server',),
         'Отправить подписанную заявку на взаимный allowlist; срок 30 дней.',
         execution=FEDERATION,
+        switches=('json',),
         existing=FEDERATION,
     ),
     Command(
@@ -287,6 +292,7 @@ COMMANDS = [
         'federation-api-status',
         purpose='Показать сохранённое состояние межсерверного Misbot API.',
         execution=FEDERATION,
+        switches=('json',),
         existing=FEDERATION,
     ),
     Command(
@@ -294,6 +300,7 @@ COMMANDS = [
         'federation-api-enable',
         purpose='Включить Misbot API; настройка сохраняется после перезапуска.',
         execution=FEDERATION,
+        switches=('json',),
         existing=FEDERATION,
     ),
     Command(
@@ -301,6 +308,7 @@ COMMANDS = [
         'federation-api-disable',
         purpose='Выключить Misbot API, сохраняя федерацию, заявки и настройки.',
         execution=FEDERATION,
+        switches=('json',),
         existing=FEDERATION,
     ),
     Command(
@@ -308,6 +316,7 @@ COMMANDS = [
         'federation-clear-rejected',
         purpose='Скрыть отклонённые и истёкшие заявки, сохраняя защиту от повторов.',
         execution=FEDERATION,
+        switches=('json',),
         existing=FEDERATION,
     ),
     Command(
@@ -315,6 +324,7 @@ COMMANDS = [
         'federation-peers',
         purpose='Показать согласованные instance/bot identities.',
         execution=FEDERATION,
+        switches=('json',),
         existing=FEDERATION,
     ),
     Command(
@@ -322,6 +332,7 @@ COMMANDS = [
         'federation-requests',
         purpose='Показать сохранённые заявки и частичное применение.',
         execution=FEDERATION,
+        switches=('json',),
         existing=FEDERATION,
     ),
     Command(
@@ -329,6 +340,7 @@ COMMANDS = [
         'federation-operations',
         purpose='Показать сохранённые асинхронные операции административного бота.',
         execution=FEDERATION,
+        switches=('json',),
         existing=FEDERATION,
     ),
     Command(
@@ -337,6 +349,7 @@ COMMANDS = [
         ('request',),
         'Показать локальный checkpoint заявки; retry проверяет peer.',
         execution=FEDERATION,
+        switches=('json',),
         existing=FEDERATION,
     ),
     Command(
@@ -346,6 +359,7 @@ COMMANDS = [
         'Одобрить входящую заявку и продолжить обмен.',
         stops='Проверенная копия и перезапуск Synapse/Web при применении.',
         execution=FEDERATION,
+        switches=('json',),
         existing=FEDERATION,
     ),
     Command(
@@ -354,6 +368,7 @@ COMMANDS = [
         ('request',),
         'Отклонить входящую заявку; существующий allowlist сохраняется.',
         execution=FEDERATION,
+        switches=('json',),
         existing=FEDERATION,
     ),
     Command(
@@ -362,6 +377,7 @@ COMMANDS = [
         ('request',),
         'Отменить согласование; уже применённые записи удаляются отдельно.',
         execution=FEDERATION,
+        switches=('json',),
         existing=FEDERATION,
     ),
     Command(
@@ -370,6 +386,7 @@ COMMANDS = [
         ('request',),
         'Запросить удалённое состояние и завершить частичное применение.',
         execution=FEDERATION,
+        switches=('json',),
         existing=FEDERATION,
     ),
     Command(
@@ -378,6 +395,7 @@ COMMANDS = [
         purpose='Завершить локальное применение из защищённого checkpoint.',
         stops='Synapse/Web перезапускаются.',
         execution=FEDERATION,
+        switches=('json',),
         existing=FEDERATION,
     ),
     Command(
@@ -386,6 +404,7 @@ COMMANDS = [
         purpose='Восстановить прежнюю конфигурацию локальной операции.',
         stops='Synapse/Web перезапускаются.',
         execution=FEDERATION,
+        switches=('json',),
         existing=FEDERATION,
     ),
     Command(

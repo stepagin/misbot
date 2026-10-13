@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -14,6 +15,56 @@ import state_store
 
 
 class CheckpointTests(unittest.TestCase):
+    def test_guard_waits_for_short_background_operation_without_unlocking_it(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder) / 'installation'
+            code = (
+                'import sys; sys.path.insert(0,sys.argv[1]); import state_store; '
+                'guard=state_store.operation_guard(sys.argv[2]); guard.__enter__(); '
+                'print("acquired",flush=True); sys.stdin.read(); guard.__exit__(None,None,None)'
+            )
+            owner = subprocess.Popen(
+                [sys.executable, '-c', code, str(Path(state_store.__file__).parent), str(root)],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                self.assertEqual(owner.stdout.readline().strip(), 'acquired')
+                notified = []
+
+                def release(message):
+                    notified.append(message)
+                    owner.stdin.close()
+                    owner.wait(timeout=5)
+
+                with state_store.operation_guard(root, wait_seconds=2, progress=release):
+                    self.assertTrue(state_store.operation_running(root))
+                self.assertEqual(len(notified), 1)
+                self.assertFalse(state_store.operation_running(root))
+            finally:
+                if owner.poll() is None:
+                    owner.kill()
+                    owner.wait(timeout=5)
+                owner.stdout.close()
+                owner.stderr.close()
+
+    def test_guard_wait_deadline_does_not_mutate_or_remove_busy_lock(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder) / 'installation'
+            with state_store.operation_guard(root):
+                path = state_store.operation_lock_path(root)
+                before = path.read_bytes()
+                with patch.dict(os.environ, {}, clear=True):
+                    started = time.monotonic()
+                    with self.assertRaises(state_store.OperationBusy):
+                        with state_store.operation_guard(root, wait_seconds=0.02):
+                            self.fail('busy operation was admitted')
+                    self.assertLess(time.monotonic() - started, 1)
+                self.assertEqual(path.read_bytes(), before)
+                self.assertTrue(state_store.operation_running(root))
+
     def test_rsa_failure_never_publishes_partial_key_and_retry_is_private(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

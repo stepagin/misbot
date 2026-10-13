@@ -4,102 +4,108 @@ const { createHash } = require("node:crypto");
 
 const HELP = `Панель администратора Misbot
 
-1. статистика — сообщения и регистрации
-2. состояние — службы и доступность сервера
-3. федерация — подключение серверов и заявки
-4. обслуживание — службы, обновления и копии
-5. ещё — приглашения, сообщения и настройки
+1. \`статистика\` — сообщения и регистрации
+2. \`состояние\` — службы и доступность сервера
+3. \`федерация\` — подключение серверов и заявки
+4. \`обслуживание\` — службы, обновления и копии
+5. \`ещё\` — приглашения, сообщения и настройки
 
-Напишите команду из списка. меню — вернуться сюда`;
+Напишите команду из списка. \`меню\` — вернуться сюда`;
 const MORE = `Дополнительные действия
 
-1. приглашения — открыть реферального бота
-2. рассылка — отправить сообщение пользователям
-3. приветствие — текст для новых пользователей
-4. уведомления — выбрать уведомления
-5. настройки федерации — местная политика и восстановление
+1. \`приглашения\` — открыть реферального бота
+2. \`рассылка\` — отправить сообщение пользователям
+3. \`приветствие\` — текст для новых пользователей
+4. \`уведомления\` — выбрать уведомления
+5. \`настройки федерации\` — местная политика
+6. \`безопасность\` — проверка сеанса и управление доступом
 
-Назад: меню`;
+Назад: \`меню\``;
 const MAINTENANCE = `Обслуживание сервера
 
-1. перезапустить сервер — перезапустить службы
-2. запустить службы / остановить службы
-3. обновления — проверить версию
-4. копии — создать или проверить резервную копию
-5. хранилище — медиа и резервные копии
-6. операции — задачи федерации
-7. задача ID — результат задачи обслуживания
+1. \`перезапустить сервер\` — перезапустить службы
+2. \`запустить службы\` / \`остановить службы\`
+3. \`обновления\` — проверить версию
+4. \`копии\` — создать или проверить резервную копию
+5. \`хранилище\` — медиа и резервные копии
+6. \`операции\` — задачи федерации
+7. \`задача ID\` — результат задачи обслуживания
 
-Изменения требуют подтверждения. Отмена предложения не прерывает запущенную задачу.
-Назад: меню`;
+Памятка: изменения требуют подтверждения. Отмена предложения не прерывает запущенную задачу.
+Назад: \`меню\``;
 const FEDERATION = `Федерация
 
-1. проверить сервер example.org — проверить подключение
-2. пригласить сервер example.org — предложить подключение
-3. заявки — входящие, исходящие и отклонённые
-4. серверы — разрешённые серверы
-5. api — межсерверный API Misbot
+1. \`проверить сервер example.org\` — проверить подключение
+2. \`пригласить сервер example.org\` — предложить подключение
+3. \`заявки\` — входящие, исходящие и отклонённые
+4. \`серверы\` — разрешённые серверы
+5. \`api\` — межсерверный API Misbot
 
-Настройки: настройки федерации
-Назад: меню`;
+Настройки: \`настройки федерации\`
+Назад: \`меню\``;
 const FEDERATION_SETTINGS = `Настройки федерации
 
-1. api включить / api выключить
-2. добавить сервер example.org / удалить сервер example.org — местная политика
-3. операции — результат изменений
-4. восстановить / откатить — незавершённые изменения
+1. \`api включить\` / \`api выключить\`
+2. \`добавить сервер example.org\` / \`удалить сервер example.org\` — местная политика
+3. \`операции\` — результат изменений
 
-Изменения требуют подтверждения. Выключение API сохраняет Matrix-политику.
-Назад: федерация`;
+Памятка: изменения требуют подтверждения. Выключение API сохраняет Matrix-политику.
+Назад: \`федерация\``;
 const REQUESTS = `Действия с заявками
 
-1. заявки входящие / заявки исходящие / заявки отклонённые
-2. подтвердить N / отклонить N — решение по входящей заявке
-3. отменить N — отозвать своё приглашение
-4. повторить N / статус N — продолжить или посмотреть результат
-5. очистить отклонённые — убрать завершённые заявки
+1. \`заявки входящие\` / \`заявки исходящие\` / \`заявки отклонённые\`
+2. \`подтвердить N\` / \`отклонить N\` — решение по входящей заявке
+3. \`отменить N\` — отозвать своё приглашение
+4. \`повторить N\` / \`статус N\` — продолжить или посмотреть результат
+5. \`очистить отклонённые\` — убрать завершённые заявки
 
-N — номер заявки в списке; номер сохраняется после перезапуска.
-Назад: федерация`;
+Памятка: N — номер заявки в списке; номер сохраняется после перезапуска.
+Назад: \`федерация\``;
 const COPIES = `Резервные копии
 
-1. создать копию — создать резервную копию
-2. проверить копию — проверить восстановление в изолированной среде
-3. хранилище — состояние копий
+1. \`создать копию\` — создать резервную копию
+2. \`проверить копию\` — проверить восстановление в изолированной среде
+3. \`хранилище\` — состояние копий
 
-Назад: обслуживание`;
+Назад: \`обслуживание\``;
 
-function noticeContent(body) {
-    if (typeof body !== "string") throw new Error("Invalid notice body");
-    const escaped = body.replace(
-        /[&<>"']/g,
-        (char) =>
-            ({
-                "&": "&amp;",
-                "<": "&lt;",
-                ">": "&gt;",
-                '"': "&quot;",
-                "'": "&#39;"
-            })[char]
-    );
-    // Preserve every visible character and newline in both representations.
-    // Explicit numbering remains text so clients do not renumber filtered lists.
-    const lines = escaped.split("\n");
-    const html = lines
+function noticeContent(source, { literal = false } = {}) {
+    if (typeof source !== "string") throw new Error("Invalid notice body");
+    const escape = (text) =>
+        text.replace(
+            /[&<>"']/g,
+            (char) =>
+                ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]
+        );
+    // Commands are marked explicitly by the author, never inferred from numbering,
+    // current values or words occurring in user-authored announcements.
+    const parts = literal ? [source] : source.split(/(`[^`\n]+`)/g);
+    const body = parts
+        .map((part) =>
+            !literal && part.startsWith("`") && part.endsWith("`") ? part.slice(1, -1) : part
+        )
+        .join("");
+    const formatted = parts
+        .map((part) =>
+            !literal && part.startsWith("`") && part.endsWith("`")
+                ? "<code>" + escape(part.slice(1, -1)) + "</code>"
+                : escape(part)
+        )
+        .join("");
+    const html = formatted
+        .split("\n")
         .map((line, index) => {
             if (index === 0) return "<strong>" + line + "</strong>";
-            if (/^\d+\. /.test(line)) {
-                const dash = line.indexOf(" — ");
-                if (dash > 0) return "<code>" + line.slice(0, dash) + "</code>" + line.slice(dash);
-            }
+            if (!literal && line.startsWith("Памятка:")) return "<em>" + line + "</em>";
             return line;
         })
         .join("<br>");
     return { msgtype: "m.notice", body, format: "org.matrix.custom.html", formatted_body: html };
 }
-async function sendNotice(client, room, body) {
-    return client.sendMessage(room, noticeContent(body));
+async function sendNotice(client, room, body, options) {
+    return client.sendMessage(room, noticeContent(body, options));
 }
+
 function humanDate(value) {
     const date = new Date(value);
     if (!Number.isFinite(date.getTime())) return "дата недоступна";
@@ -135,7 +141,9 @@ function parse(text) {
         "заявки": "requests",
         "операции": "operations",
         "восстановить": "recover",
+        "продолжить изменение федерации": "recover",
         "откатить": "rollback",
+        "откатить изменение федерации": "rollback",
         "api": "api-status",
         "api включить": "api-enable",
         "api выключить": "api-disable",
@@ -189,7 +197,7 @@ function statisticsText(result) {
     return lines.join("\n");
 }
 function versionText(result) {
-    return `Установленная версия: Misbot ${result.installed}\nПоследняя стабильная версия: ${result.latest || "релиз ещё не опубликован"}\n${result.update_available ? "Доступно обновление." : "Более новая стабильная версия не найдена."}\n${result.notes || ""}\n${result.url || ""}\nКоманда: ${result.command}`;
+    return `Установленная версия: Misbot ${result.installed}\nПоследняя стабильная версия: ${result.latest || "релиз ещё не опубликован"}\n${result.update_available ? "Доступно обновление." : "Более новая стабильная версия не найдена."}\n${result.notes || ""}\n${result.url || ""}\nКоманда: \`${result.command}\``;
 }
 
 function stateText(state) {
@@ -218,6 +226,13 @@ function stateText(state) {
     return Object.hasOwn(labels, state) ? `${labels[state]} (${state})` : state;
 }
 
+function shellCommands(text) {
+    return text.replace(
+        /\b(?:sudo )?misbot(?: (?:[A-Za-z0-9_/=-]+(?:\.[A-Za-z0-9_/=-]+)*|'[^'\n]+'|"[^"\n]+"))+/g,
+        (command) => "`" + command + "`"
+    );
+}
+
 function resultText(result) {
     // Render documented safe fields; transport records and private checkpoints stay off chat.
     if (!result || typeof result !== "object" || Array.isArray(result))
@@ -237,6 +252,8 @@ function resultText(result) {
         lines.push(`API Misbot: ${result.enabled ? "включён" : "выключен"}`);
     if (result.operation_id) lines.push(`Задача: ${result.operation_id}`);
     for (const item of result.operations || []) lines.push(`${item.id}: ${stateText(item.state)}`);
+    if (result.operations?.length === 0) lines.push("Задач федерации пока нет.");
+    if (result.recovery_available === false) lines.push("Незавершённых изменений федерации нет.");
     for (const item of result.peers || [])
         lines.push(
             `${item.server || item.server_name}: ${item.state ? stateText(item.state) : item.approved ? "согласовано" : "ожидает решения"}`
@@ -281,7 +298,7 @@ function resultText(result) {
         lines.push("Работа федеративных комнат не проверялась.");
     if (result.note) lines.push(result.note);
     if (result.code || result.safe_error) lines.push(errorText(result.code || result.safe_error));
-    if (result.next_action) lines.push(`Следующее действие: ${result.next_action}`);
+    if (result.next_action) lines.push(`Следующее действие: ${shellCommands(result.next_action)}`);
     return lines.join("\n");
 }
 
@@ -334,7 +351,7 @@ function serverText(result) {
     if (result.recovery_required)
         lines.push("Проверьте сохранённое состояние через SSH перед повтором.");
     if (result.code) lines.push(`Код: ${result.code}`);
-    if (result.next_action) lines.push(`Следующее действие: ${result.next_action}`);
+    if (result.next_action) lines.push(`Следующее действие: ${shellCommands(result.next_action)}`);
     if (
         !result.containers &&
         !result.checks &&
@@ -362,9 +379,11 @@ function requestsText(result, category, number = (_, index) => index + 1) {
         lines.push(`\n${reference}. ${item.server} — ${stateText(item.state)}.`);
         if (item.expires_at) lines.push(`Срок: ${humanDate(item.expires_at * 1000)}`);
         if (item.state === "pending" && item.direction === "incoming")
-            lines.push(`Принять: подтвердить ${reference}\nОтклонить: отклонить ${reference}`);
+            lines.push(
+                `Принять: \`подтвердить ${reference}\`\nОтклонить: \`отклонить ${reference}\``
+            );
         if (item.state === "pending" && item.direction === "outgoing")
-            lines.push(`Отозвать: отменить ${reference}`);
+            lines.push(`Отозвать: \`отменить ${reference}\``);
         if (item.delivery_pending) lines.push("Доставка решения пока не подтверждена.");
     }
     if (items.length > 20) lines.push("Показаны первые 20. Полный список доступен через CLI.");
@@ -411,22 +430,23 @@ function confirmationText(action, argument) {
             "Очистка убирает карточки из местного списка и сохраняет сведения для безопасных повторов."
         );
     lines.push(
-        "Подтверждение: выполнить подтверждаю. Отмена: отмена. Предложение действует 5 минут."
+        "Подтверждение: `выполнить подтверждаю`. Отмена: `отмена`. Предложение действует 5 минут."
     );
     return lines.join("\n");
 }
 
 function errorText(code) {
     const messages = {
-        api_disabled: "API Misbot выключен. Откройте «федерация», чтобы проверить настройки.",
+        api_disabled: "API Misbot выключен. Откройте «\`федерация\`», чтобы проверить настройки.",
         invitation_rate_limit:
             "Новое приглашение можно создать не чаще одного раза в минуту. Повторите позже.",
         peer_already_connected:
-            "Сервер уже добавлен. Заявка больше не требуется; откройте «серверы».",
-        pending_request_exists: "Для этого сервера уже есть актуальная заявка. Откройте «заявки».",
+            "Сервер уже добавлен. Заявка больше не требуется; откройте «\`серверы\`».",
+        pending_request_exists:
+            "Для этого сервера уже есть актуальная заявка. Откройте «\`заявки\`».",
         peer_upgrade_required:
             "Удалённому серверу нужно обновить Misbot для приглашений сроком 30 дней.",
-        request_not_found: "Заявка не найдена. Откройте актуальный список «заявки».",
+        request_not_found: "Заявка не найдена. Откройте актуальный список «\`заявки\`».",
         invalid_transition: "Это действие уже недоступно. Проверьте актуальное состояние заявки.",
         request_in_progress:
             "Настройки уже применяются. Проверьте состояние операции перед следующим действием.",
@@ -448,10 +468,10 @@ function errorText(code) {
             code
         )
     )
-        return "Управляющая служба сейчас недоступна или занята. Ответ не получен. Повторите команду позже; результат ранее принятой задачи можно проверить командой «задача ID».";
+        return "Управляющая служба сейчас недоступна или занята. Ответ не получен. Повторите команду позже; результат ранее принятой задачи можно проверить командой «\`задача ID\`».";
     return typeof code === "string" && Object.hasOwn(messages, code)
         ? messages[code]
-        : "Результат команды не подтверждён. Проверьте состояние сервера и сохранённой задачи. Команды: состояние, задача ID, операции. Для восстановления используйте SSH. Справка: помощь.";
+        : "Результат команды не подтверждён. Проверьте состояние сервера и сохранённой задачи. Команды: `состояние`, `задача ID`, `операции`. Для восстановления используйте SSH. Справка: `помощь`.";
 }
 
 class FederationBot {
@@ -576,11 +596,11 @@ class FederationBot {
             if (error?.code === "admin_unconfirmed") return;
             throw error;
         }
-        const reply = async (body) => {
+        const reply = async (body, options) => {
             await this.authorize(event.sender);
             if (!(await this.privateRoom(room, event.sender)))
                 throw new Error("private_room_required");
-            return sendNotice(this.client, room, body);
+            return sendNotice(this.client, room, body, options);
         };
         const key = "draft:" + room;
         let draft = this.store.getValue(key);
@@ -623,7 +643,7 @@ class FederationBot {
             await reply(
                 resultText(result) +
                     (result.operation_id && draft.action === "panel-server-operation"
-                        ? `\nПроверить: задача ${result.operation_id}`
+                        ? `\nПроверить: \`задача ${result.operation_id}\``
                         : "")
             );
             return;
@@ -639,14 +659,16 @@ class FederationBot {
                 await reply(`${result.message}\nПолучателей: ${result.queued}.`);
                 return;
             }
-            if (text === "рассылка") return reply("Пришлите текст нового сообщения или «отмена».");
+            if (text === "рассылка")
+                return reply("Пришлите текст нового сообщения или «\`отмена\`».");
             draft = { kind: "broadcast", body: original, id: event.event_id, created: Date.now() };
             this.store.setValue(key, draft);
             await reply(
-                `Сообщение от администратора сервера ${this.config.server_name}:\n\n${original}`
+                `Сообщение от администратора сервера ${this.config.server_name}:\n\n${original}`,
+                { literal: true }
             );
             await reply(
-                "Черновик готов. Подтверждение рассылки: «отправить» или «отмена». Чтобы изменить текст, отправьте новый вариант в этот чат."
+                "Черновик готов. Подтверждение рассылки: «\`отправить\`» или «\`отмена\`». Чтобы изменить текст, отправьте новый вариант в этот чат."
             );
             return;
         }
@@ -661,7 +683,7 @@ class FederationBot {
         if (text === "обновить подтверждаю") {
             if (draft?.kind !== "update" || draft.actor !== event.sender || draft.room !== room) {
                 await reply(
-                    "Действующего предложения обновления нет. Отправьте «обновления» заново."
+                    "Действующего предложения обновления нет. Отправьте «\`обновления\`» заново."
                 );
                 return;
             }
@@ -691,21 +713,38 @@ class FederationBot {
             await reply(COPIES);
             return;
         }
+        if (text === "безопасность") {
+            await reply(
+                "Безопасность аккаунта\n\n" +
+                    "Если около сообщения от matrix-admin указано непроверенное устройство, откройте в Matrix-клиенте настройки безопасности этого аккаунта и проверьте текущий сеанс с другого проверенного устройства или ключом восстановления.\n\n" +
+                    "Памятка: пароль сервера не проверяет сеанс шифрования. Сервер не может подтвердить личное устройство вместо владельца. Сохраните ключ восстановления; не сбрасывайте шифрование и не удаляйте устройства ради предупреждения.\n\n" +
+                    "В SSH откройте `sudo misbot ui`.\nАдминистраторы и пароль matrix-admin: «Администраторы и доступ».\nПароли остальных пользователей: «Пользователи и приглашения».\nНазад: `ещё`"
+            );
+            return;
+        }
         if (text === "статистика") {
             await reply(
-                "Статистика сервера\n\nстатистика день / неделя / месяц / всего\n\nНазад: меню"
+                "Статистика сервера\n\n`статистика день` / `статистика неделя` / `статистика месяц` / `статистика всего`\n\nНазад: `меню`"
             );
             return;
         }
         if (text === "приглашения") {
             const result = await this.call("panel-referral", null, event);
             await reply(
-                `Для приглашения пользователя откройте реферального бота и отправьте «пригласить».\n${result.url}\n\nНазад: ещё`
+                `Для приглашения пользователя откройте реферального бота и отправьте «\`пригласить\`».\n${result.url}\n\nНазад: \`ещё\``
             );
             return;
         }
         if (text === "настройки федерации") {
-            await reply(FEDERATION_SETTINGS);
+            const result = await this.call("operations", null, event);
+            await reply(
+                FEDERATION_SETTINGS +
+                    (result.recovery_available
+                        ? "\n\nНезавершённое изменение федерации:\n" +
+                          "1. `продолжить изменение федерации` — завершить применение\n" +
+                          "2. `откатить изменение федерации` — вернуть прежнюю политику"
+                        : "")
+            );
             return;
         }
         if (text === "федерация") {
@@ -808,7 +847,7 @@ class FederationBot {
                     created: Date.now()
                 });
                 await reply(
-                    "Обновление доступно. Для запуска напишите «обновить подтверждаю». Отмена: «отмена». Перед применением проверим свободное место. Сервер временно остановится. Результат сохранится при перезапуске."
+                    "Обновление доступно. Для запуска напишите «\`обновить подтверждаю\`». Отмена: «\`отмена\`». Перед применением проверим свободное место. Сервер временно остановится. Результат сохранится при перезапуске."
                 );
             }
             return;
@@ -820,14 +859,14 @@ class FederationBot {
                 created: Date.now()
             });
             await reply(
-                "Пришлите текст рассылки. Затем покажу черновик для подтверждения. Отмена: «отмена»."
+                "Пришлите текст рассылки. Затем покажу черновик для подтверждения. Отмена: «\`отмена\`»."
             );
             return;
         }
         if (text === "приветствие") {
             const result = await this.call("panel-welcome", null, event);
-            await reply(result.text);
-            await reply("Чтобы изменить текст, отправьте «изменить приветствие».");
+            await reply(result.text, { literal: true });
+            await reply("Чтобы изменить текст, отправьте «\`изменить приветствие\`».");
             return;
         }
         if (text === "изменить приветствие") {
@@ -835,7 +874,7 @@ class FederationBot {
             await reply(
                 "Пришлите новое приветствие. Подстановки: {server_name} — название сервера, " +
                     "{domain} — Matrix-домен, {referral_url} — ссылка на реферального бота, " +
-                    "{administrator_url} — ссылка на администратора. Отмена: «отмена»."
+                    "{administrator_url} — ссылка на администратора. Отмена: «\`отмена\`»."
             );
             return;
         }
@@ -843,7 +882,7 @@ class FederationBot {
             const result = await this.call("panel-status", null, event),
                 p = result.preferences;
             await reply(
-                `Обновления: ${p.updates ? "включены" : "выключены"}\nРегистрации: ${p.registrations ? "включены" : "выключены"}\nЕжемесячная статистика: ${p.statistics ? "включена" : "выключена"}\nНастройка: уведомления обновления / регистрации / статистика включить / выключить.`
+                `Обновления: ${p.updates ? "включены" : "выключены"}\nРегистрации: ${p.registrations ? "включены" : "выключены"}\nЕжемесячная статистика: ${p.statistics ? "включена" : "выключена"}\nНастройка:\n\`уведомления обновления ${p.updates ? "выключить" : "включить"}\`\n\`уведомления регистрации ${p.registrations ? "выключить" : "включить"}\`\n\`уведомления статистика ${p.statistics ? "выключить" : "включить"}\``
             );
             return;
         }
@@ -886,7 +925,9 @@ class FederationBot {
         }
         const request = this.resolveRequest(original);
         if (request?.unknownNumber) {
-            await reply("Номер заявки не найден. Откройте «заявки» и выберите номер из списка.");
+            await reply(
+                "Номер заявки не найден. Откройте «\`заявки\`» и выберите номер из списка."
+            );
             return;
         }
         if (!request) {
@@ -895,6 +936,15 @@ class FederationBot {
         }
         if (WRITES.has(request.action)) {
             clearProposal();
+            if (["recover", "rollback"].includes(request.action)) {
+                const result = await this.call("operations", null, event);
+                if (result.recovery_available !== true) {
+                    await reply(
+                        "Незавершённых изменений федерации нет. Действие не требуется.\nНазад: `федерация`"
+                    );
+                    return;
+                }
+            }
             if (request.action === "invite") {
                 const preview = await this.call("check", request.argument, {
                     ...event,
@@ -942,7 +992,7 @@ class FederationBot {
         });
         await reply(
             request.action === "api-status"
-                ? `API Misbot: ${result.enabled ? "включён" : "выключен"}. Изменить: api включить / api выключить.`
+                ? `API Misbot: ${result.enabled ? "включён" : "выключен"}. Изменить: \`api включить\` / \`api выключить\`.`
                 : resultText(result)
         );
     }
@@ -981,10 +1031,10 @@ class FederationBot {
                 const number = this.requestNumber(item.id);
                 const actions =
                     item.state === "pending" && item.direction !== "outgoing"
-                        ? `\n\nПринять: подтвердить ${number}\nОтклонить: отклонить ${number}`
+                        ? `\n\nПринять: \`подтвердить ${number}\`\nОтклонить: \`отклонить ${number}\``
                         : ["rejected", "expired"].includes(item.state)
-                          ? "\n\nПосмотреть: заявки отклонённые"
-                          : `\n\nПосмотреть: статус ${number}`;
+                          ? "\n\nПосмотреть: `заявки отклонённые`"
+                          : `\n\nПосмотреть: \`статус ${number}\``;
                 await this.authorize(admin);
                 if (!(await this.privateRoom(room))) break;
                 await sendNotice(
@@ -1022,6 +1072,8 @@ module.exports = {
     MORE,
     MAINTENANCE,
     FEDERATION,
+    FEDERATION_SETTINGS,
+    COPIES,
     REQUESTS,
     statisticsText,
     stateText,

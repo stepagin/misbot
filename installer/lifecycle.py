@@ -1300,13 +1300,40 @@ def backup_recover():
 
 def check():
     dns_check()
+    expires = time.monotonic() + 120
+    while True:
+        try:
+            remaining = expires - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError('Public checks timed out; retry after services finish starting')
+            with startup_process.deadline(remaining):
+                check_services(expires)
+            break
+        except ReadinessPending:
+            remaining = expires - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError('Public checks failed; see the check records above') from None
+            emit('waiting_for_service', service='HTTPS', timeout_seconds=round(remaining))
+            time.sleep(min(2, remaining))
+    referral.validate_saved(ROOT, state())
+    __import__('federation_runtime').validate(ROOT, state())
+    emit('public_checks', passed=True)
+
+
+class ReadinessPending(RuntimeError):
+    """Only classified boot-time availability failures may be polled again."""
+
+
+def check_services(expires):
+    if time.monotonic() >= expires:
+        raise RuntimeError('Public checks timed out; retry after services finish starting')
     result = startup_process.run(
         ['python3', str(ROOT / 'verify.py'), '--directory', str(ROOT)],
         emit=emit,
-        timeout=600,
+        timeout=max(1, expires - time.monotonic()),
     )
-    for line in result.stdout.splitlines():
-        record = json.loads(line)
+    records = [json.loads(line) for line in result.stdout.splitlines()]
+    for record in records:
         emit(
             record['check'],
             **{
@@ -1316,7 +1343,11 @@ def check():
                 in ('status', 'expected', 'passed', 'error_type', 'failure_code', 'tls', 'failures')
             },
         )
+    if time.monotonic() >= expires:
+        raise RuntimeError('Public checks timed out; retry after services finish starting')
     rows = service_rows()
+    if time.monotonic() >= expires:
+        raise RuntimeError('Public checks timed out; retry after services finish starting')
     for row in rows:
         emit('service', name=row['Service'], state=row['State'], health=row.get('Health', ''))
     required = expected_services()
@@ -1325,13 +1356,33 @@ def check():
     )
     missing = sorted(required - {row['Service'] for row in rows})
     emit('service_inventory', passed=services_ready and not missing, missing=missing)
+    failed = [record for record in records if record.get('passed') is False]
+    transient_public = (
+        not result.returncode
+        or bool(failed)
+        and all(
+            record.get('failure_code') in ('connection_refused', 'timeout', 'tls_connection')
+            or record.get('failure_code') == 'http_status'
+            and record.get('status') in (502, 503, 504)
+            for record in failed
+        )
+    )
+    starting = {row['Service'] for row in rows} == required and all(
+        row['State'] in ('running', 'restarting')
+        and row.get('Health', '') in ('', 'starting', 'healthy')
+        for row in rows
+    )
+    if (
+        (result.returncode or not services_ready)
+        and transient_public
+        and starting
+        and time.monotonic() < expires
+    ):
+        raise ReadinessPending()
     if result.returncode:
         raise RuntimeError('Public checks failed; see the check records above')
     if missing or not services_ready:
         raise RuntimeError('Not all expected containers are ready')
-    referral.validate_saved(ROOT, state())
-    __import__('federation_runtime').validate(ROOT, state())
-    emit('public_checks', passed=True)
 
 
 def database_inventory(database, application=None):

@@ -27,6 +27,50 @@ import state_store
 
 
 class ServiceTests(unittest.TestCase):
+    def test_recovery_without_checkpoint_does_not_create_a_job(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            state_store.write_json(root / 'installation.json', {'domain': 'fixture.example'})
+            federation.setup(root, {'domain': 'fixture.example'})
+            backend = federation.Backend(root, admission=False)
+            before = backend.path.read_bytes()
+            with patch.object(backend, 'ready'), patch.object(backend, 'authorize'):
+                for action in ('recover', 'rollback'):
+                    result = federation_service.queue_job(
+                        backend,
+                        {
+                            'action': action,
+                            'actor': '@owner:fixture.example',
+                            'event_id': '$' + action,
+                        },
+                    )
+                    self.assertEqual(result, {'status': 'unchanged', 'recovery_available': False})
+                    self.assertEqual(backend.path.read_bytes(), before)
+                self.assertFalse(backend.operate('operations')['recovery_available'])
+                state_store.write_json(root / 'federation-transition.json', {'format': 1})
+                self.assertTrue(backend.operate('operations')['recovery_available'])
+                result = federation_service.queue_job(
+                    backend,
+                    {
+                        'action': 'recover',
+                        'actor': '@owner:fixture.example',
+                        'event_id': '$pending',
+                    },
+                )
+                self.assertEqual(result['status'], 'queued')
+                (root / 'federation-transition.json').unlink()
+                retry = federation_service.queue_job(
+                    backend,
+                    {
+                        'action': 'recover',
+                        'actor': '@owner:fixture.example',
+                        'event_id': '$pending',
+                    },
+                )
+                self.assertEqual(retry['operation_id'], result['operation_id'])
+            self.assertNotEqual(backend.path.read_bytes(), before)
+            self.assertEqual(len(backend.load()['jobs']), 1)
+
     def test_running_job_recovery_is_idempotent_and_preserves_queued_work_and_identity(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -331,7 +375,7 @@ class ServiceTests(unittest.TestCase):
                     'operations',
                     '@matrix-admin:fixture.example',
                     10003,
-                    {'ok': True, 'result': {'operations': []}},
+                    {'ok': True, 'result': {'recovery_available': False, 'operations': []}},
                 ),
                 (
                     'operations',

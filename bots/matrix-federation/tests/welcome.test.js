@@ -297,3 +297,19 @@ test("ambiguous room creation recovers a pending invitation without a duplicate 
     assert.equal(x.store.getValue("guide-room:" + x.item.recipient), "!dm");
     assert.equal(x.calls.length, 0);
 });
+
+test("outbox preserves user text literally and formats authored administrator commands", async () => {
+    for (const via of ["welcome", "admin"]) {
+        const x = setup();
+        let payload;
+        x.client.crypto.encryptRoomEvent = async (room, type, content) => {
+            payload = content;
+            return { ciphertext: content.body, session_id: "session" };
+        };
+        const item = { ...x.item, via, body: "Сообщение\n1. `обновить` — описание <&>" };
+        await sendOnce(x.client, x.store, "!dm", item);
+        assert.equal(payload.body, via === "welcome" ? item.body : item.body.replaceAll("`", ""));
+        assert.equal(payload.formatted_body.includes("<code>обновить</code>"), via === "admin");
+        assert.ok(payload.formatted_body.includes("&lt;&amp;&gt;"));
+    }
+});

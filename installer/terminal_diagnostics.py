@@ -210,7 +210,10 @@ def parse_checks(output: str) -> list[CheckResult]:
                             item['passed'],
                         )
                     )
-    return results
+    # Readiness may report several attempts. Keep their full history in the
+    # lifecycle log, but show one current result per check or named service.
+    # Replacing dict values preserves the original, stable presentation order.
+    return list({result.key: result for result in results}.values())
 
 
 def check_summary(results: Sequence[CheckResult], code: int) -> str:

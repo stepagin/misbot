@@ -133,6 +133,22 @@ class HomepageTests(unittest.TestCase):
             ):
                 homepage.probe(model, api_enabled=enabled)
 
+    def test_temporary_discovery_failure_keeps_status_for_readiness_wait(self):
+        model = config.load(self.root, True)
+        for status in (502, 503, 504):
+            with (
+                self.subTest(status=status),
+                patch.object(
+                    homepage.urllib.request,
+                    'build_opener',
+                    return_value=self.http_fixture((status, {'code': 'PRIVATE_MARKER'})),
+                ),
+                self.assertRaises(homepage.ServiceUnavailable) as caught,
+            ):
+                homepage.probe(model)
+            self.assertEqual(caught.exception.status, status)
+            self.assertNotIn('PRIVATE_MARKER', str(caught.exception))
+
     def test_setup_link_follows_release_metadata_and_escapes_query(self):
         source = self.root / 'source'
         (source / 'site').mkdir(parents=True)

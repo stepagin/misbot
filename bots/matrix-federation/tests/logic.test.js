@@ -129,7 +129,7 @@ test("unavailable authorization is visible to the safe adapter and a later comma
     unavailable = false;
     await x.bot.message("!private", event);
     assert.equal(x.sent.length, 1);
-    assert.equal(x.sent[0], HELP);
+    assert.equal(x.sent[0], noticeContent(HELP).body);
     x.revoke();
     await x.bot.message("!private", { ...event, event_id: "$after-revocation" });
     assert.equal(x.sent.length, 1);
@@ -289,7 +289,7 @@ test("removed room commands never dispatch and are absent from help", async () =
             const x = setup();
             await x.bot.message("!room", { ...x.event, content: { msgtype: "m.text", body } });
             assert.equal(x.calls.filter((c) => c.action !== "authorize").length, 0, body);
-            assert.deepEqual(x.sent, [HELP], body);
+            assert.deepEqual(x.sent, [noticeContent(HELP).body], body);
         }
     }
     assert.doesNotMatch(
@@ -608,6 +608,11 @@ test("invalid formatter parameters fail without including their values", () => {
 test("notifications keep commands, distinct states and deduplication after restart", async () => {
     const x = setup(),
         id = "MB-" + "a".repeat(32);
+    const payloads = [];
+    x.client.sendMessage = async (room, content) => {
+        x.sent.push(content.body);
+        payloads.push(content);
+    };
     const snapshot = {
         requests: [{ id, server: "peer.example.org", state: "pending" }],
         operations: [
@@ -630,6 +635,8 @@ test("notifications keep commands, distinct states and deduplication after resta
     assert.match(x.sent[0], /ожидает решения \(pending\)/);
     assert.ok(x.sent[0].includes("подтвердить 1"));
     assert.ok(x.sent[0].includes("отклонить 1"));
+    assert.match(payloads[0].formatted_body, /<code>подтвердить 1<\/code>/);
+    assert.match(payloads[0].formatted_body, /<code>отклонить 1<\/code>/);
     assert.match(x.sent[1], /прервано \(interrupted\)/);
     assert.match(x.sent[1], /sudo misbot federation recover/);
     assert.doesNotMatch(x.sent[1], /FICTIONAL_SECRET/);
@@ -642,6 +649,10 @@ test("notifications keep commands, distinct states and deduplication after resta
     assert.match(x.sent[2], /политика применена на обоих серверах \(connected\)/);
     assert.doesNotMatch(x.sent[2], /комнаты проверены/);
     assert.doesNotMatch(x.sent[2], /подтвердить |отклонить /);
+    assert.match(payloads[2].formatted_body, /<code>статус 1<\/code>/);
+    snapshot.requests[0].state = "rejected";
+    await restart.notifications();
+    assert.match(payloads[3].formatted_body, /<code>заявки отклонённые<\/code>/);
 });
 
 test("grouped menus keep destructive actions inside maintenance and invitations inside more", async () => {
@@ -656,7 +667,7 @@ test("grouped menus keep destructive actions inside maintenance and invitations 
             event_id: "$" + body,
             content: { msgtype: "m.text", body }
         });
-        assert.equal(x.sent.at(-1), expected);
+        assert.equal(x.sent.at(-1), noticeContent(expected).body);
     }
     assert.match(HELP, /статистика[\s\S]*состояние[\s\S]*федерация/);
     assert.doesNotMatch(HELP, /приглашения —|создать копию|остановить службы/);
@@ -969,11 +980,11 @@ test("several configured admins use separate private rooms; unrelated or revoked
 
 test("notice HTML escapes inserted text and preserves all plain text commands and line breaks", () => {
     const body =
-        "Результат <&>\"'\n\n1. команда example.org — описание\nhttps://example.org/?a=1&b=2";
+        "Результат <&>\"'\n\n1. `команда example.org` — описание\nhttps://example.org/?a=1&b=2";
     const content = noticeContent(body);
-    assert.equal(content.body, body);
+    assert.equal(content.body, body.replaceAll("`", ""));
     assert.equal(content.format, "org.matrix.custom.html");
-    assert.ok(content.formatted_body.includes("<code>1. команда example.org</code>"));
+    assert.ok(content.formatted_body.includes("1. <code>команда example.org</code>"));
     const restored = content.formatted_body
         .replace(/<br>/g, "\n")
         .replace(/<[^>]+>/g, "")
@@ -982,7 +993,7 @@ test("notice HTML escapes inserted text and preserves all plain text commands an
         .replace(/&lt;/g, "<")
         .replace(/&gt;/g, ">")
         .replace(/&amp;/g, "&");
-    assert.equal(restored, body);
+    assert.equal(restored, content.body);
 });
 
 test("state and old check aliases show the same service and availability checks", async () => {
@@ -1045,4 +1056,109 @@ test("actual backend cleanup and API changes keep their human result and federat
         }),
         /подключён/
     );
+});
+
+test("recovery is offered only for a pending federation change, including old aliases", async () => {
+    for (const pending of [false, true]) {
+        for (const command of [
+            "восстановить",
+            "откатить",
+            "продолжить изменение федерации",
+            "откатить изменение федерации"
+        ]) {
+            const x = setup(),
+                control = x.bot.control;
+            x.bot.control = async (request) =>
+                request.action === "operations"
+                    ? { recovery_available: pending, operations: [] }
+                    : control(request);
+            const send = (body, id) =>
+                x.bot.message("!private", {
+                    ...x.event,
+                    event_id: id,
+                    content: { msgtype: "m.text", body }
+                });
+            await send("настройки федерации", "$settings");
+            assert.equal(x.sent.at(-1).includes("продолжить изменение федерации"), pending);
+            await send(command, "$request");
+            await send("выполнить подтверждаю", "$confirm");
+            assert.equal(
+                x.calls.filter((call) => ["recover", "rollback"].includes(call.action)).length,
+                pending ? 1 : 0
+            );
+            if (!pending) assert.ok(x.sent.some((body) => body.includes("Действие не требуется")));
+        }
+    }
+});
+
+test("all advertised menu commands have an actual route and a visible result", async () => {
+    // Follow the real router: plain unrecognised commands fall back to HELP.
+    const menus = [
+        HELP,
+        MORE,
+        MAINTENANCE,
+        FEDERATION,
+        require("../logic").FEDERATION_SETTINGS,
+        require("../logic").COPIES,
+        require("../logic").REQUESTS
+    ];
+    for (const menu of menus) {
+        for (const match of menu.matchAll(/`([^`]+)`/g)) {
+            const command = match[1].replace(/\bN\b/g, "1").replace(/\bID\b/g, "SO-fixture");
+            const x = setup(),
+                control = x.bot.control;
+            x.bot.control = async (request) => {
+                if (request.action === "panel-status") return { preferences: {} };
+                if (request.action === "panel-version")
+                    return { installed: "1.2.0", update_available: false, command: "обновления" };
+                if (request.action === "panel-welcome") return { text: "Ваше приветствие" };
+                return control(request);
+            };
+            await x.bot.message("!private", {
+                ...x.event,
+                content: { msgtype: "m.text", body: command }
+            });
+            assert.ok(x.sent.length, command);
+            if (!["меню"].includes(command))
+                assert.notEqual(x.sent.at(-1), noticeContent(HELP).body, command);
+        }
+    }
+});
+
+test("commands, current data and permanent notes have separate formatting", () => {
+    const content = noticeContent(
+        "Сейчас\n1. example.org — доступен\n1. `api включить` / `api выключить`\nПамятка: решение требует подтверждения."
+    );
+    assert.match(content.formatted_body, /1\. example.org — доступен/);
+    assert.match(
+        content.formatted_body,
+        /1\. <code>api включить<\/code> \/ <code>api выключить<\/code>/
+    );
+    assert.match(content.formatted_body, /<em>Памятка:/);
+    assert.doesNotMatch(content.formatted_body, /<code>1\./);
+    const literal = noticeContent("Ваш `текст` <&>\nПамятка: пример", { literal: true });
+    assert.equal(literal.body, "Ваш `текст` <&>\nПамятка: пример");
+    assert.doesNotMatch(literal.formatted_body, /<code>/);
+});
+
+test("backend recovery command keeps a quoted directory and excludes sentence punctuation", () => {
+    const content = noticeContent(
+        resultText({
+            next_action: "Откройте sudo misbot --directory '/opt/matrix stack' federation recover."
+        })
+    );
+    assert.match(
+        content.formatted_body,
+        /<code>sudo misbot --directory &#39;\/opt\/matrix stack&#39; federation recover<\/code>\./
+    );
+});
+
+test("security guidance names the actual separate SSH sections", async () => {
+    const x = setup();
+    await x.bot.message("!private", {
+        ...x.event,
+        content: { msgtype: "m.text", body: "безопасность" }
+    });
+    assert.match(x.sent[0], /Администраторы и пароль matrix-admin: «Администраторы и доступ»/);
+    assert.match(x.sent[0], /Пароли остальных пользователей: «Пользователи и приглашения»/);
 });
