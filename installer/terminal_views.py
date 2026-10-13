@@ -296,15 +296,15 @@ class TerminalView:
     def details(self, rows, *, measure=False):
         rows = list(rows)
         if self.compact:
+            messages = [
+                (literal(label) + ': ' if label else '') + literal(value) for label, value in rows
+            ]
             if measure:
                 if self.console is None:
                     return len(rows)
-                return sum(
-                    self.lines(Text(literal(label) + ': ' + literal(value)))
-                    for label, value in rows
-                )
-            for label, value in rows:
-                self.message(literal(label) + ': ' + literal(value))
+                return sum(self.lines(Text(message)) for message in messages)
+            for message in messages:
+                self.message(message)
             return
         table = Table.grid(padding=(0, 2), expand=True)
         label_width = max((Text(literal(label)).cell_len for label, _ in rows), default=1)
