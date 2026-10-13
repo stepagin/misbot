@@ -362,7 +362,11 @@ JSON предназначен для будущего UI; UI не должен �
 
 `misbot admin bot show`; до создания `misbot admin bot set --tag admin-panel`.
 Существующий тег неизменяем. Root может выбрать владельца через `--administrator`
-и затем `misbot start` применяет конфигурацию. [Панель](admin-panel.md).
+и затем `misbot start` применяет конфигурацию. Для зарегистрированных личных аккаунтов:
+`misbot admin access list`, `misbot admin access add --mxid @personal:example.org`,
+`misbot admin access remove --mxid @personal:example.org`; прерванное изменение —
+`misbot admin access recover`. Добавление даёт права MAS admin и доступ к панели,
+сохраняя первоначального администратора. [Панель](admin-panel.md).
 `misbot update check` сравнивает версии; `misbot update latest` скачивает готовые
 release assets, проверяет checksum, manifest, версию и диск и запускает update backend.
 `misbot remove --backup-config PATH` добавляет известный профиль внешних копий

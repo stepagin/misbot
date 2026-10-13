@@ -73,7 +73,8 @@ function client() {
                     ...(keyset
                         ? {
                               master_keys: { [user]: keyset.master_key },
-                              self_signing_keys: { [user]: keyset.self_signing_key }
+                              self_signing_keys: { [user]: keyset.self_signing_key },
+                              user_signing_keys: { [user]: keyset.user_signing_key }
                           }
                         : {})
                 };
@@ -93,6 +94,7 @@ function client() {
     return {
         object,
         count: () => uploaded,
+        remote: () => keyset,
         setRemote: (v) => {
             keyset = v;
         }
@@ -128,6 +130,31 @@ test("bootstrap preserves unknown remote identities instead of replacing keys", 
         c.setRemote({ master_key: crossKey(newKey(), "master", "@bot:misbot.ru") });
         await assert.rejects(ensureCrossSigning(c.object, file), /refusing replacement/);
         assert.equal(c.count(), 1);
+    } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test("interrupted child-key publication reuses saved identity and refuses foreign child keys", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "referral-signing-test-"));
+    try {
+        const file = path.join(dir, "keys.json"),
+            c = client();
+        await ensureCrossSigning(c.object, file);
+        const saved = fs.readFileSync(file, "utf8"),
+            master = c.remote().master_key;
+        c.setRemote({ master_key: master });
+        await ensureCrossSigning(c.object, file);
+        assert.equal(c.count(), 2);
+        assert.equal(fs.readFileSync(file, "utf8"), saved);
+        assert.equal(Object.values(c.remote().master_key.keys)[0], JSON.parse(saved).master.public);
+        c.setRemote({
+            ...c.remote(),
+            self_signing_key: crossKey(newKey(), "self_signing", "@bot:misbot.ru")
+        });
+        await assert.rejects(ensureCrossSigning(c.object, file), /child identity differs/);
+        assert.equal(c.count(), 2);
+        assert.equal(fs.readFileSync(file, "utf8"), saved);
     } finally {
         fs.rmSync(dir, { recursive: true, force: true });
     }

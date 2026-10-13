@@ -30,6 +30,7 @@ function installation(directory, options = {}) {
     const keys = signing.exports,
         clients = new Map(),
         rooms = new Map(),
+        createdRooms = new Map(),
         logs = [],
         notices = [],
         requests = [],
@@ -84,8 +85,8 @@ function installation(directory, options = {}) {
         emit(name, ...args) {
             this.handlers.get(name)?.(...args);
         }
-        async getRoomState() {
-            return [this.user, "@matrix-admin:example.org"]
+        async getRoomState(room) {
+            return [this.user, createdRooms.get(room) || "@matrix-admin:example.org"]
                 .map((state_key) => ({
                     type: "m.room.member",
                     state_key,
@@ -96,21 +97,35 @@ function installation(directory, options = {}) {
                     content: { algorithm: "m.megolm.v1.aes-sha2" }
                 });
         }
-        async sendNotice(room, body) {
-            notices.push({ room, body });
+        async sendMessage(room, content) {
+            assert.ok(this.keyset, "No message before cross-signing publication");
+            assert.equal(content.format, "org.matrix.custom.html");
+            notices.push({ room, body: content.body, html: content.formatted_body });
         }
         async doSync() {
             return {};
         }
         async start() {
+            if (options.commandDuringSync && this.user.startsWith("@admin-panel:"))
+                this.emit("room.message", "!private", {
+                    event_id: "$during-sync",
+                    sender: "@matrix-admin:example.org",
+                    content: { msgtype: "m.text", body: "меню" }
+                });
             await this.doSync();
         }
         async getJoinedRooms() {
-            return [];
+            return this.user.startsWith("@admin-panel:") ? [...createdRooms.keys()] : [];
         }
-        async createRoom() {
-            created++;
-            return "!private:example.org";
+        async createRoom(body) {
+            assert.equal(body.invite.length, 1, "Each admin receives a separate private room");
+            const room = "!private-" + ++created + ":example.org";
+            createdRooms.set(room, body.invite[0]);
+            if (options.lostCreateResponse) {
+                options.lostCreateResponse = false;
+                throw new Error("ambiguous create response");
+            }
+            return room;
         }
         async doRequest(method, url, query, body) {
             const user = this.user,
@@ -121,7 +136,8 @@ function installation(directory, options = {}) {
                     ...(this.keyset
                         ? {
                               master_keys: { [user]: this.keyset.master_key },
-                              self_signing_keys: { [user]: this.keyset.self_signing_key }
+                              self_signing_keys: { [user]: this.keyset.self_signing_key },
+                              user_signing_keys: { [user]: this.keyset.user_signing_key }
                           }
                         : {})
                 };
@@ -159,7 +175,10 @@ function installation(directory, options = {}) {
                 server_name: "example.org",
                 homeserver_url: "http://synapse:8008",
                 user_id: "@" + name + ":example.org",
-                access_token: name
+                access_token: name,
+                ...(name === "admin-panel" && options.administrators
+                    ? { administrator_mxids: options.administrators }
+                    : {})
             })
         );
     }
@@ -226,7 +245,7 @@ function installation(directory, options = {}) {
             "./welcome": {
                 WelcomeBot: class {},
                 DeliveryQueue: class {},
-                privateRoom: async () => true
+                privateRoom: require("../welcome").privateRoom
             }
         };
         vm.runInNewContext(fs.readFileSync(path.join(__dirname, "../main.js"), "utf8"), {
@@ -480,3 +499,48 @@ test(
         }
     }
 );
+
+test("messages received during initial sync wait for device self signing", async () => {
+    const folder = fs.mkdtempSync(path.join(os.tmpdir(), "misbot-early-message-"));
+    try {
+        const fixture = installation(folder, {
+            commandDuringSync: true,
+            response: () => ({ ok: true, result: { authorized: true } })
+        });
+        await fixture.boot();
+        await fixture.idle();
+        assert.equal(fixture.notices.length, 1);
+        assert.match(fixture.notices[0].body, /Панель администратора Misbot/);
+        assert.equal(fixture.logs.length, 0);
+    } finally {
+        fs.rmSync(folder, { recursive: true, force: true });
+    }
+});
+
+test("several admins receive separate encrypted rooms and restart creates no duplicates", async () => {
+    const folder = fs.mkdtempSync(path.join(os.tmpdir(), "misbot-multiple-admins-"));
+    try {
+        const fixture = installation(folder, {
+            administrators: ["@matrix-admin:example.org", "@personal:example.org"]
+        });
+        assert.equal((await fixture.boot()).code, 0);
+        assert.equal(fixture.counts().created, 2);
+        assert.equal((await fixture.boot()).code, 0);
+        assert.equal(fixture.counts().created, 2);
+    } finally {
+        fs.rmSync(folder, { recursive: true, force: true });
+    }
+});
+
+test("a lost admin room creation reply is discovered after restart without a second invitation", async () => {
+    const folder = fs.mkdtempSync(path.join(os.tmpdir(), "misbot-admin-room-retry-"));
+    try {
+        const fixture = installation(folder, { lostCreateResponse: true });
+        assert.equal((await fixture.boot()).code, 1);
+        assert.equal(fixture.counts().created, 1);
+        assert.equal((await fixture.boot()).code, 0);
+        assert.equal(fixture.counts().created, 1);
+    } finally {
+        fs.rmSync(folder, { recursive: true, force: true });
+    }
+});

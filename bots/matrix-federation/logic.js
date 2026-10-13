@@ -4,68 +4,116 @@ const { createHash } = require("node:crypto");
 
 const HELP = `Панель администратора Misbot
 
-статистика — выбрать период
-состояние — службы и ресурсы сервера
-проверить — проверить работоспособность
-федерация — серверы, заявки и API
+1. статистика — сообщения и регистрации
+2. состояние — службы и доступность сервера
+3. федерация — подключение серверов и заявки
+4. обслуживание — службы, обновления и копии
+5. ещё — приглашения, сообщения и настройки
 
-обслуживание — перезапуск, обновления и резервные копии
-ещё — приглашения, сообщения и настройки
-меню — вернуться к этому экрану`;
+Напишите команду из списка. меню — вернуться сюда`;
 const MORE = `Дополнительные действия
 
-приглашения — открыть реферального бота
-рассылка — сообщение пользователям через серверного помощника
-приветствие — текст для новых пользователей
-уведомления — настройки уведомлений
-настройки федерации — ручная политика и восстановление
+1. приглашения — открыть реферального бота
+2. рассылка — отправить сообщение пользователям
+3. приветствие — текст для новых пользователей
+4. уведомления — выбрать уведомления
+5. настройки федерации — местная политика и восстановление
 
 Назад: меню`;
 const MAINTENANCE = `Обслуживание сервера
 
-перезапустить сервер — перезапуск служб
-запустить службы / остановить службы
-обновления — версия и предложение обновления
-копии — создание и проверка резервных копий
-хранилище — состояние медиа и копий
-операции — состояние задач федерации
-задача ID — состояние задачи обслуживания
+1. перезапустить сервер — перезапустить службы
+2. запустить службы / остановить службы
+3. обновления — проверить версию
+4. копии — создать или проверить резервную копию
+5. хранилище — медиа и резервные копии
+6. операции — задачи федерации
+7. задача ID — результат задачи обслуживания
 
 Изменения требуют подтверждения. Отмена предложения не прерывает запущенную задачу.
 Назад: меню`;
-const FEDERATION = `Федерация: взаимное подключение серверов
+const FEDERATION = `Федерация
 
-проверить сервер example.org
-пригласить сервер example.org
-заявки — входящие, исходящие и отклонённые
-серверы — разрешённые серверы
-api — состояние межсерверного API Misbot
+1. проверить сервер example.org — проверить подключение
+2. пригласить сервер example.org — предложить подключение
+3. заявки — входящие, исходящие и отклонённые
+4. серверы — разрешённые серверы
+5. api — межсерверный API Misbot
 
 Настройки: настройки федерации
 Назад: меню`;
 const FEDERATION_SETTINGS = `Настройки федерации
 
-api включить / api выключить
-добавить сервер example.org / удалить сервер example.org — местная политика
-операции / восстановить / откатить
+1. api включить / api выключить
+2. добавить сервер example.org / удалить сервер example.org — местная политика
+3. операции — результат изменений
+4. восстановить / откатить — незавершённые изменения
 
 Изменения требуют подтверждения. Выключение API сохраняет Matrix-политику.
 Назад: федерация`;
-const REQUESTS = `Заявки федерации
+const REQUESTS = `Действия с заявками
 
-заявки входящие / заявки исходящие / заявки отклонённые
-подтвердить MB-0123456789abcdef0123456789abcdef
-отклонить MB-… / отменить MB-… / повторить MB-… / статус MB-…
-очистить отклонённые — убрать завершённые заявки из списка
+1. заявки входящие / заявки исходящие / заявки отклонённые
+2. подтвердить N / отклонить N — решение по входящей заявке
+3. отменить N — отозвать своё приглашение
+4. повторить N / статус N — продолжить или посмотреть результат
+5. очистить отклонённые — убрать завершённые заявки
 
+N — номер заявки в списке; номер сохраняется после перезапуска.
 Назад: федерация`;
 const COPIES = `Резервные копии
 
-создать копию — создать резервную копию
-проверить копию — проверить восстановление в изолированной среде
-хранилище — состояние хранилища и последней проверки
+1. создать копию — создать резервную копию
+2. проверить копию — проверить восстановление в изолированной среде
+3. хранилище — состояние копий
 
 Назад: обслуживание`;
+
+function noticeContent(body) {
+    if (typeof body !== "string") throw new Error("Invalid notice body");
+    const escaped = body.replace(
+        /[&<>"']/g,
+        (char) =>
+            ({
+                "&": "&amp;",
+                "<": "&lt;",
+                ">": "&gt;",
+                '"': "&quot;",
+                "'": "&#39;"
+            })[char]
+    );
+    // Preserve every visible character and newline in both representations.
+    // Explicit numbering remains text so clients do not renumber filtered lists.
+    const lines = escaped.split("\n");
+    const html = lines
+        .map((line, index) => {
+            if (index === 0) return "<strong>" + line + "</strong>";
+            if (/^\d+\. /.test(line)) {
+                const dash = line.indexOf(" — ");
+                if (dash > 0) return "<code>" + line.slice(0, dash) + "</code>" + line.slice(dash);
+            }
+            return line;
+        })
+        .join("<br>");
+    return { msgtype: "m.notice", body, format: "org.matrix.custom.html", formatted_body: html };
+}
+async function sendNotice(client, room, body) {
+    return client.sendMessage(room, noticeContent(body));
+}
+function humanDate(value) {
+    const date = new Date(value);
+    if (!Number.isFinite(date.getTime())) return "дата недоступна";
+    return (
+        date.toLocaleString("ru-RU", {
+            timeZone: "UTC",
+            year: "numeric",
+            month: "long",
+            day: "numeric",
+            hour: "2-digit",
+            minute: "2-digit"
+        }) + " UTC"
+    );
+}
 const WRITES = new Set([
     "add",
     "remove",
@@ -123,11 +171,22 @@ function parse(text) {
 }
 
 function statisticsText(result) {
-    const period =
-        result.start_utc && result.end_utc
-            ? `${result.start_utc} — ${result.end_utc}`
-            : "данные периода недоступны";
-    return `Сообщений: ${result.messages ?? "недоступно"}\nРегистраций: ${result.registrations ?? "недоступно"}\nЧисло звонков: недоступно\nСредняя длительность звонка: недоступно\nПериод: ${period}\n${result.note || ""}`.trimEnd();
+    const periods = {
+        day: "за последние 24 часа",
+        week: "за последние 7 дней",
+        month: "за последние 30 дней",
+        all: "за всё доступное время"
+    };
+    const lines = [
+        "Статистика " + (periods[result.period] || "за выбранный период"),
+        `Сообщений: ${result.messages ?? "недоступно"}`,
+        `Регистраций: ${result.registrations ?? "недоступно"}`
+    ];
+    if (result.start_utc && result.end_utc && result.period !== "all")
+        lines.push(`${humanDate(result.start_utc)} — ${humanDate(result.end_utc)}`);
+    if (result.messages == null || result.registrations == null)
+        lines.push("Не все счётчики удалось получить. Повторите запрос позже.");
+    return lines.join("\n");
 }
 function versionText(result) {
     return `Установленная версия: Misbot ${result.installed}\nПоследняя стабильная версия: ${result.latest || "релиз ещё не опубликован"}\n${result.update_available ? "Доступно обновление." : "Более новая стабильная версия не найдена."}\n${result.notes || ""}\n${result.url || ""}\nКоманда: ${result.command}`;
@@ -143,6 +202,8 @@ function stateText(state) {
         interrupted: "прервано",
         applied: "изменения применены",
         unchanged: "изменения не требуются",
+        changed: "изменения сохранены",
+        cleared: "завершённые заявки убраны",
         already_processed: "уже обработано",
         rolled_back: "прежние настройки восстановлены",
         pending: "ожидает решения",
@@ -158,33 +219,91 @@ function stateText(state) {
 }
 
 function resultText(result) {
-    // One required result object; status is optional, other backend fields stay literal.
+    // Render documented safe fields; transport records and private checkpoints stay off chat.
     if (!result || typeof result !== "object" || Array.isArray(result))
         throw new Error("Invalid operation result");
-    const details = { ...result };
-    const heading = Object.hasOwn(details, "status")
-        ? `Операция: ${stateText(details.status)}.`
-        : "Результат запроса:";
-    delete details.status;
-    const body = JSON.stringify(
-        details,
-        (key, value) => (/backup|migration|move|checkpoint/i.test(key) ? undefined : value),
-        2
-    );
-    return Object.keys(details).length ? `${heading}\n${body}` : heading;
+    const lines = [
+        Object.hasOwn(result, "status")
+            ? `Операция: ${stateText(result.status)}.`
+            : "Результат запроса:"
+    ];
+    if (result.server) lines.push(`Сервер: ${result.server}`);
+    if (result.state) lines.push(`Состояние: ${stateText(result.state)}`);
+    if (result.servers) {
+        lines.push("Разрешённые серверы:");
+        result.servers.forEach((server, index) => lines.push(`${index + 1}. ${server}`));
+    }
+    if (typeof result.enabled === "boolean")
+        lines.push(`API Misbot: ${result.enabled ? "включён" : "выключен"}`);
+    if (result.operation_id) lines.push(`Задача: ${result.operation_id}`);
+    for (const item of result.operations || []) lines.push(`${item.id}: ${stateText(item.state)}`);
+    for (const item of result.peers || [])
+        lines.push(
+            `${item.server || item.server_name}: ${item.state ? stateText(item.state) : item.approved ? "согласовано" : "ожидает решения"}`
+        );
+    if (result.expires_at) lines.push(`Срок: ${humanDate(result.expires_at * 1000)}`);
+    if (typeof result.local_applied === "boolean")
+        lines.push(
+            `Местная политика: ${result.local_applied ? "применена" : "ожидает применения"}`
+        );
+    if (typeof result.remote_applied === "boolean")
+        lines.push(
+            `Политика другого сервера: ${result.remote_applied ? "применена" : "ожидает применения"}`
+        );
+    if (result.delivery_pending) lines.push("Доставка решения пока не подтверждена.");
+    if (result.matrix_discovery)
+        lines.push(
+            `Matrix: ${result.matrix_discovery === "available" ? "доступен" : "доступность не подтверждена"}`
+        );
+    if (result.https)
+        lines.push(
+            `Misbot API: ${result.https === "available" ? "доступен" : "доступность не подтверждена"}`
+        );
+    if (result.matrix)
+        lines.push(
+            `Matrix: ${result.matrix.available ? "доступен" : "доступность не подтверждена"}`
+        );
+    if (result.misbot)
+        lines.push(
+            `Misbot API: ${result.misbot.available ? "доступен" : "доступность не подтверждена"}`
+        );
+    if (result.invitation)
+        lines.push(
+            result.invitation.ready
+                ? "Можно отправить приглашение."
+                : errorText(result.invitation.code)
+        );
+    if (result.status === "cleared" && result.count != null)
+        lines.push(`Убрано заявок: ${result.count}`);
+    if (typeof result.policy === "boolean")
+        lines.push(`Местная политика: ${result.policy ? "сервер разрешён" : "сервер не добавлен"}`);
+    if (result.federation_exchange === "not_verified")
+        lines.push("Работа федеративных комнат не проверялась.");
+    if (result.note) lines.push(result.note);
+    if (result.code || result.safe_error) lines.push(errorText(result.code || result.safe_error));
+    if (result.next_action) lines.push(`Следующее действие: ${result.next_action}`);
+    return lines.join("\n");
 }
 
 function serverText(result) {
-    const lines = [result.ok === true ? "Проверка завершена." : "Результат требует проверки."];
+    if (result.statistics) return statisticsText(result.statistics);
+    const lines = [
+        result.ok === true
+            ? "Сервер: проверка пройдена."
+            : "Сервер: есть недоступные службы или проверки."
+    ];
     if (result.checked_at)
         lines.push(
-            `Время проверки: ${typeof result.checked_at === "number" ? new Date(result.checked_at * 1000).toISOString() : result.checked_at}`
+            `Время проверки: ${typeof result.checked_at === "number" ? humanDate(result.checked_at * 1000) : result.checked_at}`
         );
-    if (result.statistics) lines.push(statisticsText(result.statistics));
     for (const item of result.containers || [])
-        lines.push(`${item.name}: ${item.running && item.healthy ? "работает" : "нужна проверка"}`);
+        lines.push(
+            `${item.running && item.healthy ? "✓" : "✗"} ${item.name}: ${!item.running ? "остановлено" : item.healthy ? "работает" : "работает, проверка здоровья не пройдена"}`
+        );
     for (const item of result.checks || [])
-        lines.push(`${item.name}: ${item.passed ? "проверено" : "нужна проверка"}`);
+        lines.push(
+            `${item.passed ? "✓" : "✗"} ${item.name}: ${item.passed ? "доступно" : "недоступно"}`
+        );
     if (result.resources || result.statistics) {
         const r = result.resources || result.statistics;
         if (r.cpu_count != null) lines.push(`Процессоров: ${r.cpu_count}`);
@@ -227,7 +346,7 @@ function serverText(result) {
     return lines.join("\n");
 }
 
-function requestsText(result, category) {
+function requestsText(result, category, number = (_, index) => index + 1) {
     const terminal = new Set(["rejected", "expired"]);
     const items = (result.requests || []).filter((item) => {
         if (item.hidden || item.cleared || ["cancelled", "connected"].includes(item.state))
@@ -238,16 +357,14 @@ function requestsText(result, category) {
     });
     const labels = { incoming: "Входящие", outgoing: "Исходящие", rejected: "Отклонённые" };
     const lines = [`${labels[category] || "Актуальные"} заявки: ${items.length}.`];
-    for (const item of items.slice(0, 20)) {
-        lines.push(`\n${item.server}: ${stateText(item.state)}.\n${item.id}`);
-        if (item.expires_at)
-            lines.push(
-                `Срок: ${new Date(item.expires_at * 1000).toISOString().replace("T", " ").replace(".000Z", " UTC")}`
-            );
+    for (const [index, item] of items.slice(0, 20).entries()) {
+        const reference = number(item, index);
+        lines.push(`\n${reference}. ${item.server} — ${stateText(item.state)}.`);
+        if (item.expires_at) lines.push(`Срок: ${humanDate(item.expires_at * 1000)}`);
         if (item.state === "pending" && item.direction === "incoming")
-            lines.push(`Принять: подтвердить ${item.id}\nОтклонить: отклонить ${item.id}`);
+            lines.push(`Принять: подтвердить ${reference}\nОтклонить: отклонить ${reference}`);
         if (item.state === "pending" && item.direction === "outgoing")
-            lines.push(`Отозвать: отменить ${item.id}`);
+            lines.push(`Отозвать: отменить ${reference}`);
         if (item.delivery_pending) lines.push("Доставка решения пока не подтверждена.");
     }
     if (items.length > 20) lines.push("Показаны первые 20. Полный список доступен через CLI.");
@@ -343,9 +460,47 @@ class FederationBot {
     }
     local(sender) {
         return (
-            sender ===
-            (this.config.administrator_mxids?.[0] || "@matrix-admin:" + this.config.server_name)
+            this.config.administrator_mxids || ["@matrix-admin:" + this.config.server_name]
+        ).includes(sender);
+    }
+    requestNumber(id) {
+        if (typeof id !== "string" || !/^MB-[0-9a-f]{32}$/.test(id))
+            throw new Error("Invalid request identity");
+        let saved = this.store.getValue("request-index");
+        if (!saved && this.store.getValue("request-index-created"))
+            throw new Error("Saved request index missing");
+        saved ||= { format: 1, ids: [] };
+        if (
+            saved.format !== 1 ||
+            !Array.isArray(saved.ids) ||
+            saved.ids.length > 1000 ||
+            new Set(saved.ids).size !== saved.ids.length ||
+            saved.ids.some((value) => typeof value !== "string" || !/^MB-[0-9a-f]{32}$/.test(value))
+        )
+            throw new Error("Invalid saved request index");
+        let index = saved.ids.indexOf(id);
+        if (index < 0) {
+            // Federation keeps at most 1000 request records, including terminal
+            // tombstones. The index follows the same permanent capacity.
+            if (saved.ids.length >= 1000) throw new Error("Request index capacity");
+            index = saved.ids.length;
+            this.store.setValue("request-index-created", true);
+            this.store.setValue("request-index", { format: 1, ids: [...saved.ids, id] });
+        }
+        return index + 1;
+    }
+    resolveRequest(original) {
+        const match = original.match(
+            /^(подтвердить|отклонить|отменить|повторить|статус|очистить) (\d{1,4})$/i
         );
+        if (!match) return parse(original);
+        const saved = this.store.getValue("request-index");
+        const id = saved?.ids?.[Number(match[2]) - 1];
+        if (!id) return { unknownNumber: true };
+        // Validate the persistent mapping before accepting a number. Numbers are
+        // never reused across filters, deleted requests, notifications or restart.
+        if (this.requestNumber(id) !== Number(match[2])) throw new Error("Request index mismatch");
+        return parse(match[1] + " " + id);
     }
     async authorize(sender) {
         const denied = () => {
@@ -357,7 +512,7 @@ class FederationBot {
         const result = await this.control({ action: "authorize", actor: sender });
         if (result.authorized !== true) throw denied();
     }
-    async privateRoom(room) {
+    async privateRoom(room, recipient) {
         const state = await this.client.getRoomState(room);
         const members = state
             .filter(
@@ -369,6 +524,7 @@ class FederationBot {
             members.length === 2 &&
             members.includes(this.config.user_id) &&
             members.some((x) => this.local(x)) &&
+            (!recipient || members.includes(recipient)) &&
             state.some(
                 (e) =>
                     e.type === "m.room.encryption" &&
@@ -415,15 +571,16 @@ class FederationBot {
             return;
         try {
             await this.authorize(event.sender);
-            if (!(await this.privateRoom(room))) return;
+            if (!(await this.privateRoom(room, event.sender))) return;
         } catch (error) {
             if (error?.code === "admin_unconfirmed") return;
             throw error;
         }
         const reply = async (body) => {
             await this.authorize(event.sender);
-            if (!(await this.privateRoom(room))) throw new Error("private_room_required");
-            return this.client.sendNotice(room, body);
+            if (!(await this.privateRoom(room, event.sender)))
+                throw new Error("private_room_required");
+            return sendNotice(this.client, room, body);
         };
         const key = "draft:" + room;
         let draft = this.store.getValue(key);
@@ -557,16 +714,33 @@ class FederationBot {
             return;
         }
         const reads = {
-            "состояние": "status",
-            "статус сервера": "status",
+            "состояние": "check",
+            "статус сервера": "check",
             "проверить": "check",
             "проверить сервер": "check",
             "хранилище": "storage"
         };
         if (Object.hasOwn(reads, text)) {
-            await reply(
-                serverText(await this.call("panel-server-read", { operation: reads[text] }, event))
-            );
+            const result = await this.call("panel-server-read", { operation: reads[text] }, event);
+            if (reads[text] === "check") {
+                const status = await this.call(
+                    "panel-server-read",
+                    { operation: "status" },
+                    {
+                        ...event,
+                        event_id:
+                            "status:" + createHash("sha256").update(event.event_id).digest("hex")
+                    }
+                );
+                await reply(
+                    serverText({
+                        ...status,
+                        ...result,
+                        containers: status.containers,
+                        ok: status.ok === true && result.ok === true
+                    })
+                );
+            } else await reply(serverText(result));
             return;
         }
         const serverWrites = {
@@ -600,7 +774,9 @@ class FederationBot {
         };
         if (text === "заявки" || Object.hasOwn(categories, text)) {
             const result = await this.call("requests", null, event);
-            await reply(requestsText(result, categories[text]));
+            await reply(
+                requestsText(result, categories[text], (item) => this.requestNumber(item.id))
+            );
             if (text === "заявки") await reply(REQUESTS);
             return;
         }
@@ -708,7 +884,11 @@ class FederationBot {
             );
             return;
         }
-        const request = parse(original);
+        const request = this.resolveRequest(original);
+        if (request?.unknownNumber) {
+            await reply("Номер заявки не найден. Откройте «заявки» и выберите номер из списка.");
+            return;
+        }
         if (!request) {
             await reply(HELP);
             return;
@@ -746,7 +926,12 @@ class FederationBot {
             });
             await reply(
                 (details?.server ? `Сервер: ${details.server}.\n` : "") +
-                    confirmationText(request.action, request.argument)
+                    confirmationText(
+                        request.action,
+                        request.argument?.startsWith("MB-")
+                            ? "заявка №" + this.requestNumber(request.argument)
+                            : request.argument
+                    )
             );
             return;
         }
@@ -763,10 +948,17 @@ class FederationBot {
     }
     async notifications() {
         const snapshot = await this.control({ action: "notifications" });
+        const delivered = new Set();
         for (const room of await this.client.getJoinedRooms()) {
             if (!(await this.privateRoom(room))) continue;
-            const admin =
-                this.config.administrator_mxids?.[0] || "@matrix-admin:" + this.config.server_name;
+            const state = await this.client.getRoomState(room);
+            const admin = state.find(
+                (item) =>
+                    item.type === "m.room.member" &&
+                    item.content?.membership === "join" &&
+                    this.local(item.state_key)
+            )?.state_key;
+            if (!admin || delivered.has(admin)) continue;
             try {
                 await this.authorize(admin);
             } catch {
@@ -779,44 +971,47 @@ class FederationBot {
                     (item.direction === "outgoing" && item.state === "pending")
                 )
                     continue;
-                const key = "notified:" + item.id + ":" + item.state;
-                if (this.store.getValue(key)) continue;
+                const key = "notified:" + item.id + ":" + item.state + ":" + admin;
+                const legacy = "notified:" + item.id + ":" + item.state;
+                if (
+                    this.store.getValue(key) ||
+                    (admin === this.config.administrator_mxids?.[0] && this.store.getValue(legacy))
+                )
+                    continue;
+                const number = this.requestNumber(item.id);
                 const actions =
                     item.state === "pending" && item.direction !== "outgoing"
-                        ? `\n\nПринять: подтвердить ${item.id}\nОтклонить: отклонить ${item.id}`
+                        ? `\n\nПринять: подтвердить ${number}\nОтклонить: отклонить ${number}`
                         : ["rejected", "expired"].includes(item.state)
                           ? "\n\nПосмотреть: заявки отклонённые"
-                          : `\n\nПроверить: статус ${item.id}`;
+                          : `\n\nПосмотреть: статус ${number}`;
                 await this.authorize(admin);
                 if (!(await this.privateRoom(room))) break;
-                await this.client.sendNotice(
+                await sendNotice(
+                    this.client,
                     room,
-                    `Заявка на подключение сервера ${item.server}.\nИдентификатор: ${item.id}\nСостояние: ${stateText(item.state)}.${actions}`
+                    `Заявка №${number}: ${item.server}\nСостояние: ${stateText(item.state)}.${actions}`
                 );
                 this.store.setValue(key, true);
             }
             for (const item of snapshot.operations || []) {
-                const key = "operation-notified:" + item.id + ":" + item.state;
-                if (this.store.getValue(key)) continue;
+                const key = "operation-notified:" + item.id + ":" + item.state + ":" + admin;
+                const legacy = "operation-notified:" + item.id + ":" + item.state;
+                if (
+                    this.store.getValue(key) ||
+                    (admin === this.config.administrator_mxids?.[0] && this.store.getValue(legacy))
+                )
+                    continue;
                 await this.authorize(admin);
                 if (!(await this.privateRoom(room))) break;
-                await this.client.sendNotice(
+                await sendNotice(
+                    this.client,
                     room,
-                    "Операция " +
-                        item.id +
-                        ": " +
-                        stateText(item.state) +
-                        "\n" +
-                        JSON.stringify(
-                            item.result,
-                            (key, value) =>
-                                /backup|migration|move|checkpoint/i.test(key) ? undefined : value,
-                            2
-                        )
+                    "Задача " + item.id + "\n" + resultText({ ...item.result, status: item.state })
                 );
                 this.store.setValue(key, true);
             }
-            break; // Exactly one private admin room, even if multiple such rooms exist.
+            delivered.add(admin);
         }
     }
 }
@@ -833,5 +1028,7 @@ module.exports = {
     resultText,
     serverText,
     requestsText,
-    errorText
+    errorText,
+    noticeContent,
+    sendNotice
 };

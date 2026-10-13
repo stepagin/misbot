@@ -33,6 +33,38 @@ class CommandTests(unittest.TestCase):
                     self.assertIn('--' + name.replace('_', '-'), optional)
                 self.assertEqual('--plain' in optional, command.path == 'ui')
 
+    def test_personal_admin_routes_use_full_mxid_and_never_accept_credentials(self):
+        for action in ('add', 'remove'):
+            command, _, values = misbot.parse(
+                [
+                    'admin',
+                    'access',
+                    action,
+                    '--mxid',
+                    '@personal:example.org',
+                ]
+            )
+            args = cli_commands.execution_argv(
+                command,
+                values,
+                Path('/opt/fictional-stack'),
+                BUNDLE,
+            )
+            self.assertEqual(args[2], action)
+            self.assertEqual(args[-2:], ['--mxid', '@personal:example.org'])
+        with self.assertRaises(misbot.InputError):
+            misbot.parse(
+                [
+                    'admin',
+                    'access',
+                    'add',
+                    '--mxid',
+                    '@personal:example.org',
+                    '--password',
+                    'fictional',
+                ]
+            )
+
     def test_optional_arguments_keep_their_command_scope(self):
         for argv in (
             ['admin', 'bot', 'show', '--administrator', 'FICTIONAL_PRIVATE_VALUE'],

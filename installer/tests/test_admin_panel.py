@@ -46,6 +46,39 @@ class PanelTests(unittest.TestCase):
     def pending(self):
         return self.panel.handle('panel-outbox', None, None)['items']
 
+    def test_notices_address_each_selected_admin_and_keep_saved_queue_deduplication(self):
+        state_store.write_json(
+            self.root / 'config/admin-panel-identity.json',
+            {
+                'administrator_mxid': '@matrix-admin:example.org',
+                'administrator_mxids': ['@matrix-admin:example.org', '@personal:example.org'],
+            },
+        )
+        self.panel.notice('several-admins', 'Проверка сервера завершена.')
+        self.panel.notice('several-admins', 'Проверка сервера завершена.')
+        items = self.pending()
+        self.assertEqual(
+            {item['recipient'] for item in items},
+            {
+                '@matrix-admin:example.org',
+                '@personal:example.org',
+            },
+        )
+        self.assertEqual(len(items), 2)
+
+    def test_server_tasks_remain_bound_to_requesting_personal_administrator(self):
+        actor = '@personal:example.org'
+        with patch('server_management.queue_operation', return_value={'status': 'queued'}) as queue:
+            self.panel.handle(
+                'panel-server-operation', {'operation': 'restart'}, '$personal', actor=actor
+            )
+        queue.assert_called_once_with(self.root, 'restart', actor=actor, event_id='$personal')
+        with patch(
+            'server_management.operation_status', return_value={'status': 'complete'}
+        ) as result:
+            self.panel.handle('panel-server-result', 'SO-fictional', '$result', actor=actor)
+        result.assert_called_once_with(self.root, 'SO-fictional', actor=actor)
+
     def test_waiting_invitations_retry_within_five_seconds_without_starving_other_users(self):
         with self.panel.database() as db:
             for index in range(40):
@@ -586,7 +619,10 @@ class PanelTests(unittest.TestCase):
             result = federation_service.bot_call(backend, request, 10003)
             self.assertEqual(result['status'], 'queued')
             handle.assert_called_once_with(
-                'panel-server-operation', {'operation': 'restart'}, '$proposal'
+                'panel-server-operation',
+                {'operation': 'restart'},
+                '$proposal',
+                actor='@matrix-admin:example.org',
             )
 
 

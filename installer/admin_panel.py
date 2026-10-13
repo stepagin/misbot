@@ -15,7 +15,7 @@ import releases
 import state_store
 from postgres_setup import literal
 from welcome_message import DEFAULT_WELCOME
-from welcome_settings import owner, welcome_context
+from welcome_settings import administrators, owner, welcome_context
 
 ACTIONS = {
     'panel-status',
@@ -39,7 +39,7 @@ STATISTICS_PERIODS = frozenset(('day', 'week', 'month', 'all'))
 
 
 def authorize(backend, actor):
-    if actor != owner(backend.root):
+    if actor not in administrators(backend.root):
         raise __import__('federation_protocol').ProtocolError('admin_unconfirmed')
     backend.authorize(actor)
 
@@ -92,9 +92,13 @@ class Panel:
             (identifier, recipient, via, body),
         )
 
+    def enqueue_admin(self, db, key, body):
+        for recipient in administrators(self.root):
+            self.enqueue(db, key, recipient, 'admin', body)
+
     def notice(self, key, body):
         with self.database() as db:
-            self.enqueue(db, key, owner(self.root), 'admin', body)
+            self.enqueue_admin(db, key, body)
 
     def bot_ids(self):
         ids = {'@referral-bot:' + self.domain, '@server-guide:' + self.domain}
@@ -191,11 +195,9 @@ class Panel:
                     body = self.welcome_text(preferences['welcome'])
                     self.enqueue(db, 'welcome:' + mxid, mxid, 'welcome', body)
                     if preferences['registrations']:
-                        self.enqueue(
+                        self.enqueue_admin(
                             db,
                             'registration:' + mxid,
-                            owner(self.root),
-                            'admin',
                             'Новый пользователь зарегистрировался:\n' + mxid,
                         )
             cursor = users[-1]['mxid']
@@ -255,11 +257,9 @@ class Panel:
                 and releases.version(release['version'])
                 > releases.version(settings.get('notified_version', '0.0.0'))
             ):
-                self.enqueue(
+                self.enqueue_admin(
                     db,
                     'release:' + release['version'],
-                    owner(self.root),
-                    'admin',
                     'Доступна новая версия Misbot '
                     + release['version']
                     + '. Установлена '
@@ -296,7 +296,25 @@ class Panel:
                 result = self.statistics('month', start.timestamp(), end.timestamp())
                 self.notice(
                     'monthly:' + start.strftime('%Y-%m'),
-                    'Статистика за ' + start.strftime('%Y-%m') + '\n' + statistics_text(result),
+                    'Статистика за '
+                    + (
+                        'январь',
+                        'февраль',
+                        'март',
+                        'апрель',
+                        'май',
+                        'июнь',
+                        'июль',
+                        'август',
+                        'сентябрь',
+                        'октябрь',
+                        'ноябрь',
+                        'декабрь',
+                    )[start.month - 1]
+                    + ' '
+                    + str(start.year)
+                    + '\n'
+                    + statistics_text(result),
                 )
             with self.database() as db:
                 self.set(db, 'month', month)
@@ -308,13 +326,14 @@ class Panel:
 
         operation_notices(self)
 
-    def handle(self, action, argument, event):
+    def handle(self, action, argument, event, actor=None):
+        actor = owner(self.root) if actor is None else actor
         if action == 'panel-server-result':
             if not isinstance(argument, str) or not 1 <= len(argument) <= 100:
                 raise ValueError('Invalid operation identifier')
             from server_management import operation_status
 
-            return operation_status(self.root, argument, actor=owner(self.root))
+            return operation_status(self.root, argument, actor=actor)
         if action == 'panel-referral':
             return {
                 'url': welcome_context(self.root, self.domain, '{referral_url}').render(
@@ -350,7 +369,7 @@ class Panel:
                 raise ValueError('Invalid operation event')
             from server_management import queue_operation
 
-            return queue_operation(self.root, operation, actor=owner(self.root), event_id=event)
+            return queue_operation(self.root, operation, actor=actor, event_id=event)
         if action == 'panel-status':
             return {
                 'installed': releases.installed(self.root),
@@ -450,10 +469,5 @@ def text(value):
 
 def statistics_text(result):
     return (
-        'Сообщений: '
-        + str(result['messages'])
-        + '\nРегистраций: '
-        + str(result['registrations'])
-        + '\nЧисло звонков: недоступно\nСредняя длительность звонка: недоступно\n'
-        + result['note']
+        'Сообщений: ' + str(result['messages']) + '\nРегистраций: ' + str(result['registrations'])
     )
