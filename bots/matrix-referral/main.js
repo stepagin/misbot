@@ -98,7 +98,8 @@ async function main() {
                     await client
                         .sendNotice(
                             roomId,
-                            error.userMessage || "Не удалось выполнить команду. Повторите попытку."
+                            error.userMessage ||
+                                "Результат команды не подтверждён. Откройте список своих приглашений, прежде чем создавать новый код."
                         )
                         .catch(() => {});
                 }

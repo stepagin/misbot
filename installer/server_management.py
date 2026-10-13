@@ -2,6 +2,7 @@
 
 import argparse
 from contextlib import contextmanager
+from datetime import datetime
 import fcntl
 import hashlib
 import json
@@ -28,6 +29,8 @@ COMMANDS = {
     'storage': ['storage', 'status'],
     'storage_connect': ['storage', 's3', 'connect'],
     'components': ['features', 'status'],
+    'backup_schedule': ['backup', 'schedule', 'status'],
+    'backup_preview': [],
     'statistics': [],
     'update_check': [],
     'restart': [],
@@ -130,9 +133,49 @@ def media_profile_ready(config):
     return True
 
 
+def utc_timestamp(value):
+    if not isinstance(value, str) or not re.fullmatch(
+        r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z', value
+    ):
+        return False
+    try:
+        datetime.strptime(value, '%Y-%m-%dT%H:%M:%SZ')
+        return True
+    except ValueError:
+        return False
+
+
+def safe_timer_date(value):
+    return isinstance(value, str) and bool(
+        re.fullmatch(
+            r'(?:[A-Za-z]{3} )?\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?: [A-Za-z0-9_+:/-]{1,30})?',
+            value,
+        )
+    )
+
+
+def backup_preview(root):
+    metadata = configuration.read_private_json(Path(root) / 'installation.json')
+    adopted = metadata.get('backend') == 'existing-compose'
+    return {
+        'destination': 'external'
+        if adopted and (Path(root) / '.misbot/s3/backup-active.json').is_file()
+        else 'local',
+        'authentication': 'external-MAS-not-included'
+        if metadata.get('mas_mode') == 'external'
+        else 'included',
+    }
+
+
 def sanitized(operation, response):
-    result = {'operation': operation, 'ok': response.returncode == 0}
+    result = {
+        'operation': operation,
+        'ok': response.returncode == 0,
+        'checked_at': int(time.time()),
+    }
     checks = []
+    backup_complete = False
+    restore_complete = False
     for item in records(response.stdout or b''):
         kind = item.get('check')
         if kind in ('existing_status', 'server_status'):
@@ -184,34 +227,160 @@ def sanitized(operation, response):
             )
         if kind in ('existing_storage_status', 'storage_status'):
             result['storage'] = {
-                key: item.get(key) is True
+                key: item.get(key) if type(item.get(key)) is bool else None
                 for key in (
                     'media_s3',
                     'backup_s3',
                     'media_pending',
                     'last_backup_verified',
                     'backup_pending',
+                    'upload_verified',
+                    'restore_verified',
                 )
             }
-        if kind == 'existing_features':
+            if item.get('manual_backup_destination') in ('local', 'external'):
+                result['storage']['manual_backup_destination'] = item['manual_backup_destination']
+            if item.get('restore_scope') in ('scheduled-history', 'selected-backup'):
+                result['storage']['restore_scope'] = item['restore_scope']
+            if utc_timestamp(item.get('last_restore_verified_at')):
+                result['storage']['last_restore_verified_at'] = item['last_restore_verified_at']
+        if kind in ('existing_features', 'server_components'):
             result['components'] = {
-                key: item.get(key) is True
+                key: item.get(key) if type(item.get(key)) is bool else None
                 for key in ('enabled', 'pending', 'referral_bot', 'federation_bot')
             }
             for key in ('admin', 'homepage'):
                 value = item.get(key)
                 if isinstance(value, str) and re.fullmatch(r'[a-z0-9.-]{1,253}', value):
                     result['components'][key] = value
+        if kind in ('consistent_backup', 'existing_backup') and operation == 'backup':
+            if (
+                isinstance(item.get('archive'), str)
+                and item['archive']
+                and (kind == 'consistent_backup' or item.get('passed') is True)
+            ):
+                backup_complete = True
+            if kind == 'consistent_backup' or type(item.get('passed')) is bool:
+                backup = result.setdefault('backup', {})
+                backup['destination'] = 'external' if item.get('archive') == 's3' else 'local'
+                archive = item.get('archive')
+                if isinstance(archive, str) and archive != 's3':
+                    name = Path(archive).name
+                    if re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,149}', name):
+                        backup['artifact'] = name
+                if type(item.get('encrypted_bytes')) is int and item['encrypted_bytes'] >= 0:
+                    backup['bytes'] = item['encrypted_bytes']
+                if item.get('authentication') == 'external-MAS-not-included':
+                    backup['authentication'] = 'external-MAS-not-included'
+                if kind == 'existing_backup' and item.get('verified') is True:
+                    backup.update(upload_verified=True, restore_verified=True)
+                if item.get('passed') is False:
+                    result['ok'] = False
+        if operation == 'backup_verify' and kind == 'temporary_database_restore':
+            if item.get('database') in ('synapse', 'mas') and item.get('passed') is True:
+                backup = result.setdefault('backup', {})
+                backup.setdefault('verified_databases', []).append(item['database'])
+                restore_complete = True
+            if item.get('passed') is False:
+                result['ok'] = False
+        if operation == 'backup_verify' and kind == 'existing_backup_verified':
+            restore_complete = item.get('passed') is True
+            result.setdefault('backup', {})['restore_verified'] = item.get('passed') is True
+            if item.get('passed') is False:
+                result['ok'] = False
+        if operation == 'backup_schedule' and kind in (
+            'backup_schedule_status',
+            'existing_backup_schedule',
+        ):
+            schedule = result.setdefault('schedule', {})
+            for key in (
+                'configured',
+                'enabled',
+                'needs_reconfigure',
+                'verification_on_this_target_required',
+            ):
+                if type(item.get(key)) is bool:
+                    schedule[key] = item[key]
+            verified = item.get('last_verified')
+            if isinstance(verified, dict) and utc_timestamp(verified.get('completed_utc')):
+                schedule['last_verified_at'] = verified['completed_utc']
+                schedule['restore_verified'] = verified.get('two_database_restores') is True
+            if item.get('resource') == 'timer':
+                value = item.get('NextElapseUSecRealtime')
+                if safe_timer_date(value):
+                    schedule['next_run'] = value
+            if (
+                item.get('resource') == 'service'
+                and item.get('execution_metadata_available') is True
+                and item.get('ActiveState') in ('inactive', 'failed')
+                and item.get('SubState') not in ('running', 'start', 'start-pre', 'start-post')
+                and item.get('Result')
+                in (
+                    'success',
+                    'exit-code',
+                    'timeout',
+                    'signal',
+                )
+            ):
+                schedule['last_run_status'] = item['Result']
+            if item.get('passed') is False:
+                result['ok'] = False
+        if kind in (
+            'consistent_backup',
+            'existing_backup',
+            'existing_backup_verified',
+            'storage_status',
+            'existing_storage_status',
+            'existing_features',
+            'server_components',
+            'backup_schedule_status',
+            'existing_backup_schedule',
+        ) and (
+            item.get('passed') is False
+            or item.get('success') is False
+            or item.get('partial') is True
+            or item.get('status')
+            in ('partial', 'partially_applied', 'failed', 'error', 'interrupted')
+            or item.get('state')
+            in ('partial', 'partially_applied', 'failed', 'error', 'interrupted')
+        ):
+            result['ok'] = False
+    if operation == 'backup_schedule':
+        # The adopted backend prints fixed systemctl timer properties after its JSON record.
+        raw = response.stdout or b''
+        if isinstance(raw, bytes):
+            raw = raw.decode('utf-8', errors='replace')
+        for line in raw.splitlines():
+            if line.startswith('NextElapseUSecRealtime=') and safe_timer_date(
+                line.partition('=')[2]
+            ):
+                result.setdefault('schedule', {})['next_run'] = line.partition('=')[2]
+    if operation == 'backup' and not backup_complete:
+        result['ok'] = False
+    if operation == 'backup_verify' and not restore_complete:
+        result['ok'] = False
     if checks:
         result['checks'] = checks
+        if any(not item['passed'] for item in checks):
+            result['ok'] = False
+    if (
+        operation == 'backup_verify'
+        and result.get('ok')
+        and result.get('backup', {}).get('verified_databases')
+    ):
+        result['backup']['restore_verified'] = True
+
     expected = {
         'status': 'containers',
         'check': 'checks',
         'storage': 'storage',
         'components': 'components',
+        'backup_schedule': 'schedule',
     }.get(operation)
     if expected and not result.get(expected):
         result['ok'] = False
+    if result['ok'] is False:
+        result['code'] = 'backend_unconfirmed'
     return result
 
 
@@ -319,6 +488,24 @@ def run_control(config, operation, *, period='day', runner=subprocess.run):
     kind = installation_kind(root)
     if kind == 'portable':
         command_wrapper.trusted_installation(root)
+    if operation == 'backup_preview':
+        return {'operation': operation, 'ok': True, 'backup': backup_preview(root)}
+    if operation == 'components' and kind == 'portable':
+        metadata = configuration.read_private_json(root / 'installation.json')
+        return {
+            'operation': operation,
+            'ok': True,
+            'components': {
+                'enabled': True,
+                'pending': False,
+                'referral_bot': metadata.get('referral_provisioned')
+                if type(metadata.get('referral_provisioned')) is bool
+                else None,
+                'federation_bot': metadata.get('federation_provisioned')
+                if type(metadata.get('federation_provisioned')) is bool
+                else None,
+            },
+        }
     if operation == 'statistics':
         return statistics(root, period)
     if operation == 'update_check':
@@ -351,12 +538,36 @@ def run_control(config, operation, *, period='day', runner=subprocess.run):
             timeout=1200 if operation in WRITES else 85,
             check=False,
         )
-    except (OSError, subprocess.TimeoutExpired):
-        result = {'operation': operation, 'ok': False, 'recovery_required': True}
+    except (OSError, subprocess.TimeoutExpired) as error:
+        result = {
+            'operation': operation,
+            'ok': False,
+            'recovery_required': True,
+            'code': 'operation_timeout'
+            if isinstance(error, subprocess.TimeoutExpired)
+            else 'runner_unavailable',
+        }
     else:
         result = sanitized(operation, response)
     if operation == 'status' and 'resources' not in result:
         result['resources'] = host_statistics(root)
+    if operation == 'backup_verify' and kind == 'portable':
+        preview = backup_preview(root)
+        expected = (
+            {'synapse'}
+            if preview['authentication'] == 'external-MAS-not-included'
+            else {'synapse', 'mas'}
+        )
+        if preview['authentication'] == 'external-MAS-not-included':
+            result.setdefault('backup', {})['authentication'] = preview['authentication']
+        if set(result.get('backup', {}).get('verified_databases', [])) != expected:
+            result['ok'] = False
+            result.setdefault('backup', {})['restore_verified'] = False
+    if operation == 'backup':
+        preview = backup_preview(root)
+        backup = result.setdefault('backup', {})
+        if preview['authentication'] == 'external-MAS-not-included':
+            backup['authentication'] = preview['authentication']
     return result
 
 
@@ -518,7 +729,7 @@ def view(job):
     return {
         key: value
         for key, value in job.items()
-        if key in ('operation_id', 'operation', 'status', 'result')
+        if key in ('operation_id', 'operation', 'status', 'result', 'created_at', 'finished_at')
     }
 
 
@@ -554,20 +765,33 @@ def refresh(root, job, runner):
                 and time.time() - job['created_at'] >= 120
                 and active_unit(unit(root, job['operation_id']), runner) is False
             ):
-                job.update(status='interrupted', result={'ok': False, 'message': RECOVERY})
+                job.update(
+                    status='interrupted',
+                    result={'ok': False, 'message': RECOVERY},
+                    finished_at=time.time(),
+                )
             return
         if update.get('id') != job['update_id']:
-            job.update(status='interrupted', result={'ok': False, 'message': RECOVERY})
+            job.update(
+                status='interrupted',
+                result={'ok': False, 'message': RECOVERY},
+                finished_at=time.time(),
+            )
         elif update.get('state') in FINISHED:
             result = update.get('result') or {}
             job.update(
-                status=update['state'],
+                status='complete'
+                if update['state'] == 'complete' and result.get('success') is True
+                else 'failed'
+                if update['state'] == 'complete'
+                else update['state'],
+                finished_at=time.time(),
                 result={
-                    'ok': update['state'] == 'complete' and result.get('success', True),
+                    'ok': update['state'] == 'complete' and result.get('success') is True,
                     'version': update.get('version'),
                     'installed': result.get('installed'),
-                    'message': 'Компоненты обновлены.'
-                    if update['state'] == 'complete'
+                    'message': 'Выпуск Misbot обновлён.'
+                    if update['state'] == 'complete' and result.get('success') is True
                     else RECOVERY,
                 },
             )
@@ -576,15 +800,23 @@ def refresh(root, job, runner):
             and active_unit(update.get('unit', release_update.unit(root, job['update_id'])), runner)
             is False
         ):
-            job.update(status='interrupted', result={'ok': False, 'message': RECOVERY})
+            job.update(
+                status='interrupted',
+                result={'ok': False, 'message': RECOVERY},
+                finished_at=time.time(),
+            )
         return
     if time.time() - job['created_at'] < 120:
         return
     if active_unit(unit(root, job['operation_id']), runner) is False:
-        job.update(status='interrupted', result={'ok': False, 'message': RECOVERY})
+        job.update(
+            status='interrupted', result={'ok': False, 'message': RECOVERY}, finished_at=time.time()
+        )
 
 
-def queue_operation(root, operation, actor, event_id, argument=None, *, runner=subprocess.run):
+def queue_operation(
+    root, operation, actor, event_id, argument=None, *, confirmed_backup=None, runner=subprocess.run
+):
     root = root_path(root)
     command_wrapper.trusted_installation(root)
     if (
@@ -605,6 +837,18 @@ def queue_operation(root, operation, actor, event_id, argument=None, *, runner=s
         releases.version(argument)
     elif argument is not None:
         raise RuntimeError('Параметры этой операции не поддерживаются.')
+    preview = None
+    if operation == 'backup':
+        preview = backup_preview(root) if confirmed_backup is None else confirmed_backup
+        if (
+            not isinstance(preview, dict)
+            or set(preview) != {'destination', 'authentication'}
+            or preview['destination'] not in ('local', 'external')
+            or preview['authentication'] not in ('included', 'external-MAS-not-included')
+        ):
+            raise RuntimeError('Параметры копии не подтверждены.')
+    elif confirmed_backup is not None:
+        raise RuntimeError('Параметры копии не относятся к этой операции.')
     identifier = 'SO-' + hashlib.sha256((actor + '\0' + event_id).encode()).hexdigest()[:32]
     with database(root) as data:
         if identifier in data['jobs']:
@@ -613,6 +857,7 @@ def queue_operation(root, operation, actor, event_id, argument=None, *, runner=s
                 job['operation'] != operation
                 or job.get('argument') != argument
                 or job.get('actor') != actor
+                or (operation == 'backup' and job.get('backup_preview') != preview)
             ):
                 raise RuntimeError(
                     'Параметры подтверждённой операции изменились. Подготовьте новое подтверждение.'
@@ -638,6 +883,8 @@ def queue_operation(root, operation, actor, event_id, argument=None, *, runner=s
             'argument': argument,
             'created_at': time.time(),
         }
+        if preview is not None:
+            job['backup_preview'] = dict(preview)
         data['jobs'][identifier] = job
         # Publish before launching: the detached worker may start immediately.
         state_store.write_json(root / 'data/admin-panel/server-jobs.json', data)
@@ -667,6 +914,7 @@ def queue_operation(root, operation, actor, event_id, argument=None, *, runner=s
         except (OSError, subprocess.SubprocessError):
             job.update(
                 status='failed',
+                finished_at=time.time(),
                 result={
                     'ok': False,
                     'message': 'Не удалось запустить фоновую операцию. Проверьте systemd и sudo misbot status через SSH.',
@@ -736,15 +984,26 @@ def run_job(root, identifier):
             # Link before launching the second unit so a killed wrapper remains recoverable.
             job['update_id'] = hashlib.sha256(job['event_id'].encode()).hexdigest()
         saved = dict(job)
+    stage = 'authorization'
     try:
         # Recheck current MAS administrator role immediately before mutation.
         authorize_current(root, saved['actor'])
+        if saved['operation'] == 'backup':
+            stage = 'confirmation'
+            if saved.get('backup_preview') != backup_preview(root):
+                raise RuntimeError('Backup configuration changed')
+        stage = 'execution'
         if saved['operation'] == 'update':
             import release_update
 
             release = release_update.queue(root, saved['argument'], saved['event_id'])
             result = {'ok': release['status'] not in ('failed', 'interrupted')}
-            status = 'running' if release['status'] in ACTIVE else release['status']
+            # Even an already completed update is confirmed from its durable result by refresh.
+            status = (
+                'running'
+                if release['status'] in ACTIVE or release['status'] == 'complete'
+                else release['status']
+            )
             update_id = hashlib.sha256(saved['event_id'].encode()).hexdigest()
         else:
             result = (
@@ -758,14 +1017,72 @@ def run_job(root, identifier):
             status = 'complete' if result.get('ok') else 'failed'
             update_id = None
     except Exception:
-        result, status, update_id = {'ok': False, 'message': RECOVERY}, 'failed', None
+        result, status, update_id = (
+            {
+                'ok': False,
+                'message': RECOVERY,
+                'code': 'authorization_unavailable'
+                if stage == 'authorization'
+                else 'configuration_changed'
+                if stage == 'confirmation'
+                else 'operation_unconfirmed',
+            },
+            'failed',
+            None,
+        )
     with database(root) as data:
         job = data['jobs'][identifier]
         if job['status'] != 'running':
             raise RuntimeError('Состояние операции изменилось; результат сохраните через SSH.')
         job.update(status=status, result=result)
+        if status in FINISHED:
+            job['finished_at'] = time.time()
         if update_id:
             job['update_id'] = update_id
+
+
+def operation_notice(job):
+    names = {
+        'start': 'Запуск служб',
+        'stop': 'Остановка служб',
+        'restart': 'Перезапуск служб',
+        'backup': 'Резервная копия',
+        'backup_verify': 'Проверка копии',
+        'update': 'Обновление Misbot',
+        'storage_connect': 'Подключение S3',
+    }
+    result = job.get('result') or {}
+    state = job.get('status')
+    lines = [
+        names.get(job.get('operation'), 'Обслуживание сервера')
+        + ': '
+        + (
+            'завершено.'
+            if state == 'complete' and result.get('ok') is True
+            else 'прервано; результат не подтверждён.'
+            if state == 'interrupted'
+            else 'завершение не подтверждено.'
+        )
+    ]
+    backup = result.get('backup', {})
+    if backup.get('destination') in ('local', 'external'):
+        lines.append(
+            'Назначение копии: '
+            + ('этот сервер' if backup['destination'] == 'local' else 'внешнее хранилище')
+            + '.'
+        )
+    if backup.get('authentication') == 'external-MAS-not-included':
+        lines.append('Внешний MAS в копию не входит. Сохраните его отдельно.')
+    if backup.get('restore_verified') is True:
+        lines.append('Восстановление временных баз проверено.')
+    version = result.get('installed') or result.get('version')
+    if isinstance(version, str) and re.fullmatch(
+        r'[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?', version
+    ):
+        lines.append('Версия Misbot: ' + version)
+    if state != 'complete' or result.get('ok') is not True:
+        lines.append(RECOVERY)
+    return '\n'.join(lines)
 
 
 def operation_notices(panel, *, runner=subprocess.run):
@@ -777,12 +1094,7 @@ def operation_notices(panel, *, runner=subprocess.run):
         for job in data['jobs'].values():
             refresh(root, job, runner)
             if job['status'] in FINISHED:
-                text = 'Операция сервера: ' + job['operation'] + '\n'
-                text += (
-                    'Завершена.'
-                    if job['status'] == 'complete' and (job.get('result') or {}).get('ok')
-                    else RECOVERY
-                )
+                text = operation_notice(job)
                 notices.append(('server-operation:' + job['operation_id'], text))
     for key, body in notices:
         panel.notice(key, body)

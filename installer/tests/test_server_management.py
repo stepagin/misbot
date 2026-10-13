@@ -221,7 +221,7 @@ class ServerManagementTests(unittest.TestCase):
         management.operation_notices(panel, runner=self.runner)
         key, body = panel.notice.call_args.args
         self.assertEqual(key, 'server-operation:' + job['operation_id'])
-        self.assertIn('Завершена', body)
+        self.assertIn('завершено', body)
 
     def test_update_tracks_detached_release_result_without_private_detail(self):
         state_store.write_json(
@@ -421,6 +421,36 @@ class ServerManagementTests(unittest.TestCase):
             management.authorize_current(self.root, self.actor)
         api.matrix_user.assert_called_once_with(self.actor, 'example.org')
         api.administrator_user.assert_called_once_with('fictional-user')
+
+    def test_backup_worker_rechecks_confirmed_scope_before_mutation(self):
+        job = self.queue()
+        folder = self.root / '.misbot/s3'
+        folder.mkdir(parents=True)
+        state_store.write_json(folder / 'backup-active.json', {})
+        with (
+            patch('server_management.authorize_current'),
+            patch('server_management.run_control') as execute,
+        ):
+            management.run_job(self.root, job['operation_id'])
+        execute.assert_not_called()
+        saved = self.data()['jobs'][job['operation_id']]
+        self.assertEqual(saved['status'], 'failed')
+        self.assertEqual(saved['result']['code'], 'configuration_changed')
+        self.assertIn('finished_at', saved)
+
+    def test_delegated_update_has_no_finished_timestamp_while_running(self):
+        state_store.write_json(
+            self.root / 'installation.json', {'backend': 'portable', 'domain': 'example.org'}
+        )
+        job = self.queue('update', argument='1.2.1')
+        with (
+            patch('server_management.authorize_current'),
+            patch('release_update.queue', return_value={'status': 'queued'}),
+        ):
+            management.run_job(self.root, job['operation_id'])
+        saved = self.data()['jobs'][job['operation_id']]
+        self.assertEqual(saved['status'], 'running')
+        self.assertNotIn('finished_at', saved)
 
 
 if __name__ == '__main__':

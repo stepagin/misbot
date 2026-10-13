@@ -49,6 +49,8 @@ function setup() {
             error.code = "admin_unconfirmed";
             throw error;
         }
+        if (r.action === "panel-server-read" && r.argument?.operation === "backup_preview")
+            return { ok: true, backup: { destination: "local", authentication: "included" } };
         return r.action === "authorize"
             ? { authorized: true }
             : r.action === "auto-invitation"
@@ -289,7 +291,11 @@ test("removed room commands never dispatch and are absent from help", async () =
             const x = setup();
             await x.bot.message("!room", { ...x.event, content: { msgtype: "m.text", body } });
             assert.equal(x.calls.filter((c) => c.action !== "authorize").length, 0, body);
-            assert.deepEqual(x.sent, [noticeContent(HELP).body], body);
+            assert.deepEqual(
+                x.sent,
+                ["Команда не распознана.\n\n" + noticeContent(HELP).body],
+                body
+            );
         }
     }
     assert.doesNotMatch(
@@ -411,7 +417,10 @@ test("welcome editing preserves text case and recognizes mixed-case cancellation
     for (const cancel of ["ОтМеНа", "ОТМЕНИТЬ"]) {
         await send("ИЗМЕНИТЬ ПРИВЕТСТВИЕ");
         await send(cancel);
-        assert.equal(x.sent.at(-1), "Действие отменено.");
+        assert.equal(
+            x.sent.at(-1),
+            "Предложение отменено. Уже принятая задача продолжает выполняться."
+        );
     }
     assert.equal(x.calls.filter((c) => c.action === "panel-welcome").length, 1);
 });
@@ -666,7 +675,7 @@ test("grouped menus keep destructive actions inside maintenance and invitations 
         });
         assert.equal(x.sent.at(-1), noticeContent(expected).body);
     }
-    assert.match(HELP, /статистика[\s\S]*состояние[\s\S]*федерация/);
+    assert.match(HELP, /состояние[\s\S]*приглашения[\s\S]*федерация/);
     assert.doesNotMatch(HELP, /приглашения —|создать копию|остановить службы/);
     x.bot.control = async (request) => {
         x.calls.push(request);
@@ -866,7 +875,9 @@ test("statistics keep unavailable counters unknown and show a compact activity r
     });
     assert.match(body, /Сообщений: недоступно/);
     assert.match(body, /Регистраций: недоступно/);
-    assert.doesNotMatch(body, /Память|Свободное место|нагрузка|Число звонков|Средняя длительность/);
+    assert.match(body, /Свободное место/);
+    assert.match(body, /RAM/);
+    assert.doesNotMatch(body, /Число звонков|Средняя длительность/);
     assert.match(body, /Повторите запрос позже/);
     assert.doesNotMatch(body, /undefined|NaN|Сообщений: 0/);
 });
@@ -1868,4 +1879,53 @@ test("full service task index preserves accepted operations and legacy result lo
     assert.deepEqual(x.bot.serviceTasks(x.event.sender), tasks);
     await send("задачи", "$list");
     assert.match(x.sent.at(-1), /Список заполнен/);
+});
+
+test("safe check detail and unknown storage remain readable without leaking raw errors", () => {
+    const body = serverText({
+        ok: false,
+        checks: [{ name: "mas", passed: false, detail: "HTTP 503." }],
+        message: "SDK SECRET"
+    });
+    assert.match(body, /HTTP 503/);
+    assert.doesNotMatch(body, /SECRET/);
+    const storage = serverText({ ok: false, storage: { media_s3: null, backup_s3: null } });
+    assert.match(storage, /нет данных/);
+    assert.doesNotMatch(storage, /не подключено/);
+});
+
+test("backup outcome preserves the external MAS boundary and selected destination", () => {
+    const body = serverText({
+        ok: true,
+        backup: {
+            destination: "local",
+            artifact: "matrix-20261014.tar.gz",
+            authentication: "external-MAS-not-included"
+        }
+    });
+    assert.match(body, /этот сервер/);
+    assert.match(body, /MAS в копию не входит/);
+    assert.doesNotMatch(body, /Восстановление временных баз проверено/);
+});
+
+test("open federation is distinguished from an empty allowlist", () => {
+    assert.match(resultText({ servers: null }), /открыта для всех/);
+    assert.match(resultText({ servers: [] }), /ещё не добавлены/);
+});
+
+test("changed backup scope cannot consume an existing confirmation", async () => {
+    const x = setup(),
+        control = x.bot.control;
+    let destination = "local";
+    x.bot.control = async (request) =>
+        request.action === "panel-server-read" && request.argument?.operation === "backup_preview"
+            ? { ok: true, backup: { destination, authentication: "included" } }
+            : control(request);
+    const send = (body, event_id) =>
+        x.bot.message("!room", { ...x.event, event_id, content: { msgtype: "m.text", body } });
+    await send("создать копию", "$preview");
+    destination = "external";
+    await send("выполнить подтверждаю", "$changed");
+    assert.match(x.sent.at(-1), /Параметры копии изменились/);
+    assert.equal(x.calls.filter((r) => r.action === "panel-server-operation").length, 0);
 });

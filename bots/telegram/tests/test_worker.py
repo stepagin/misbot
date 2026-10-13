@@ -122,7 +122,10 @@ class WorkerTests(unittest.TestCase):
         buttons = self.bot.telegram.call_args.args[1]['reply_markup']['inline_keyboard']
         labels = {button['callback_data']: button['text'] for row in buttons for button in row}
         self.assertEqual(labels['/logout'], 'Выйти из бота')
-        self.assertIn('подготовленный профиль', labels['manage|storage_connect'])
+        self.assertNotIn('manage|storage_connect', labels)
+        with patch('worker.bridge_call', side_effect=self.control):
+            self.bot.group(123, 123, 'services')
+        self.assertIn('подготовленный профиль', str(self.bot.telegram.call_args.args[1]))
 
     def test_start_reaches_control_and_sends_admin_menu(self):
         self.identity = {'authenticated': True, 'username': 'stepan', 'admin': True}
@@ -133,7 +136,9 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(method, 'sendMessage')
         self.assertEqual(payload['chat_id'], 123)
         buttons = payload['reply_markup']['inline_keyboard']
-        self.assertEqual([row[0]['callback_data'] for row in buttons], ['federation', 'more'])
+        self.assertEqual(
+            [row[0]['callback_data'] for row in buttons], ['invitations', 'federation', 'more']
+        )
         self.assertNotIn('/server', payload['text'])
         self.assertLess(len(payload['text']), 180)
 
@@ -157,8 +162,8 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(
             [row[0]['callback_data'] for row in buttons],
             [
-                'manage|status',
-                'manage|check',
+                'overview',
+                'invitations',
                 'maintenance',
                 'more',
             ],
@@ -471,10 +476,10 @@ class WorkerTests(unittest.TestCase):
 
     def test_running_success_failure_and_interruption_have_distinct_results(self):
         for state, ok, expected in [
-            ('running', False, 'Операция выполняется.'),
-            ('finished', True, 'Резервная копия создана.'),
-            ('finished', False, 'Завершение операции не подтверждено.'),
-            ('interrupted', False, 'Завершение операции не подтверждено.'),
+            ('running', False, 'Резервная копия: выполняется.'),
+            ('finished', True, 'Резервная копия: завершено.'),
+            ('finished', False, 'Резервная копия: завершение не подтверждено.'),
+            ('interrupted', False, 'Резервная копия: прервано; результат не подтверждён.'),
         ]:
             with self.subTest(state=state, ok=ok):
                 self.bot.job_message(
@@ -494,7 +499,9 @@ class WorkerTests(unittest.TestCase):
                         'manage_job|fictional-job',
                     )
                 else:
-                    self.assertEqual(payload['reply_markup']['inline_keyboard'], [])
+                    self.assertEqual(
+                        payload['reply_markup']['inline_keyboard'][-1][0]['callback_data'], 'jobs|0'
+                    )
 
     def test_check_uses_text_states_and_keeps_recovery_actions(self):
         self.bot.call = Mock(
@@ -545,15 +552,14 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(
             [row[0]['callback_data'] for row in main['reply_markup']['inline_keyboard']],
             [
-                'manage|statistics',
-                'manage|status',
-                'manage|check',
+                'overview',
+                'invitations',
                 'federation',
                 'maintenance',
                 'more',
             ],
         )
-        self.assertNotIn('invite', str(main))
+        self.assertIn('invitations', str(main))
         self.assertIn('manage|restart', str(maintenance))
         self.assertIn('backups', str(maintenance))
         self.assertNotIn('manage|backup', str(maintenance))
@@ -1069,6 +1075,84 @@ class WorkerTests(unittest.TestCase):
         with patch('worker.bridge_call', return_value={**self.policy, 'other.example': {}}):
             handler.do_GET()
         self.assertEqual(handler.send_response.call_args.args[0], 503)
+
+    def test_backup_confirmation_uses_actual_destination_and_authentication_scope(self):
+        body = self.bot.backup_confirmation(
+            {'destination': 'local', 'authentication': 'external-MAS-not-included'}
+        )
+        self.assertIn('останется на этом сервере', body)
+        self.assertIn('MAS в эту копию не входит', body)
+        self.assertNotIn('отправится', body)
+        self.assertIn(
+            'внешнее хранилище', self.bot.backup_confirmation({'destination': 'external'})
+        )
+
+    def test_storage_unknown_fields_never_appear_disconnected(self):
+        self.bot.call = Mock(return_value={'ok': False, 'storage': {'media_s3': None}})
+        self.bot.manage(123, 123, 'storage')
+        body = self.bot.telegram.call_args.args[1]['text']
+        self.assertIn('нет данных', body)
+        self.assertNotIn('не подключены', body)
+        self.assertNotIn('последняя копия проверена', body.lower())
+
+    def test_job_failure_does_not_leak_raw_sdk_and_recovery_matches_operation(self):
+        self.bot.job_message(
+            123,
+            {
+                'job': 'SO-fictional',
+                'operation': 'update',
+                'state': 'interrupted',
+                'result': {'ok': False, 'message': 'SDK SECRET', 'stderr': 'SECRET'},
+            },
+        )
+        body = self.bot.telegram.call_args.args[1]['text']
+        self.assertIn('прервано', body)
+        self.assertNotIn('SECRET', body)
+        self.assertNotIn('backup recover', body)
+
+    def test_tokens_list_is_compact_and_selected_token_is_read_separately(self):
+        def control(request):
+            if request['action'] == 'tokens':
+                return {
+                    'tokens': [{'id': 'own', 'attributes': {'valid': True, 'token': 'SHARE-CODE'}}],
+                    'has_more': False,
+                }
+            return self.control(request)
+
+        with patch('worker.bridge_call', side_effect=control):
+            event = self.message()
+            event['message']['text'] = '/tokens'
+            self.bot.process(event)
+        payload = self.bot.telegram.call_args.args[1]
+        self.assertNotIn('SHARE-CODE', payload['text'])
+        self.assertEqual(
+            payload['reply_markup']['inline_keyboard'][0][0]['callback_data'], 'token|own'
+        )
+
+    def test_overview_is_one_card_with_safe_diagnostics(self):
+        self.policy['misbot.ru']['management_actions'] = ['status', 'check']
+
+        def control(request):
+            if request['action'] == 'manage_read':
+                return (
+                    {
+                        'ok': False,
+                        'checks': [{'name': 'mas', 'passed': False, 'detail': 'HTTP 503.'}],
+                    }
+                    if request['operation'] == 'check'
+                    else {
+                        'ok': True,
+                        'containers': [{'name': 'synapse', 'running': True, 'healthy': True}],
+                    }
+                )
+            return self.control(request)
+
+        with patch('worker.bridge_call', side_effect=control):
+            self.bot.overview(123, 123)
+        self.bot.telegram.assert_called_once()
+        body = self.bot.telegram.call_args.args[1]['text']
+        self.assertIn('synapse', body)
+        self.assertIn('HTTP 503', body)
 
 
 if __name__ == '__main__':

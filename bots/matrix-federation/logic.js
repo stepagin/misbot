@@ -4,11 +4,11 @@ const { createHash } = require("node:crypto");
 
 const HELP = `Панель администратора Misbot
 
-1. \`статистика\` — сообщения и регистрации
-2. \`состояние\` — службы и доступность сервера
+1. \`состояние\` — службы и доступность сервера
+2. \`приглашения\` — пригласить пользователя
 3. \`федерация\` — подключение серверов и заявки
 4. \`обслуживание\` — службы, обновления и копии
-5. \`ещё\` — приглашения, сообщения и настройки
+5. \`настройки\` — сообщения и дополнительные действия
 
 Напишите команду из списка. \`меню\` — вернуться сюда`;
 const MORE = `Дополнительные действия
@@ -24,12 +24,11 @@ const MORE = `Дополнительные действия
 const MAINTENANCE = `Обслуживание сервера
 
 1. \`перезапустить сервер\` — перезапустить службы
-2. \`запустить службы\` / \`остановить службы\`
+2. \`службы\` — дополнительные действия
 3. \`обновления\` — проверить версию
 4. \`копии\` — создать или проверить резервную копию
 5. \`хранилище\` — медиа и резервные копии
-6. \`операции\` — задачи федерации
-7. \`задачи\` — выбрать задачу обслуживания и проверить результат
+6. \`история\` — результаты обслуживания и федерации
 
 Памятка: изменения требуют подтверждения. Отмена предложения не прерывает запущенную задачу.
 Назад: \`меню\``;
@@ -65,6 +64,7 @@ const COPIES = `Резервные копии
 1. \`создать копию\` — создать резервную копию
 2. \`проверить копию\` — проверить восстановление в изолированной среде
 3. \`хранилище\` — состояние копий
+4. \`расписание копий\` — автоматические копии
 
 Назад: \`обслуживание\``;
 
@@ -239,7 +239,11 @@ function resultText(result) {
     ];
     if (result.server) lines.push(`Сервер: ${result.server}`);
     if (result.state) lines.push(`Состояние: ${stateText(result.state)}`);
-    if (result.servers) {
+    if (result.open === true || result.servers === null)
+        lines.push("Федерация открыта для всех серверов.");
+    if (Array.isArray(result.servers) && result.servers.length === 0)
+        lines.push("Другие серверы ещё не добавлены.");
+    if (Array.isArray(result.servers) && result.servers.length) {
         lines.push("Разрешённые серверы:");
         result.servers.forEach((server, index) => lines.push(`${index + 1}. ${server}`));
     }
@@ -297,12 +301,41 @@ function resultText(result) {
     return lines.join("\n");
 }
 
+function flag(value, yes = "подключено", no = "не подключено") {
+    return value === true ? yes : value === false ? no : "нет данных";
+}
+function backupText(backup = {}) {
+    const lines = [];
+    if (["local", "external"].includes(backup.destination))
+        lines.push(
+            "Назначение копии: " +
+                (backup.destination === "local" ? "этот сервер" : "внешнее хранилище") +
+                "."
+        );
+    if (backup.artifact) lines.push("Копия: " + backup.artifact);
+    if (backup.restore_verified === true) lines.push("Восстановление временных баз проверено.");
+    if (backup.verified_databases?.length)
+        lines.push("Проверенные базы: " + backup.verified_databases.join(", "));
+    if (backup.authentication === "external-MAS-not-included")
+        lines.push("Внешний MAS в копию не входит. Сохраните его отдельно.");
+    return lines.join("\n");
+}
+
 function serverText(result) {
-    if (result.statistics) return statisticsText(result.statistics);
+    const activity = result.statistics ? statisticsText(result.statistics) : null;
     const lines = [
-        result.ok === true
-            ? "Сервер: проверка пройдена."
-            : "Сервер: есть недоступные службы или проверки."
+        activity ||
+            (result.storage
+                ? "Хранилища и копии"
+                : result.schedule
+                  ? "Расписание копий"
+                  : result.components
+                    ? "Компоненты сервера"
+                    : result.backup
+                      ? "Результат резервного копирования"
+                      : result.ok === true
+                        ? "Сервер: проверка пройдена."
+                        : "Сервер: есть недоступные службы или проверки.")
     ];
     if (result.checked_at)
         lines.push(
@@ -314,11 +347,12 @@ function serverText(result) {
         );
     for (const item of result.checks || [])
         lines.push(
-            `${item.passed ? "✓" : "✗"} ${item.name}: ${item.passed ? "доступно" : "недоступно"}`
+            `${item.passed ? "✓" : "✗"} ${item.name}: ${item.passed ? "доступно" : "недоступно"}${!item.passed && item.detail ? " — " + item.detail : ""}`
         );
     if (result.resources || result.statistics) {
         const r = result.resources || result.statistics;
-        if (r.cpu_used_percent != null) lines.push(`CPU: ${r.cpu_used_percent.toFixed(1)}%`);
+        if (typeof r.cpu_used_percent === "number" && Number.isFinite(r.cpu_used_percent))
+            lines.push(`CPU: ${r.cpu_used_percent.toFixed(1)}%`);
         if (r.cpu_count != null) lines.push(`Процессоров: ${r.cpu_count}`);
         if (r.cpu_load != null) lines.push(`Средняя нагрузка за минуту: ${r.cpu_load}`);
         if (r.load_1m != null) lines.push(`Средняя нагрузка за минуту: ${r.load_1m}`);
@@ -343,14 +377,49 @@ function serverText(result) {
     }
     if (result.storage) {
         const s = result.storage;
-        lines.push(`Внешнее хранилище медиа: ${s.media_s3 ? "подключено" : "не подключено"}`);
-        lines.push(`Внешнее хранилище копий: ${s.backup_s3 ? "подключено" : "не подключено"}`);
+        lines.push(`Внешнее хранилище медиа: ${flag(s.media_s3)}`);
+        lines.push(`Внешнее хранилище копий: ${flag(s.backup_s3)}`);
         lines.push(
-            `Последняя копия: ${s.last_backup_verified ? "проверена" : "проверка не подтверждена"}`
+            `Целостность внешней копии: ${flag(s.upload_verified, "подтверждена", "не подтверждена")}`
         );
+        lines.push(
+            "Проверка восстановления: " +
+                (s.restore_verified === true && s.restore_scope === "selected-backup"
+                    ? "подтверждена для выбранной внешней копии"
+                    : s.restore_verified === true && s.last_restore_verified_at
+                      ? "есть сохранённая успешная проверка"
+                      : "нет данных")
+        );
+        if (s.last_restore_verified_at)
+            lines.push(
+                "Последняя подтверждённая проверка: " + humanDate(s.last_restore_verified_at)
+            );
         if (s.backup_pending || s.media_pending)
             lines.push("Есть незавершённая операция хранилища.");
     }
+    if (result.backup) lines.push(backupText(result.backup));
+    if (result.schedule) {
+        const s = result.schedule;
+        lines.push("Расписание: " + flag(s.configured, "настроено", "не настроено"));
+        if (s.configured === true) lines.push("Таймер: " + flag(s.enabled, "включён", "выключен"));
+        if (s.next_run) lines.push("Следующий запуск: " + s.next_run);
+        if (s.last_verified_at)
+            lines.push("Последняя подтверждённая проверка: " + humanDate(s.last_verified_at));
+        if (s.needs_reconfigure) lines.push("После переноса настройте расписание через SSH.");
+    }
+    if (result.components) {
+        const c = result.components;
+        lines.push("Реферальный бот: " + flag(c.referral_bot));
+        lines.push("Панель администратора: " + flag(c.federation_bot));
+        if (c.pending)
+            lines.push(
+                "Подключение компонентов не завершено. Проверьте `sudo misbot features status` через SSH."
+            );
+        if (c.admin) lines.push("Веб-панель: https://" + c.admin + "/");
+        if (c.homepage) lines.push("Сайт: https://" + c.homepage + "/");
+    }
+    if (result.installed || result.version)
+        lines.push("Версия Misbot: " + (result.installed || result.version));
     if (result.backup_pending) lines.push("Есть незавершённая операция резервного копирования.");
     if (result.recovery_required)
         lines.push("Проверьте сохранённое состояние через SSH перед повтором.");
@@ -361,7 +430,10 @@ function serverText(result) {
         !result.checks &&
         !result.resources &&
         !result.statistics &&
-        !result.storage
+        !result.storage &&
+        !result.backup &&
+        !result.schedule &&
+        !result.components
     )
         lines.push(resultText(result));
     return lines.join("\n");
@@ -447,6 +519,16 @@ function confirmationText(action, argument) {
 
 function errorText(code) {
     const messages = {
+        authorization_unavailable:
+            "Права администратора не подтверждены; изменение не запускалось.",
+        configuration_changed:
+            "Параметры копии изменились; изменение не запускалось. Подготовьте новую копию с подтверждением.",
+        operation_timeout:
+            "Ответ не получен вовремя; часть работы могла выполниться. Проверьте сохранённую задачу.",
+        runner_unavailable:
+            "Не удалось запустить управляющий процесс. Проверьте состояние через SSH.",
+        backend_unconfirmed:
+            "Служба управления не подтвердила завершение операции. Проверьте сохранённую задачу.",
         api_disabled: "API Misbot выключен. Откройте «\`федерация\`», чтобы проверить настройки.",
         invitation_rate_limit:
             "Новое приглашение можно создать не чаще одного раза в минуту. Повторите позже.",
@@ -708,7 +790,7 @@ class FederationBot {
         this.store.setValue("processed:" + event.event_id, Date.now());
         if (text === "отмена" || (draft && text === "отменить")) {
             this.store.setValue(key, null);
-            await reply("Действие отменено.");
+            await reply("Предложение отменено. Уже принятая задача продолжает выполняться.");
             return;
         }
         const clearProposal = () => {
@@ -726,6 +808,28 @@ class FederationBot {
             ) {
                 await reply("Действующего предложения нет. Выберите действие заново.");
                 return;
+            }
+            if (
+                draft.action === "panel-server-operation" &&
+                draft.argument?.operation === "backup" &&
+                !draft.submitted
+            ) {
+                const current = await this.call(
+                    "panel-server-read",
+                    { operation: "backup_preview" },
+                    event
+                );
+                if (
+                    !draft.backupPreview ||
+                    current.backup?.destination !== draft.backupPreview.destination ||
+                    current.backup?.authentication !== draft.backupPreview.authentication
+                ) {
+                    this.store.setValue(key, null);
+                    await reply(
+                        "Параметры копии изменились. Отправьте `создать копию` для нового подтверждения."
+                    );
+                    return;
+                }
             }
             if (WRITES.has(draft.action) && !draft.submitted) {
                 const refusal = await this.validate(draft, event);
@@ -817,12 +921,24 @@ class FederationBot {
             await reply(HELP);
             return;
         }
-        if (text === "ещё" || text === "еще") {
+        if (text === "ещё" || text === "еще" || text === "настройки") {
             await reply(MORE);
             return;
         }
         if (text === "обслуживание") {
             await reply(MAINTENANCE);
+            return;
+        }
+        if (text === "история") {
+            await reply(
+                "История операций\n\n`задачи` — обслуживание сервера\n`операции` — федерация\n\nНазад: `обслуживание`"
+            );
+            return;
+        }
+        if (text === "службы") {
+            await reply(
+                "Дополнительное обслуживание\n\n`запустить службы`\n`остановить службы`\n\nПосле остановки управление в чате может быть недоступно; для запуска нужен SSH.\nНазад: `обслуживание`"
+            );
             return;
         }
         if (text === "копии" || text === "резервные копии") {
@@ -873,7 +989,9 @@ class FederationBot {
             "статус сервера": "check",
             "проверить": "check",
             "проверить сервер": "check",
-            "хранилище": "storage"
+            "хранилище": "storage",
+            "компоненты": "components",
+            "расписание копий": "backup_schedule"
         };
         if (Object.hasOwn(reads, text)) {
             const result = await this.call("panel-server-read", { operation: reads[text] }, event);
@@ -893,7 +1011,7 @@ class FederationBot {
                         ...result,
                         containers: status.containers,
                         ok: status.ok === true && result.ok === true
-                    })
+                    }) + "\n\nПодробнее: `статистика`, `компоненты`, `хранилище`."
                 );
             } else await reply(serverText(result));
             return;
@@ -909,16 +1027,27 @@ class FederationBot {
         if (Object.hasOwn(serverWrites, text)) {
             clearProposal();
             const operation = serverWrites[text];
+            const backupPreview =
+                operation === "backup"
+                    ? (await this.call("panel-server-read", { operation: "backup_preview" }, event))
+                          .backup
+                    : null;
             this.store.setValue(key, {
                 kind: "operation",
                 action: "panel-server-operation",
-                argument: { operation },
+                backupPreview,
+                argument: {
+                    operation,
+                    ...(backupPreview ? { backup_preview: backupPreview } : {})
+                },
                 actor: event.sender,
                 room,
                 id: event.event_id,
                 created: Date.now()
             });
-            await reply(confirmationText(operation));
+            let preview = "";
+            if (operation === "backup") preview = backupText(backupPreview) + "\n";
+            await reply(preview + confirmationText(operation));
             return;
         }
         const requestPage = text.match(
@@ -1080,7 +1209,9 @@ class FederationBot {
                 },
                 event
             );
-            await reply("Настройка уведомлений сохранена.");
+            await reply(
+                `Уведомления: ${m[1]} — ${m[2] === "включить" ? "включены" : "выключены"}. Это общая настройка сервера.`
+            );
             return;
         }
         m = text.match(/^статистика (день|неделя|месяц|всего)$/);
@@ -1109,7 +1240,7 @@ class FederationBot {
             return;
         }
         if (!request) {
-            await reply(HELP);
+            await reply("Команда не распознана.\n\n" + HELP);
             return;
         }
         if (WRITES.has(request.action)) {

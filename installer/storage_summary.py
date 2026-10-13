@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 
 import configuration
@@ -16,11 +17,31 @@ def summary(root):
         profile = root / 'settings/backup.env'
         record_path = root / 'config/backup-schedule.json'
         record = configuration.read_private_json(record_path) if record_path.exists() else {}
-        verified = False
-        for path in sorted((root / 'stages/external-backups').glob('*/catalog.json'), reverse=True):
-            catalog = configuration.read_private_json(path)
-            verified = catalog.get('upload_verified') is True
-            break
+        verified = None
+        catalogs = sorted(
+            (
+                path
+                for path in (root / 'stages/external-backups').glob('*/catalog.json')
+                if re.fullmatch(r'\d{8}T\d{6}Z-[a-f0-9]+', path.parent.name)
+            ),
+            reverse=True,
+        )
+        if catalogs:
+            stamp = catalogs[0].parent.name.split('-', 1)[0]
+            latest = [path for path in catalogs if path.parent.name.startswith(stamp + '-')]
+            if len(latest) == 1:
+                catalog = configuration.read_private_json(latest[0])
+                verified = (
+                    catalog.get('upload_verified')
+                    if type(catalog.get('upload_verified')) is bool
+                    else None
+                )
+        try:
+            from backup_schedule import verified_status
+
+            restored = verified_status(root).get('last_verified')
+        except (OSError, RuntimeError, ValueError):
+            restored = None
         return {
             'check': 'storage_status',
             'media_s3': metadata.get('media_mode') == 's3',
@@ -30,7 +51,11 @@ def summary(root):
             'local_backup_directory': str(root / 'backups'),
             'media_pending': bool(metadata.get('media_transition_pending')),
             'database_pending': (root / 'database-transition.json').exists(),
-            'last_backup_verified': verified,
+            'last_backup_verified': verified,  # Legacy: upload integrity, not database restore.
+            'upload_verified': verified,
+            'restore_verified': True if restored else None,
+            'restore_scope': 'scheduled-history' if restored else None,
+            'last_restore_verified_at': restored.get('completed_utc') if restored else None,
         }
 
 

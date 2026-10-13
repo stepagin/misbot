@@ -203,6 +203,7 @@ def run_job(root, identifier):
         )
     job['finished'] = time.time()
     state_store.write_json(path, job)
+    return job
 
 
 def recover_job(root):
@@ -268,14 +269,16 @@ def main():
     state_store.require_root()
     __import__('command_wrapper').trusted_installation(args.directory)
     if args.job:
-        run_job(args.directory, args.job)
-    else:
-        print(json.dumps(apply(args.directory), ensure_ascii=False))
+        job = run_job(args.directory, args.job)
+        return 0 if job['state'] == 'complete' else 1
+    result = apply(args.directory)
+    print(json.dumps(result, ensure_ascii=False))
+    return 1 if result.get('success') is False else 0
 
 
 if __name__ == '__main__':
     try:
-        main()
+        raise SystemExit(main())
     except (OSError, RuntimeError, ValueError):
         print(
             'Обновление не начато или не подтверждено. Проверьте GitHub Releases, df -h и sudo misbot status.',

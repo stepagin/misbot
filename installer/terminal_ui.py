@@ -707,9 +707,17 @@ class UI:
             if key in records or len(records) < 256:
                 records[key] = line
 
+        presentation_result = None
+
         def remember_output(record, messages):
             if not isinstance(record, dict):
                 return
+            nonlocal presentation_result
+            from terminal_results import presentation_outcome
+
+            outcome = presentation_outcome(path, record)
+            if outcome is not None:
+                presentation_result = outcome
             if (
                 (path == 'storage s3 check' and record.get('schema') == 1)
                 or (path.startswith('users invitation ') and 'state' in record)
@@ -744,6 +752,10 @@ class UI:
                 del self.operation_records[:-100]
             if path != 'users invitation list':
                 self.result_messages = messages[:100]
+            from terminal_results import format_record
+
+            if format_record(path, record) is not None:
+                self.result_notices.extend(messages[:100])
             failed = (
                 record.get('passed') is False
                 or record.get('status') in ('failed', 'error')
@@ -769,6 +781,12 @@ class UI:
             self.result_notices = list(dict.fromkeys(self.result_notices))[-100:]
 
         def remember_plain_output(line):
+            from terminal_results import format_plain_result
+
+            known = format_plain_result(path, line)
+            if known:
+                self.result_notices = list(dict.fromkeys([*self.result_notices, *known]))[-100:]
+                return
             # These helpers deliberately print human guidance on failure. Other
             # unstructured child output may be a provider dump or traceback.
             if not path.startswith(('admin bot ', 'admin access ')):
@@ -865,7 +883,7 @@ class UI:
                         for row in self.check_results
                     )
                 ]
-            return code
+            return 1 if code == 0 and presentation_result is False else code
         except (KeyboardInterrupt, state_store.OperationInterrupted):
             if child.poll() is None or (not interactive and process_group_running(child)):
                 if not interactive and isinstance(getattr(child, 'pid', None), int):

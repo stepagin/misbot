@@ -45,6 +45,7 @@ class ManagementTests(unittest.TestCase):
             )
         )
         (self.root / 'installation.json').write_text('{"backend":"existing-compose"}')
+        (self.root / 'installation.json').chmod(0o600)
         self.bridge = Bridge(self.root / 'bot-config.json', FakeMAS)
         self.api = self.bridge.apis['example.org']
         for uid in (10, 11):
@@ -346,6 +347,39 @@ class ManagementTests(unittest.TestCase):
         ):
             self.assertEqual(self.call('manage_job', job=job['job'])['state'], 'running')
             enqueue.assert_not_called()
+
+    def test_history_is_bounded_and_never_lists_another_actor(self):
+        for uid in (10, 11):
+            self.bridge.db.execute(
+                'INSERT INTO management_jobs VALUES (?,?,?,?,?,?)',
+                ('legacy-' + str(uid), 'example.org', uid, 'backup', 'interrupted', None),
+            )
+        self.bridge.db.commit()
+        result = self.call('manage_jobs')
+        self.assertEqual([job['job'] for job in result['jobs']], ['legacy-10'])
+        self.api.admin = False
+        with self.assertRaises(BotError):
+            self.call('manage_jobs')
+
+    def test_token_read_requires_current_login_and_ownership(self):
+        own = self.call('invite', request_id='owner-test')
+        self.assertEqual(self.call('token', resource=own['id'])['id'], own['id'])
+        with self.assertRaises(BotError):
+            self.call('token', uid=11, resource=own['id'])
+        self.call('logout')
+        with self.assertRaises(BotError):
+            self.call('token', resource=own['id'])
+
+    def test_changed_backup_destination_invalidates_confirmation_before_enqueue(self):
+        prepared = self.call('manage_prepare', operation='backup')
+        self.assertEqual(prepared['backup']['destination'], 'local')
+        folder = self.root / '.misbot/s3'
+        folder.mkdir(parents=True)
+        (folder / 'backup-active.json').write_text('{}')
+        with patch('server_management.queue_operation') as queued:
+            with self.assertRaisesRegex(BotError, 'Параметры копии изменились'):
+                self.call('manage_apply', confirmation=prepared['confirmation'])
+        queued.assert_not_called()
 
 
 if __name__ == '__main__':

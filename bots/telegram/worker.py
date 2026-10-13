@@ -317,15 +317,13 @@ class Bot:
             return self.invitations(chat, uid, force_refresh=force_refresh)
         actions = policy.get('management_actions', [])
         buttons = []
-        for operation, title in (
-            ('statistics', 'Статистика'),
-            ('status', 'Статус служб'),
-            ('check', 'Проверить сервер'),
+        if any(
+            operation in actions for operation in ('status', 'check', 'statistics', 'components')
         ):
-            if operation in actions:
-                buttons.append([self.button(title, 'manage|' + operation)])
+            buttons.append([self.button('Состояние', 'overview')])
+        buttons.append([self.button('Пригласить', 'invitations')])
         if policy.get('federation_enabled', True):
-            buttons.append([self.button('Федерация', 'federation')])
+            buttons.append([self.button('Заявки и федерация', 'federation')])
         if any(
             operation in actions
             for operation in (
@@ -336,13 +334,14 @@ class Bot:
                 'update',
                 'backup',
                 'backup_verify',
+                'storage_connect',
             )
         ):
             buttons.append([self.button('Обслуживание', 'maintenance')])
-        buttons.append([self.button('Ещё', 'more')])
+        buttons.append([self.button('Настройки', 'more')])
         return self.screen(
             chat,
-            f'Misbot · {name}\n\nУправление сервером. Выберите статистику, статус служб или проверку доступности.',
+            f'Misbot · {name}\n\nВыберите действие. Результаты обслуживания сохраняются в истории.',
             buttons,
             force_refresh=force_refresh,
         )
@@ -367,12 +366,13 @@ class Bot:
             raise BotError('Управление сервером доступно администраторам.')
         actions = self.policy(uid).get('management_actions', [])
         groups = {
-            'maintenance': (
-                'Обслуживание',
+            'maintenance': ('Обслуживание', [('restart', 'Перезапустить службы')]),
+            'services': (
+                'Дополнительное обслуживание',
                 [
                     ('start', 'Запустить службы'),
                     ('stop', 'Остановить службы'),
-                    ('restart', 'Перезапустить службы'),
+                    ('storage_connect', 'Применить подготовленный профиль S3'),
                 ],
             ),
             'backups': (
@@ -381,6 +381,7 @@ class Bot:
                     ('storage', 'Состояние хранилищ и копий'),
                     ('backup', 'Создать резервную копию'),
                     ('backup_verify', 'Проверить последнюю копию'),
+                    ('backup_schedule', 'Расписание копий'),
                 ],
             ),
             'updates': (
@@ -388,11 +389,10 @@ class Bot:
                 [('update_check', 'Проверить обновления'), ('components', 'Состояние компонентов')],
             ),
             'more': (
-                'Ещё',
+                'Настройки',
                 [
                     ('storage', 'Хранилища'),
                     ('components', 'Компоненты и веб-панель'),
-                    ('storage_connect', 'Применить подготовленный профиль S3'),
                 ],
             ),
         }
@@ -403,6 +403,9 @@ class Bot:
             if identity.get('admin') and operation in actions
         ]
         if group == 'maintenance':
+            buttons.append([self.button('История операций', 'jobs|0')])
+            if any(operation in actions for operation in ('start', 'stop', 'storage_connect')):
+                buttons.append([self.button('Дополнительные действия', 'services')])
             if any(operation in actions for operation in ('storage', 'backup', 'backup_verify')):
                 buttons.append([self.button('Резервные копии', 'backups')])
             if any(operation in actions for operation in ('components', 'update_check', 'update')):
@@ -410,10 +413,12 @@ class Bot:
         if group == 'more':
             buttons.insert(0, [self.button('Приглашения', 'invitations')])
             buttons.append([self.button('Выйти из бота', '/logout')])
-        buttons.append(self.back('maintenance' if group in ('backups', 'updates') else 'menu'))
+        buttons.append(
+            self.back('maintenance' if group in ('backups', 'updates', 'services') else 'menu')
+        )
         return self.screen(chat, title + '\n\nВыберите действие.', buttons)
 
-    def login(self, chat, uid, force_refresh=False):
+    def login(self, chat, uid, force_refresh=False, pending=False):
         auth = self.call('auth_start', uid)
         text = (
             'Войдите в свой Matrix-аккаунт. Управление сервером доступно администраторам.\n\n'
@@ -421,6 +426,8 @@ class Bot:
             + auth['user_code']
             + '\n\nПодтверждайте только свой запрос. После входа вернитесь в чат и нажмите «Проверить вход».'
         )
+        if pending:
+            text = 'Вход ещё не подтверждён.\n\n' + text
         return self.screen(
             chat,
             self.with_code(text, auth['user_code']),
@@ -488,6 +495,7 @@ class Bot:
                 [self.button('Отправленные приглашения', 'fed_requests|outgoing|0')],
                 [self.button('Отклонённые заявки', 'fed_requests|rejected|0')],
                 [self.button('Серверы федерации', 'fed_servers')],
+                [self.button('Проверить сервер', 'fed_check')],
                 [self.button('Настройки API', 'fed_api')],
                 self.back(),
             ],
@@ -581,7 +589,7 @@ class Bot:
             buttons.append(
                 [
                     self.button(
-                        'Повторить обмен' if item.get('safe_error') else 'Проверить другой сервер',
+                        'Продолжить обмен',
                         'fed_prepare|retry|' + request_id,
                     )
                 ]
@@ -765,6 +773,8 @@ class Bot:
                 buttons.append([self.button('Подготовить обновление', 'manage|update')])
             if not result.get('ok'):
                 text += '\nПроверка доступного выпуска не подтверждена. Повторите позже.'
+            elif not release.get('update_available'):
+                text += '\nБолее новая стабильная версия не найдена.'
             buttons.append(self.back('updates'))
             return self.screen(chat, text, buttons)
         if operation == 'statistics':
@@ -846,11 +856,20 @@ class Bot:
             data = result.get('storage', {})
             text = (
                 'Вложения в S3: '
-                + ('подключены' if data.get('media_s3') else 'не подключены')
+                + self.flag(data.get('media_s3'), 'подключены', 'не подключены')
                 + '\nРезервные копии в S3: '
-                + ('подключены' if data.get('backup_s3') else 'не подключены')
-                + '\nПоследняя внешняя копия: '
-                + ('проверена' if data.get('last_backup_verified') else 'не подтверждена')
+                + self.flag(data.get('backup_s3'), 'подключены', 'не подключены')
+                + '\nЦелостность внешней копии: '
+                + self.flag(data.get('upload_verified'), 'подтверждена', 'не подтверждена')
+                + '\nПроверка восстановления: '
+                + (
+                    'подтверждена для выбранной внешней копии'
+                    if data.get('restore_verified') is True
+                    and data.get('restore_scope') == 'selected-backup'
+                    else 'последняя успешная: ' + self.date_text(data['last_restore_verified_at'])
+                    if data.get('restore_verified') is True and data.get('last_restore_verified_at')
+                    else 'нет данных'
+                )
             )
             if data.get('media_pending'):
                 text += '\nПеренос вложений в S3 не завершён. Через SSH выполните misbot storage recover.'
@@ -860,6 +879,27 @@ class Bot:
                 text += '\nПолное состояние хранилищ не получено. Повторите проверку этой кнопкой.'
             return self.screen(
                 chat, text, [[self.button('Обновить', 'manage|storage')], self.back('backups')]
+            )
+        if operation == 'backup_schedule':
+            result = self.call('manage_read', uid, operation=operation)
+            schedule = result.get('schedule', {})
+            text = 'Расписание резервных копий\n\n' + self.flag(
+                schedule.get('configured'), 'Настроено.', 'Не настроено.'
+            )
+            if schedule.get('configured') is True:
+                text += '\nТаймер: ' + self.flag(schedule.get('enabled'), 'включён', 'выключен')
+            if schedule.get('next_run'):
+                text += '\nСледующий запуск: ' + schedule['next_run']
+            if schedule.get('last_verified_at'):
+                text += '\nПоследняя подтверждённая проверка: ' + schedule['last_verified_at']
+            if schedule.get('needs_reconfigure'):
+                text += '\nПосле переноса настройте расписание через SSH.'
+            if not result.get('ok'):
+                text += '\nПолное состояние расписания не получено.'
+            return self.screen(
+                chat,
+                text,
+                [[self.button('Обновить', 'manage|backup_schedule')], self.back('backups')],
             )
         if operation in ('status', 'check'):
             result = self.call('manage_read', uid, operation=operation)
@@ -878,6 +918,11 @@ class Bot:
                         )
                     elif item.get('detail'):
                         text += ' — ' + item['detail']
+            if result.get('checked_at'):
+                text += '\nПроверено: ' + self.date_text(result['checked_at'])
+            resources = result.get('resources', {})
+            if resources.get('disk_free_bytes') is not None:
+                text += '\nСвободное место: ' + self.size_text(resources['disk_free_bytes'])
             if result.get('backup_pending'):
                 text += '\nРезервная копия не завершена. Через SSH выполните misbot backup recover.'
             if not result['ok']:
@@ -893,10 +938,10 @@ class Bot:
             'start': 'Запустить службы?\nИзменённые службы могут перезапуститься.',
             'stop': 'Остановить службы Matrix?\nСервер будет недоступен до запуска служб. Вход через MAS и управление ботами могут стать недоступны. Для возвращения через SSH: sudo misbot start, затем sudo misbot check. Убедитесь, что у вас есть доступ по SSH.',
             'restart': 'Перезапустить службы Matrix?\nОбщение будет кратко недоступно. После перезапуска будет проверена доступность.',
-            'update': 'Обновить компоненты?\nПеред применением сервер проверит совместимость и резервную копию. Общение может быть временно недоступно.',
+            'update': 'Обновить Misbot?\nПеред применением сервер проверит совместимость и резервную копию. Общение может быть временно недоступно.',
             'backup_verify': 'Проверить последнюю резервную копию?\nДля проверки будут восстановлены временные базы. Службы продолжат работу.',
             'storage_connect': 'Применить подготовленный профиль S3 вложений?\nФайл проверен; доступ к хранилищу будет проверен при применении. Synapse кратко перезапустится. Локальные файлы сохранятся.',
-            'backup': 'Создать согласованную резервную копию?\nSynapse и MAS временно остановятся. Если S3 подключён, полный архив отправится туда зашифрованным.',
+            'backup': self.backup_confirmation(confirmation.get('backup', {})),
         }.get(operation, 'Выполнить операцию управления?')
         if confirmation.get('summary'):
             text = confirmation['summary']
@@ -919,40 +964,187 @@ class Bot:
             parse_mode=parse_mode,
         )
 
-    def job_message(self, chat, job):
-        if job['state'] in ('queued', 'running'):
-            return self.screen(
-                chat,
-                ('Операция принята.' if job['state'] == 'queued' else 'Операция выполняется.')
-                + ' Нажмите «Проверить результат», чтобы узнать её состояние.',
-                [[self.button('Проверить результат', 'manage_job|' + job['job'])]],
-                key='job:' + str(chat) + ':' + job['job'],
+    @staticmethod
+    def flag(value, yes='да', no='нет'):
+        return yes if value is True else no if value is False else 'нет данных'
+
+    @staticmethod
+    def backup_confirmation(backup):
+        destination = {
+            'local': 'Копия останется на этом сервере.',
+            'external': 'Зашифрованная копия отправится в настроенное внешнее хранилище.',
+        }.get(
+            backup.get('destination'),
+            'Назначение копии не подтверждено; проверьте настройки через SSH.',
+        )
+        text = 'Создать согласованную резервную копию?\n' + destination
+        text += '\nСлужбы записи временно остановятся.'
+        if backup.get('authentication') == 'external-MAS-not-included':
+            text += '\nВнешний MAS в эту копию не входит. Сохраните его отдельно.'
+        return text
+
+    def overview(self, chat, uid):
+        actions = self.policy(uid).get('management_actions', [])
+        lines = ['Состояние сервера']
+        for operation in ('status', 'check'):
+            if operation not in actions:
+                continue
+            try:
+                result = self.call('manage_read', uid, operation=operation)
+            except BotError:
+                lines.append(
+                    'Состояние служб недоступно.'
+                    if operation == 'status'
+                    else 'Проверка доступности не завершена.'
+                )
+                continue
+            for item in result.get('containers', []):
+                ready = item.get('running') is True and item.get('healthy') is True
+                lines.append(('Проверено: ' if ready else 'Нужна проверка: ') + item['name'])
+            for item in result.get('checks', []):
+                lines.append(
+                    ('Проверено: ' if item.get('passed') is True else 'Нужна проверка: ')
+                    + item['name']
+                    + (' — ' + item['detail'] if item.get('detail') else '')
+                )
+            if result.get('checked_at'):
+                lines.append('Время проверки: ' + self.date_text(result['checked_at']))
+            if result.get('resources', {}).get('disk_free_bytes') is not None:
+                lines.append(
+                    'Свободное место: ' + self.size_text(result['resources']['disk_free_bytes'])
+                )
+            if result.get('ok') is not True:
+                lines.append('Полная готовность не подтверждена.')
+        lines.append('Вход в клиент, переписка и звонки отдельно не проверялись.')
+        rows = [[self.button('Обновить', 'overview')]]
+        for operation, label in (
+            ('statistics', 'Статистика'),
+            ('components', 'Компоненты и ссылки'),
+            ('storage', 'Хранилища'),
+        ):
+            if operation in actions:
+                rows.append([self.button(label, 'manage|' + operation)])
+        return self.screen(chat, '\n'.join(lines), rows + [self.back()])
+
+    def jobs(self, chat, uid, offset=0):
+        page = self.call('manage_jobs', uid, offset=offset)
+        rows = []
+        for job in page['jobs']:
+            rows.append(
+                [
+                    self.button(
+                        self.operation_name(job['operation'])
+                        + ' · '
+                        + self.job_state(job['state']),
+                        'manage_job|' + job['job'],
+                    )
+                ]
             )
-        if job['state'] in ('complete', 'finished') and (job.get('result') or {}).get('ok'):
-            return self.screen(
-                chat,
-                {
-                    'backup': 'Резервная копия создана.',
-                    'start': 'Службы запущены.',
-                    'stop': 'Службы остановлены.',
-                    'restart': 'Службы перезапущены.',
-                    'update': 'Компоненты обновлены.',
-                    'backup_verify': 'Резервная копия проверена.',
-                    'storage_connect': 'S3 вложений подключён.',
-                }.get(job['operation'], 'Операция завершена.'),
-                key='job:' + str(chat) + ':' + job['job'],
-            )
+        paging = []
+        if offset:
+            paging.append(self.button('Предыдущие', 'jobs|' + str(max(0, offset - 5))))
+        if page.get('has_more'):
+            paging.append(self.button('Следующие', 'jobs|' + str(offset + 5)))
+        if paging:
+            rows.append(paging)
         return self.screen(
             chat,
-            'Завершение операции не подтверждено. Через SSH выполните misbot status. '
-            'Если резервная копия не завершена, выполните misbot backup recover.',
-            key='job:' + str(chat) + ':' + job['job'],
+            'Ваши операции' if rows else 'Операций пока нет.',
+            rows + [self.back('maintenance')],
         )
+
+    @staticmethod
+    def operation_name(operation):
+        return {
+            'backup': 'Резервная копия',
+            'backup_verify': 'Проверка копии',
+            'start': 'Запуск служб',
+            'stop': 'Остановка служб',
+            'restart': 'Перезапуск служб',
+            'update': 'Обновление Misbot',
+            'storage_connect': 'Подключение S3',
+        }.get(operation, 'Обслуживание')
+
+    @staticmethod
+    def job_state(state):
+        return {
+            'queued': 'принято',
+            'running': 'выполняется',
+            'complete': 'завершено',
+            'finished': 'завершено',
+            'failed': 'не завершено',
+            'interrupted': 'прервано',
+        }.get(state, 'результат неизвестен')
+
+    def job_message(self, chat, job):
+        result = job.get('result') or {}
+        operation = job.get('operation')
+        state = job['state']
+        title = self.operation_name(operation)
+        rows = []
+        if state in ('queued', 'running'):
+            text = (
+                title
+                + ': '
+                + self.job_state(state)
+                + '.\nПринятие задачи ещё не означает её завершения.'
+            )
+            rows.append([self.button('Проверить результат', 'manage_job|' + job['job'])])
+        elif state in ('complete', 'finished') and result.get('ok') is True:
+            text = title + ': завершено.'
+            backup = result.get('backup', {})
+            if backup.get('destination') in ('local', 'external'):
+                text += (
+                    '\nНазначение: '
+                    + ('этот сервер' if backup['destination'] == 'local' else 'внешнее хранилище')
+                    + '.'
+                )
+            if backup.get('artifact'):
+                text += '\nКопия: ' + backup['artifact']
+            if backup.get('bytes') is not None:
+                text += '\nРазмер: ' + self.size_text(backup['bytes'])
+            if backup.get('restore_verified') is True:
+                text += '\nВосстановление временных баз проверено.'
+            if backup.get('verified_databases'):
+                text += '\nПроверенные базы: ' + ', '.join(backup['verified_databases'])
+            if result.get('installed') or result.get('version'):
+                text += '\nВерсия: ' + str(result.get('installed') or result['version'])
+        else:
+            text = (
+                title
+                + ': '
+                + (
+                    'прервано; результат не подтверждён.'
+                    if state == 'interrupted'
+                    else 'завершение не подтверждено.'
+                )
+            )
+            reasons = {
+                'authorization_unavailable': 'Права администратора не подтверждены; изменение не запускалось.',
+                'configuration_changed': 'Параметры копии изменились; изменение не запускалось. Подготовьте новую копию с подтверждением.',
+                'operation_timeout': 'Ответ не получен вовремя; часть работы могла выполниться.',
+                'runner_unavailable': 'Не удалось запустить управляющий процесс.',
+                'backend_unconfirmed': 'Служба управления не подтвердила завершение операции.',
+            }
+            if result.get('code') in reasons:
+                text += '\n' + reasons[result['code']]
+            text += '\nСначала проверьте сохранённое состояние через SSH: sudo misbot status.'
+            if operation in ('backup', 'backup_verify'):
+                text += '\nПри незавершённой копии: sudo misbot backup recover.'
+            elif operation == 'storage_connect':
+                text += '\nПри незавершённом переносе: sudo misbot storage recover.'
+            text += '\nНе запускайте изменение повторно до проверки результата.'
+        if result.get('backup', {}).get('authentication') == 'external-MAS-not-included':
+            text += '\nВнешний MAS в копию не входит. Сохраните его отдельно.'
+        if job.get('finished_at'):
+            text += '\nВремя результата: ' + self.date_text(job['finished_at'])
+        rows.append(self.back('jobs|0', 'История операций'))
+        return self.screen(chat, text, rows, key='job:' + str(chat) + ':' + job['job'])
 
     def stale_callback(self, chat, message, command):
         # Durable cards carry read actions and token revocation, never panel confirmations.
         if command.startswith(
-            ('revoke|', 'manage_job|', 'fed_job|', 'fed_requests|')
+            ('revoke|', 'token|', 'manage_job|', 'jobs|', 'fed_job|', 'fed_requests|')
         ) or command in ('federation', 'menu'):
             return False
         current = self.state('navigation:' + str(chat))
@@ -994,19 +1186,31 @@ class Bot:
                     'Эта кнопка устарела. Откройте актуальное меню.',
                     [self.back('menu', 'Открыть меню')],
                 )
+            if command == 'auth_check' and not self.call('identity', uid)['authenticated']:
+                self.waiting(uid, None)
+                return self.login(chat, uid, pending=True)
             if command in ('/start', '/help', 'menu', 'cancel', 'auth_check', '/auth', 'auth'):
                 self.waiting(uid, None)
                 return self.menu(chat, uid, force_refresh=not callback)
             if command == '/logout':
                 self.call('logout', uid)
                 self.waiting(uid, None)
-                return self.screen(chat, 'Вы вышли из бота. Для входа отправьте /start.')
+                return self.screen(
+                    chat, 'Вы вышли из бота. Уведомления отключены. Для входа отправьте /start.'
+                )
             if not self.call('identity', uid)['authenticated']:
                 self.waiting(uid, None)
                 return self.login(chat, uid)
-            if command in ('maintenance', 'backups', 'updates', 'more'):
+            if command in ('maintenance', 'backups', 'updates', 'more', 'services'):
                 self.waiting(uid, None)
                 return self.group(chat, uid, command)
+            if command == 'overview':
+                return self.overview(chat, uid)
+            if command.startswith('jobs|'):
+                return self.jobs(chat, uid, int(command.split('|', 1)[1]))
+            if command.startswith('token|'):
+                item = self.call('token', uid, resource=command.split('|', 1)[1])
+                return self.token_message(chat, self.selected(uid), item)
             if command == 'invitations':
                 self.waiting(uid, None)
                 return self.invitations(chat, uid)
@@ -1048,19 +1252,30 @@ class Bot:
                 if offset < 0:
                     raise ValueError('negative offset')
                 page = self.call('tokens', uid, offset=offset)
-                for item in page['tokens']:
-                    self.token_message(chat, self.selected(uid), item)
                 buttons = []
+                for index, item in enumerate(page['tokens'], offset + 1):
+                    attr = item['attributes']
+                    state = (
+                        'действует'
+                        if attr.get('valid') is True
+                        else 'не действует'
+                        if attr.get('valid') is False
+                        else 'статус неизвестен'
+                    )
+                    buttons.append(
+                        [self.button(f'Приглашение {index} · {state}', 'token|' + item['id'])]
+                    )
+                paging = []
                 if offset:
-                    buttons.append(self.button('Предыдущие', 'tokens|' + str(max(0, offset - 5))))
+                    paging.append(self.button('Предыдущие', 'tokens|' + str(max(0, offset - 5))))
                 if page['has_more']:
-                    buttons.append(self.button('Следующие', 'tokens|' + str(offset + 5)))
+                    paging.append(self.button('Следующие', 'tokens|' + str(offset + 5)))
                 return self.screen(
                     chat,
                     'Пока нет приглашений.'
                     if not page['tokens']
                     else 'Ваши приглашения. Страница ' + str(offset // 5 + 1),
-                    ([buttons] if buttons else []) + [self.back('invitations')],
+                    buttons + ([paging] if paging else []) + [self.back('invitations')],
                 )
             if command.startswith('revoke|'):
                 self.call('revoke', uid, resource=command.split('|', 1)[1])
@@ -1068,6 +1283,13 @@ class Bot:
             if command in ('/federation', 'federation'):
                 self.waiting(uid, None)
                 return self.federation(chat, uid)
+            if command == 'fed_check':
+                self.waiting(uid, 'check')
+                return self.screen(
+                    chat,
+                    'Отправьте домен сервера для проверки.',
+                    [self.back('federation', 'Отмена')],
+                )
             if command == 'fed_api':
                 return self.federation_api(chat, uid)
             if command == 'fed_servers':
@@ -1127,10 +1349,28 @@ class Bot:
             with self.db_lock:
                 row = self.db.execute('SELECT waiting FROM users WHERE uid=?', (uid,)).fetchone()
             if row and row[0] and not callback and not text.startswith('/'):
-                self.prepare(chat, uid, row[0], text)
+                if row[0] == 'check':
+                    result = self.call('fed_read', uid, operation='check', target=text)
+                    content = 'Проверка сервера ' + text + '\n'
+                    for key, label in (('matrix', 'Matrix'), ('misbot', 'Misbot API')):
+                        item = result.get(key, {})
+                        content += (
+                            '\n'
+                            + label
+                            + ': '
+                            + self.flag(item.get('available'), 'доступен', 'недоступен')
+                        )
+                    content += '\nРабота федеративных комнат не проверялась.'
+                    self.screen(chat, content, [self.back('federation')])
+                else:
+                    self.prepare(chat, uid, row[0], text)
                 self.waiting(uid, None)
                 return
-            return self.menu(chat, uid)
+            return self.screen(
+                chat,
+                'Команда не распознана. Выберите действие в меню.',
+                [self.back('menu', 'Открыть меню')],
+            )
         except (BotError, ValueError) as error:
             return self.screen(
                 chat,

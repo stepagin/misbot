@@ -134,12 +134,20 @@ class ReferralBot {
                 : seconds % 3600 === 0
                   ? `${seconds / 3600} ч`
                   : `${seconds} с`;
-        return this.client.sendNotice(
-            roomId,
-            `Реферальный бот\n\nпригласить — создать приглашение\nпригласить Для Антона — создать с названием\nтокены [offset] — показать ваши приглашения (например: токены 20)\nотозвать [ID] — выбрать и отозвать ваше приглашение
-помощь — эта справка
-отмена — отменить выбор; ещё / назад — страницы списка; ещё — следующая страница выбора отзыва\n\nРегистраций на код: ${usage}. Срок: ${duration}.`
-        );
+        const commands = [
+            ["пригласить", "создать приглашение"],
+            ["пригласить Для Антона", "создать с названием"],
+            ["мои приглашения", "показать ваши приглашения"],
+            ["отозвать [ID]", "выбрать и отозвать ваше приглашение"],
+            ["помощь", "эта справка"],
+            ["отмена", "отменить выбор"],
+            ["ещё", "следующая страница списка или выбора отзыва"],
+            ["назад", "предыдущая страница списка"]
+        ];
+        const limits = `Регистраций на код: ${usage}. Срок: ${duration}.`;
+        const body = `Реферальный бот\n\n${commands.map(([command, description]) => `${command} — ${description}`).join("\n")}\n\n${limits}`;
+        const html = `<p><strong>Реферальный бот</strong></p><p>${commands.map(([command, description]) => `<code>${escapeHtml(command)}</code> — ${escapeHtml(description)}`).join("<br>")}</p><p>${escapeHtml(limits)}</p>`;
+        return this.client.sendMessage(roomId, notice(body, html));
     }
     async list(room, sender, offset, revoke = false, previous = null) {
         const page = await this.call("tokens", sender, { offset, limit: 20 });
@@ -201,6 +209,7 @@ class ReferralBot {
         const sender = event.sender;
         const key = this.key("revoke", room, sender);
         if (text.startsWith("/")) return this.menu(room);
+        if (text.toLowerCase() === "мои приглашения") text = "токены";
         const match = text.match(/^(\S+)(?:\s+([\s\S]*))?$/);
         const command = match[1].toLowerCase(),
             arg = match[2]?.trim();

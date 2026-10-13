@@ -51,6 +51,25 @@ function setup() {
     return { bot, client, sent, calls, item, event, saved, store, config };
 }
 
+test("menu formats commands and both invitation list aliases preserve ownership", async () => {
+    const { bot, event, calls, sent } = setup();
+    await bot.menu("!room");
+    assert.match(sent[0].body, /мои приглашения — показать ваши приглашения/);
+    assert.match(sent[0].formatted_body, /<code>мои приглашения<\/code>/);
+    assert.match(sent[0].formatted_body, /<code>отозвать \[ID\]<\/code>/);
+    assert.equal(sent[0].format, "org.matrix.custom.html");
+    for (const [index, body] of ["мои приглашения", "токены"].entries()) {
+        await bot.message("!room", {
+            ...event,
+            event_id: `$list-${index}`,
+            content: { msgtype: "m.text", body }
+        });
+        assert.equal(calls.at(-1).action, "matrix_tokens");
+        assert.equal(calls.at(-1).mxid, event.sender);
+        assert.equal(calls.at(-1).offset, 0);
+    }
+});
+
 test("local encrypted direct chat creates one invitation per event", async () => {
     const { bot, event, calls, sent } = setup();
     await bot.message("!room", event);

@@ -11,6 +11,7 @@ import signal
 import time
 
 from startup_process import process_group_running
+from terminal_results import format_plain_result, format_record
 
 MAX_LINE = 256 * 1024
 
@@ -68,7 +69,7 @@ def primary_output(path, line):
     try:
         record = json.loads(line)
     except (ValueError, TypeError):
-        return [line]
+        return format_plain_result(path, line) or [line]
     if not isinstance(record, dict):
         return [line]
     if str(record.get('message', '')).startswith(
@@ -186,32 +187,9 @@ def primary_output(path, line):
                 'Резервная копия прервана. Откройте продолжение резервного копирования.'
             )
         return messages or ['Сведения о службах не получены.']
-    if record.get('check') in ('existing_storage_status', 'storage_status'):
-        if record.get('passed') is False:
-            return ['Сохранённое состояние хранилища не удалось проверить.']
-        return [
-            'Медиа: ' + ('S3' if record.get('media_s3') else 'на этом сервере') + '.',
-            'Копии: ' + ('S3' if record.get('backup_s3') else 'локальные') + '.',
-            'Перенос медиа: '
-            + ('требует продолжения' if record.get('media_pending') else 'не выполняется')
-            + '.',
-            'Внешняя копия: '
-            + ('проверена' if record.get('last_backup_verified') else 'не подтверждена')
-            + '.',
-        ] + (
-            [
-                'База данных: '
-                + (
-                    'внешняя PostgreSQL'
-                    if record.get('database_mode') == 'external'
-                    else 'на этом сервере'
-                )
-                + '.',
-                'Команда «Создать локальную копию» сохраняет архив на этом сервере.',
-            ]
-            if record.get('manual_backup_destination') == 'local'
-            else []
-        )
+    result = format_record(path, record)
+    if result is not None:
+        return result
     if record.get('check') == 'backup_schedule_status':
         if 'configured' in record:
             return [

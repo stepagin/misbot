@@ -1,0 +1,2074 @@
+{
+  "format": 1,
+  "groups": {
+    "DRAFT": {
+      "commands": [
+        "config draft show",
+        "config draft reset"
+      ],
+      "role": "root (help/version are separate public entrypoints)",
+      "runtime": "local draft files; no live Matrix required",
+      "invariants": [
+        "never disclose credentials; reset draft is not remove server"
+      ],
+      "risk": "configuration"
+    },
+    "ADMIN": {
+      "commands": [
+        "admin bot show",
+        "admin bot set",
+        "admin access list",
+        "admin access add",
+        "admin access remove",
+        "admin access recover"
+      ],
+      "role": "root (help/version are separate public entrypoints)",
+      "runtime": "saved identity; changes of access require Synapse/MAS",
+      "invariants": [
+        "created bot identity immutable; protect primary/service accounts; do not confuse MAS admin and panel access"
+      ],
+      "risk": "privilege"
+    },
+    "RELCHECK": {
+      "commands": [
+        "update check"
+      ],
+      "role": "root (help/version are separate public entrypoints)",
+      "runtime": "trusted local installation and release service network",
+      "invariants": [
+        "unknown release is not up-to-date; preserve installed version on failure"
+      ],
+      "risk": "availability"
+    },
+    "RELLATEST": {
+      "commands": [
+        "update latest"
+      ],
+      "role": "root (help/version are separate public entrypoints)",
+      "runtime": "trusted installation; network; backup/database and update readiness",
+      "invariants": [
+        "nonzero outcome when apply unconfirmed; pinned version; no automatic major upgrade"
+      ],
+      "risk": "recovery"
+    },
+    "FEATURE": {
+      "commands": [
+        "features status",
+        "features enable",
+        "features recover"
+      ],
+      "role": "root (help/version are separate public entrypoints)",
+      "runtime": "existing-compose only; source plan and runtime dependencies",
+      "invariants": [
+        "never apply portable initialization to adopted stack; preserve owners and identity"
+      ],
+      "risk": "configuration"
+    },
+    "HOME": {
+      "commands": [
+        "homepage show",
+        "homepage check",
+        "homepage apply",
+        "homepage recover",
+        "homepage rollback"
+      ],
+      "role": "root (help/version are separate public entrypoints)",
+      "runtime": "saved installation; Caddy/public route for publish",
+      "invariants": [
+        "preserve Matrix/MAS API routes; restart only required service; keep rollback checkpoint"
+      ],
+      "risk": "availability"
+    },
+    "FED": {
+      "commands": [
+        "federation servers",
+        "federation check",
+        "federation add",
+        "federation remove",
+        "federation invite",
+        "federation api status",
+        "federation api enable",
+        "federation api disable",
+        "federation requests clear",
+        "federation peers",
+        "federation requests",
+        "federation operations",
+        "federation requests status",
+        "federation requests approve",
+        "federation requests reject",
+        "federation requests cancel",
+        "federation requests retry",
+        "federation recover",
+        "federation rollback"
+      ],
+      "role": "root (help/version are separate public entrypoints)",
+      "runtime": "local policy for reads; remote API for exchange; live auth for bots",
+      "invariants": [
+        "local allowlist differs from mutual connection; keep event IDs and partial checkpoints"
+      ],
+      "risk": "recovery"
+    },
+    "UI": {
+      "commands": [
+        "ui"
+      ],
+      "role": "root (help/version are separate public entrypoints)",
+      "runtime": "local TTY; installed runtime for existing server",
+      "invariants": [
+        "navigation only; do not start mutations merely by opening a menu"
+      ],
+      "risk": "navigation"
+    },
+    "INIT": {
+      "commands": [
+        "config init"
+      ],
+      "role": "root (help/version are separate public entrypoints)",
+      "runtime": "trusted bundle and root host; no existing Matrix required",
+      "invariants": [
+        "refuse foreign nonempty target; initialization is not ready service"
+      ],
+      "risk": "configuration"
+    },
+    "GENERATE": {
+      "commands": [
+        "config generate"
+      ],
+      "role": "root (help/version are separate public entrypoints)",
+      "runtime": "saved settings and trusted source",
+      "invariants": [
+        "generation does not by itself prove running services"
+      ],
+      "risk": "configuration"
+    },
+    "CONFIG": {
+      "commands": [
+        "config validate",
+        "config migrate",
+        "config recover",
+        "config rollback",
+        "config apply"
+      ],
+      "role": "root (help/version are separate public entrypoints)",
+      "runtime": "saved model; readiness only for apply",
+      "invariants": [
+        "immutable identity preserved; pending configuration recover before conflicting mutation"
+      ],
+      "risk": "configuration"
+    },
+    "PREFLIGHT": {
+      "commands": [
+        "config preflight"
+      ],
+      "role": "root (help/version are separate public entrypoints)",
+      "runtime": "host resources, DNS/network/providers as selected",
+      "invariants": [
+        "failed prerequisite must preserve a concrete safe reason"
+      ],
+      "risk": "availability"
+    },
+    "WRAPPER": {
+      "commands": [
+        "config command install",
+        "config command remove"
+      ],
+      "role": "root (help/version are separate public entrypoints)",
+      "runtime": "root local filesystem",
+      "invariants": [
+        "modify only owned wrapper; keep runtime and secrets separate"
+      ],
+      "risk": "configuration"
+    },
+    "STATUS": {
+      "commands": [
+        "status"
+      ],
+      "role": "root (help/version are separate public entrypoints)",
+      "runtime": "local metadata; Docker may be unavailable",
+      "invariants": [
+        "status is not end-to-end messaging proof; preserve unknown and pending states"
+      ],
+      "risk": "availability"
+    },
+    "STORAGE": {
+      "commands": [
+        "storage status"
+      ],
+      "role": "root (help/version are separate public entrypoints)",
+      "runtime": "local profiles and backup records",
+      "invariants": [
+        "uploaded != restore-verified; old verified record != latest; unknown != false"
+      ],
+      "risk": "data"
+    },
+    "CHECK": {
+      "commands": [
+        "check"
+      ],
+      "role": "root (help/version are separate public entrypoints)",
+      "runtime": "target services and public network endpoints",
+      "invariants": [
+        "failed DNS/TLS/HTTP remains failure; never echo raw provider secrets"
+      ],
+      "risk": "availability"
+    },
+    "LIFE": {
+      "commands": [
+        "start",
+        "stop"
+      ],
+      "role": "root (help/version are separate public entrypoints)",
+      "runtime": "CLI start can begin stopped stack; bots need live authorization",
+      "invariants": [
+        "stop preserves data; restart keeps previously stopped optional services; pending/frozen blocks unsafe start"
+      ],
+      "risk": "availability"
+    },
+    "REMOVE": {
+      "commands": [
+        "remove"
+      ],
+      "role": "root (help/version are separate public entrypoints)",
+      "runtime": "root TTY; owned installation and explicit confirmations",
+      "invariants": [
+        "never delete foreign resources or remove data through stop"
+      ],
+      "risk": "destructive"
+    },
+    "PASSWORD": {
+      "commands": [
+        "users password set",
+        "users password recover",
+        "credentials admin set",
+        "credentials admin recover"
+      ],
+      "role": "root (help/version are separate public entrypoints)",
+      "runtime": "private input; live MAS/Synapse; backup readiness",
+      "invariants": [
+        "ordinary user reset uses forward recovery; initial admin rotation has its own rollback; never echo password"
+      ],
+      "risk": "credentials"
+    },
+    "INVITE": {
+      "commands": [
+        "users invitation ensure",
+        "users invitation status",
+        "users invitation list",
+        "users invitation show",
+        "users invitation revoke",
+        "users invitation new"
+      ],
+      "role": "root (help/version are separate public entrypoints)",
+      "runtime": "local first-token state and live MAS/Synapse for issuance",
+      "invariants": [
+        "bootstrap first token differs from member invitations; list omits codes; replacement explicitly revokes old token"
+      ],
+      "risk": "account access"
+    },
+    "SECRET": {
+      "commands": [
+        "credentials admin show"
+      ],
+      "role": "root (help/version are separate public entrypoints)",
+      "runtime": "root TTY and locally retained initial credentials",
+      "invariants": [
+        "do not invent external MAS password; no password in logs or bots"
+      ],
+      "risk": "credentials"
+    },
+    "MEDIA": {
+      "commands": [
+        "storage local",
+        "storage s3 connect",
+        "storage recover"
+      ],
+      "role": "root (help/version are separate public entrypoints)",
+      "runtime": "saved installation; local/S3 dependencies by stage",
+      "invariants": [
+        "preserve original media/checkpoint; no implicit S3 destination change"
+      ],
+      "risk": "data"
+    },
+    "DATABASE": {
+      "commands": [
+        "storage database connect",
+        "storage database recover",
+        "storage database abort"
+      ],
+      "role": "root (help/version are separate public entrypoints)",
+      "runtime": "owned local databases and dedicated target; stage-specific readiness",
+      "invariants": [
+        "abort only before activation; preserve identity and checkpoint on interruption"
+      ],
+      "risk": "data"
+    },
+    "BACKUP": {
+      "commands": [
+        "backup create",
+        "backup recover",
+        "backup verify"
+      ],
+      "role": "root (help/version are separate public entrypoints)",
+      "runtime": "databases/client containers; writers may pause",
+      "invariants": [
+        "portable create is local; verify is temporary restore; external MAS scope explicit; restore prior writer state"
+      ],
+      "risk": "data"
+    },
+    "EXTERNAL": {
+      "commands": [
+        "backup key create",
+        "backup external create",
+        "backup external cleanup",
+        "backup fetch"
+      ],
+      "role": "root (help/version are separate public entrypoints)",
+      "runtime": "private S3 profile and separate recovery key; provider connectivity",
+      "invariants": [
+        "preserve local copy; verify download/decryption; cleanup only exact owned object"
+      ],
+      "risk": "data"
+    },
+    "RESTORE": {
+      "commands": [
+        "backup restore",
+        "backup restore-local",
+        "backup activate",
+        "backup move export",
+        "backup move abort"
+      ],
+      "role": "root (help/version are separate public entrypoints)",
+      "runtime": "trusted archive/key; empty target; activation requires stopped source",
+      "invariants": [
+        "staged restore is not activation; never run two copies of same identity"
+      ],
+      "risk": "destructive"
+    },
+    "SCHEDULE": {
+      "commands": [
+        "backup schedule local",
+        "backup schedule external",
+        "backup schedule status",
+        "backup schedule disable"
+      ],
+      "role": "root (help/version are separate public entrypoints)",
+      "runtime": "local systemd setup; timer execution has backup dependencies",
+      "invariants": [
+        "preserve foreign units; enabled != executed; Result=success without metadata != verified backup"
+      ],
+      "risk": "data"
+    },
+    "LOCALUPDATE": {
+      "commands": [
+        "update apply",
+        "update recover"
+      ],
+      "role": "root (help/version are separate public entrypoints)",
+      "runtime": "trusted local source and installation; backup/checkpoint",
+      "invariants": [
+        "preserve identity; no old runtime on incompatible schema; recover from retained checkpoint"
+      ],
+      "risk": "recovery"
+    },
+    "DBCREDS": {
+      "commands": [
+        "credentials database rotate",
+        "credentials database recover"
+      ],
+      "role": "root (help/version are separate public entrypoints)",
+      "runtime": "owned databases and healthy stack before rotate",
+      "invariants": [
+        "change only application roles; checkpoint survives partial writes"
+      ],
+      "risk": "credentials"
+    },
+    "S3CREDS": {
+      "commands": [
+        "credentials s3 rotate",
+        "credentials s3 recover",
+        "credentials s3 cleanup"
+      ],
+      "role": "root (help/version are separate public entrypoints)",
+      "runtime": "same S3 destination and current/new private credentials",
+      "invariants": [
+        "rotate credentials only; keep exact pending new pair; cleanup only own probes"
+      ],
+      "risk": "credentials"
+    },
+    "VAULT": {
+      "commands": [
+        "credentials vault connect",
+        "credentials vault sync",
+        "credentials vault recover",
+        "credentials vault auth",
+        "credentials vault disconnect"
+      ],
+      "role": "root (help/version are separate public entrypoints)",
+      "runtime": "private Vault profile/auth; local state plus provider",
+      "invariants": [
+        "recover missing credentials without overwriting unrelated state; disconnect retains remote versions"
+      ],
+      "risk": "credentials"
+    },
+    "S3PROBE": {
+      "commands": [
+        "storage s3 check",
+        "storage s3 cleanup"
+      ],
+      "role": "root (help/version are separate public entrypoints)",
+      "runtime": "private profile and S3 provider; no live Matrix required",
+      "invariants": [
+        "read-only never PUT; not_checked differs from failed; cleanup exact owned probe"
+      ],
+      "risk": "data"
+    }
+  },
+  "surfaces": {
+    "ui": {
+      "direct": [
+        "admin access add",
+        "admin access list",
+        "admin access recover",
+        "admin access remove",
+        "admin bot set",
+        "admin bot show",
+        "backup activate",
+        "backup create",
+        "backup external cleanup",
+        "backup external create",
+        "backup fetch",
+        "backup move abort",
+        "backup move export",
+        "backup recover",
+        "backup restore",
+        "backup restore-local",
+        "backup schedule disable",
+        "backup schedule external",
+        "backup schedule local",
+        "backup schedule status",
+        "backup verify",
+        "check",
+        "config recover",
+        "config rollback",
+        "config validate",
+        "credentials admin recover",
+        "credentials admin set",
+        "credentials admin show",
+        "credentials database recover",
+        "credentials database rotate",
+        "credentials s3 cleanup",
+        "credentials s3 recover",
+        "credentials s3 rotate",
+        "credentials vault auth",
+        "credentials vault connect",
+        "credentials vault disconnect",
+        "credentials vault recover",
+        "credentials vault sync",
+        "features enable",
+        "features recover",
+        "features status",
+        "federation add",
+        "federation check",
+        "federation invite",
+        "federation operations",
+        "federation peers",
+        "federation recover",
+        "federation remove",
+        "federation requests",
+        "federation requests approve",
+        "federation requests cancel",
+        "federation requests reject",
+        "federation requests retry",
+        "federation requests status",
+        "federation rollback",
+        "federation servers",
+        "homepage recover",
+        "homepage rollback",
+        "remove",
+        "start",
+        "status",
+        "stop",
+        "storage database abort",
+        "storage database connect",
+        "storage database recover",
+        "storage recover",
+        "storage s3 check",
+        "storage s3 connect",
+        "storage status",
+        "update apply",
+        "update check",
+        "update latest",
+        "update recover",
+        "users invitation ensure",
+        "users invitation list",
+        "users invitation revoke",
+        "users password recover",
+        "users password set"
+      ],
+      "embedded": [
+        "ui",
+        "config apply",
+        "config preflight",
+        "config generate",
+        "users invitation show",
+        "users invitation new",
+        "storage local",
+        "backup key create"
+      ]
+    },
+    "telegram": {
+      "conditional": [
+        "status",
+        "check",
+        "storage status",
+        "start",
+        "stop",
+        "backup create",
+        "backup verify",
+        "update check",
+        "update latest",
+        "federation servers",
+        "federation add",
+        "federation remove",
+        "federation invite",
+        "federation api status",
+        "federation api enable",
+        "federation api disable",
+        "federation requests",
+        "federation requests status",
+        "federation requests approve",
+        "federation requests reject",
+        "federation requests cancel",
+        "federation requests retry",
+        "storage s3 connect",
+        "federation requests clear",
+        "backup schedule status",
+        "federation check"
+      ]
+    },
+    "matrix_admin": {
+      "conditional": [
+        "status",
+        "check",
+        "storage status",
+        "start",
+        "stop",
+        "backup create",
+        "backup verify",
+        "update check",
+        "update latest",
+        "federation servers",
+        "federation add",
+        "federation remove",
+        "federation invite",
+        "federation api status",
+        "federation api enable",
+        "federation api disable",
+        "federation requests",
+        "federation requests status",
+        "federation requests approve",
+        "federation requests reject",
+        "federation requests cancel",
+        "federation requests retry",
+        "federation check",
+        "federation operations",
+        "federation recover",
+        "federation rollback",
+        "backup schedule status"
+      ]
+    },
+    "matrix_referral": {
+      "direct": []
+    }
+  },
+  "bot_only": {
+    "member.invite": {
+      "surfaces": [
+        "telegram",
+        "matrix_referral"
+      ],
+      "role": "active local member; Telegram MAS login or private encrypted Matrix chat",
+      "runtime": "bot/control/MAS; Matrix also needs Synapse",
+      "invariants": [
+        "own codes only; event retry cannot create duplicate; member code is not CLI first token"
+      ],
+      "risk": "account access"
+    },
+    "member.invitations": {
+      "surfaces": [
+        "telegram",
+        "matrix_referral"
+      ],
+      "role": "active local member",
+      "runtime": "bot/control/MAS; Matrix requires private encrypted chat",
+      "invariants": [
+        "pagination retains ownership; expired/used/revoked not active"
+      ],
+      "risk": "account access"
+    },
+    "member.revoke": {
+      "surfaces": [
+        "telegram",
+        "matrix_referral"
+      ],
+      "role": "active local owner of code",
+      "runtime": "bot/control/MAS",
+      "invariants": [
+        "cannot revoke another member code; numbered choice bound to shown ID"
+      ],
+      "risk": "account access"
+    },
+    "admin.restart": {
+      "surfaces": [
+        "telegram",
+        "matrix_admin"
+      ],
+      "role": "current MAS admin; Matrix additionally panel allowlist",
+      "runtime": "portable repeat auth needs Synapse; detached systemd execution",
+      "invariants": [
+        "durable execution survives bot restart; no replay after uncertain outcome"
+      ],
+      "risk": "availability"
+    },
+    "admin.statistics": {
+      "surfaces": [
+        "telegram",
+        "matrix_admin"
+      ],
+      "role": "current MAS admin; Matrix additionally panel allowlist",
+      "runtime": "bot/control/auth; counters need database; host samples separate",
+      "invariants": [
+        "missing counters stay unknown; period applies to activity, not CPU snapshot"
+      ],
+      "risk": "availability"
+    },
+    "admin.history": {
+      "surfaces": [
+        "telegram",
+        "matrix_admin"
+      ],
+      "role": "current admin, own management jobs",
+      "runtime": "bot/control/auth and persisted job state",
+      "invariants": [
+        "queued is not completed; saved result tied to actor; history navigation is not replay"
+      ],
+      "risk": "recovery"
+    },
+    "admin.broadcast": {
+      "surfaces": [
+        "matrix_admin"
+      ],
+      "role": "current MAS admin in panel allowlist",
+      "runtime": "private encrypted chat, controller, persistent outbox",
+      "invariants": [
+        "preview before send; queued recipient count is not delivered count; no duplicate from replay"
+      ],
+      "risk": "communication"
+    },
+    "admin.welcome": {
+      "surfaces": [
+        "matrix_admin"
+      ],
+      "role": "current MAS admin in panel allowlist",
+      "runtime": "controller and private encrypted chat",
+      "invariants": [
+        "change only future greetings; preserve literal text; do not greet old users on restart"
+      ],
+      "risk": "communication"
+    },
+    "admin.notifications": {
+      "surfaces": [
+        "matrix_admin"
+      ],
+      "role": "current MAS admin in panel allowlist",
+      "runtime": "controller and private encrypted chat",
+      "invariants": [
+        "preferences currently global; disabling cancels queued matching notices"
+      ],
+      "risk": "communication"
+    },
+    "telegram.login": {
+      "surfaces": [
+        "telegram"
+      ],
+      "role": "local MAS account confirmed by device authorization",
+      "runtime": "Telegram worker/control/MAS",
+      "invariants": [
+        "Telegram username does not grant access; new binding transfers only same MAS account"
+      ],
+      "risk": "account access"
+    },
+    "admin.components": {
+      "surfaces": [
+        "telegram",
+        "matrix_admin"
+      ],
+      "role": "current MAS admin; Matrix additionally panel allowlist",
+      "runtime": "bot/control/auth; saved feature state and public links; portable path is not existing-compose CLI features status",
+      "invariants": [
+        "read only; component configuration is not verified health; native and adopted stacks have different backends"
+      ],
+      "risk": "configuration"
+    },
+    "member.invitation-detail": {
+      "surfaces": [
+        "telegram"
+      ],
+      "role": "active local owner of code",
+      "runtime": "bot/control/MAS; selected ID belongs to caller",
+      "invariants": [
+        "compact list does not expose full codes; explicit selection reads own code and expiry; no regeneration on read"
+      ],
+      "risk": "account access"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "cli.root",
+      "commands": [
+        "*"
+      ],
+      "surfaces": [
+        "cli"
+      ],
+      "axes": [
+        "permissions",
+        "failure",
+        "state",
+        "output"
+      ],
+      "level": "routing",
+      "given": "non-root caller supplies a valid command with fictional private args",
+      "expected_output": "exit 77; actionable root guidance; no private argument echo",
+      "expected_state": "backend never invoked",
+      "tests": [
+        {
+          "file": "installer/tests/test_cli_contract.py",
+          "test": "CommandContractTests.test_every_command_requires_root_without_replaying_private_arguments"
+        }
+      ]
+    },
+    {
+      "id": "cli.argv",
+      "commands": [
+        "*"
+      ],
+      "surfaces": [
+        "cli"
+      ],
+      "axes": [
+        "success",
+        "preconditions"
+      ],
+      "level": "routing",
+      "given": "supported native/adopted command and optional arguments",
+      "expected_output": "actual backend parser accepts the planned argv",
+      "expected_state": "parser capture stops before operation",
+      "tests": [
+        {
+          "file": "installer/tests/test_cli_contract.py",
+          "test": "CommandContractTests.test_all_native_and_existing_python_routes_are_accepted_by_the_actual_parser"
+        }
+      ]
+    },
+    {
+      "id": "cli.unsupported",
+      "commands": [
+        "*"
+      ],
+      "surfaces": [
+        "cli"
+      ],
+      "axes": [
+        "preconditions",
+        "failure",
+        "state"
+      ],
+      "level": "routing",
+      "given": "command unsupported by selected installation kind",
+      "expected_output": "InputError before execution",
+      "expected_state": "no backend mutation",
+      "tests": [
+        {
+          "file": "installer/tests/test_cli_contract.py",
+          "test": "CommandContractTests.test_unsupported_backends_are_rejected_before_execution"
+        }
+      ]
+    },
+    {
+      "id": "cli.private-input",
+      "commands": [
+        "*"
+      ],
+      "surfaces": [
+        "cli"
+      ],
+      "axes": [
+        "failure",
+        "output"
+      ],
+      "level": "routing",
+      "given": "unknown option or missing required argument",
+      "expected_output": "exit 2 without fictional secret in error",
+      "expected_state": "backend never invoked",
+      "tests": [
+        {
+          "file": "installer/tests/test_cli_contract.py",
+          "test": "CommandContractTests.test_each_required_argument_and_unknown_flag_fail_before_backend_access"
+        }
+      ]
+    },
+    {
+      "id": "update.exit",
+      "commands": [
+        "update latest"
+      ],
+      "surfaces": [
+        "cli"
+      ],
+      "axes": [
+        "success",
+        "failure",
+        "output",
+        "state"
+      ],
+      "level": "backend",
+      "given": "child nonzero or child zero with unchanged installed version",
+      "expected_output": "nonzero CLI exit on unconfirmed update; preserve installed version and recovery detail",
+      "expected_state": "never report successful application from child status alone",
+      "tests": [
+        {
+          "file": "installer/tests/test_release_update_exit.py",
+          "test": "ReleaseUpdateExitTests.test_cli_exit_agrees_with_result_and_preserves_failure_detail"
+        }
+      ]
+    },
+    {
+      "id": "update.noop",
+      "commands": [
+        "update latest"
+      ],
+      "surfaces": [
+        "cli"
+      ],
+      "axes": [
+        "success",
+        "retry",
+        "state"
+      ],
+      "level": "backend",
+      "given": "latest stable already installed",
+      "expected_output": "successful no-op with installed version",
+      "expected_state": "no download/apply",
+      "tests": [
+        {
+          "file": "installer/tests/test_release_update_exit.py",
+          "test": "ReleaseUpdateExitTests.test_already_current_is_success_without_starting_update"
+        }
+      ]
+    },
+    {
+      "id": "update.background-failure",
+      "commands": [
+        "update latest"
+      ],
+      "surfaces": [
+        "telegram",
+        "matrix_admin"
+      ],
+      "axes": [
+        "failure",
+        "state"
+      ],
+      "level": "backend",
+      "given": "detached updater returns success:false",
+      "expected_output": "failed persisted outcome and nonzero worker return",
+      "expected_state": "job is retained as failed; this test does not cover chat delivery",
+      "tests": [
+        {
+          "file": "installer/tests/test_release_update_exit.py",
+          "test": "ReleaseUpdateExitTests.test_background_failure_is_persisted_and_returns_nonzero"
+        }
+      ]
+    },
+    {
+      "id": "backup.interruption",
+      "commands": [
+        "backup create",
+        "backup recover"
+      ],
+      "surfaces": [
+        "cli"
+      ],
+      "axes": [
+        "interruption",
+        "retry",
+        "state"
+      ],
+      "level": "backend",
+      "given": "backup process is killed while writers paused",
+      "expected_output": "restart intent remains available to recovery",
+      "expected_state": "preserve prior stopped services and durable journal",
+      "tests": [
+        {
+          "file": "installer/tests/test_lifecycle.py",
+          "test": "LifecycleTests.test_killed_backup_retains_restart_intent_and_recovery_preserves_prior_stop"
+        }
+      ]
+    },
+    {
+      "id": "restore.activation-gate",
+      "commands": [
+        "backup activate"
+      ],
+      "surfaces": [
+        "cli"
+      ],
+      "axes": [
+        "preconditions",
+        "failure",
+        "state"
+      ],
+      "level": "backend",
+      "given": "target already active or staged writers unexpectedly running",
+      "expected_output": "activation refused",
+      "expected_state": "pending state not cleared; no second live identity",
+      "tests": [
+        {
+          "file": "installer/tests/test_lifecycle.py",
+          "test": "LifecycleTests.test_activation_never_clears_active_target_or_live_staged_writers"
+        }
+      ]
+    },
+    {
+      "id": "schedule.verified",
+      "commands": [
+        "backup schedule status"
+      ],
+      "surfaces": [
+        "cli"
+      ],
+      "axes": [
+        "success",
+        "output",
+        "state"
+      ],
+      "level": "backend",
+      "given": "systemd execution metadata reset after verified backup",
+      "expected_output": "retained verification metadata still available",
+      "expected_state": "no fabricated new successful execution",
+      "tests": [
+        {
+          "file": "installer/tests/test_backup_schedule.py",
+          "test": "ScheduleTests.test_verified_result_survives_systemd_execution_metadata_reset"
+        }
+      ]
+    },
+    {
+      "id": "schedule.failure",
+      "commands": [
+        "backup schedule local",
+        "backup schedule external"
+      ],
+      "surfaces": [
+        "cli"
+      ],
+      "axes": [
+        "failure",
+        "state"
+      ],
+      "level": "backend",
+      "given": "destination validation fails during reconfiguration",
+      "expected_output": "failure without claiming applied schedule",
+      "expected_state": "existing timer/config retained",
+      "tests": [
+        {
+          "file": "installer/tests/test_backup_schedule.py",
+          "test": "ScheduleTests.test_destination_failure_preserves_existing_timer_and_configuration"
+        }
+      ]
+    },
+    {
+      "id": "password.forward-recovery",
+      "commands": [
+        "users password set",
+        "users password recover"
+      ],
+      "surfaces": [
+        "cli"
+      ],
+      "axes": [
+        "failure",
+        "retry",
+        "state"
+      ],
+      "level": "backend",
+      "given": "MAS reply lost after setting ordinary user password",
+      "expected_output": "pending exact target/new-password recovery",
+      "expected_state": "do not reset another account or restore old password/whole DB",
+      "tests": [
+        {
+          "file": "installer/tests/test_user_credentials.py",
+          "test": "UserPasswordTests.test_lost_reply_preserves_exact_retry_and_blocks_other_reset_then_forward_recovers"
+        }
+      ]
+    },
+    {
+      "id": "password.interrupted",
+      "commands": [
+        "users password set",
+        "users password recover"
+      ],
+      "surfaces": [
+        "cli"
+      ],
+      "axes": [
+        "interruption",
+        "state"
+      ],
+      "level": "backend",
+      "given": "readiness failure or signal after password operation",
+      "expected_output": "pending state retained until recovery ready",
+      "expected_state": "no false completion or checkpoint removal",
+      "tests": [
+        {
+          "file": "installer/tests/test_user_credentials.py",
+          "test": "UserPasswordTests.test_readiness_and_signal_errors_keep_pending_until_recovery_is_ready"
+        }
+      ]
+    },
+    {
+      "id": "admin-password.rollback",
+      "commands": [
+        "credentials admin set",
+        "credentials admin recover"
+      ],
+      "surfaces": [
+        "cli"
+      ],
+      "axes": [
+        "failure",
+        "state"
+      ],
+      "level": "backend",
+      "given": "lost reply during original administrator password change",
+      "expected_output": "failure path attempts restore of old password",
+      "expected_state": "different recovery semantics from ordinary user reset",
+      "tests": [
+        {
+          "file": "installer/tests/test_credentials.py",
+          "test": "CredentialsTests.test_lost_response_restores_old_password"
+        }
+      ]
+    },
+    {
+      "id": "invitation.list-private",
+      "commands": [
+        "users invitation list"
+      ],
+      "surfaces": [
+        "cli"
+      ],
+      "axes": [
+        "success",
+        "output"
+      ],
+      "level": "backend",
+      "given": "tokens include all states and issuers",
+      "expected_output": "states/issuer/usage available but no token values",
+      "expected_state": "listing does not issue invitation",
+      "tests": [
+        {
+          "file": "installer/tests/test_registration.py",
+          "test": "RegistrationTests.test_list_all_invitation_states_and_issuers_without_tokens"
+        }
+      ]
+    },
+    {
+      "id": "invitation.ui-private",
+      "commands": [
+        "users invitation list"
+      ],
+      "surfaces": [
+        "ui"
+      ],
+      "axes": [
+        "success",
+        "output"
+      ],
+      "level": "presentation",
+      "given": "list record includes a fictional secret",
+      "expected_output": "readable state/issuer/date without token or internal ID",
+      "expected_state": "formatter only",
+      "tests": [
+        {
+          "file": "installer/tests/test_terminal_output.py",
+          "test": "OutputTests.test_invitation_list_and_errors_have_readable_safe_output"
+        }
+      ]
+    },
+    {
+      "id": "invitation.uncertain",
+      "commands": [
+        "users invitation ensure",
+        "users invitation show",
+        "users invitation new"
+      ],
+      "surfaces": [
+        "ui"
+      ],
+      "axes": [
+        "failure",
+        "state",
+        "output"
+      ],
+      "level": "interaction",
+      "given": "issuance status is unconfirmed",
+      "expected_output": "do not show or silently replace unconfirmed code",
+      "expected_state": "no unwanted second token",
+      "tests": [
+        {
+          "file": "installer/tests/test_registration.py",
+          "test": "RegistrationTests.test_ui_never_displays_or_replaces_an_unconfirmed_code"
+        }
+      ]
+    },
+    {
+      "id": "management.dedupe",
+      "commands": [
+        "backup create"
+      ],
+      "surfaces": [
+        "telegram",
+        "matrix_admin"
+      ],
+      "axes": [
+        "retry",
+        "state"
+      ],
+      "level": "backend",
+      "given": "same confirmation queued twice",
+      "expected_output": "same saved operation result",
+      "expected_state": "one durable worker launch",
+      "tests": [
+        {
+          "file": "installer/tests/test_server_management.py",
+          "test": "ServerManagementTests.test_queue_is_durable_and_duplicate_confirmation_launches_once"
+        }
+      ]
+    },
+    {
+      "id": "management.live-role",
+      "commands": [
+        "backup create"
+      ],
+      "surfaces": [
+        "telegram",
+        "matrix_admin"
+      ],
+      "axes": [
+        "permissions",
+        "failure",
+        "state"
+      ],
+      "level": "backend",
+      "given": "MAS role revoked before worker mutates",
+      "expected_output": "operation denied",
+      "expected_state": "mutation does not execute under stale authorization",
+      "tests": [
+        {
+          "file": "installer/tests/test_server_management.py",
+          "test": "ServerManagementTests.test_worker_rechecks_live_role_before_mutating"
+        }
+      ]
+    },
+    {
+      "id": "management.outage",
+      "commands": [
+        "start"
+      ],
+      "surfaces": [
+        "telegram",
+        "matrix_admin"
+      ],
+      "axes": [
+        "preconditions"
+      ],
+      "level": "backend",
+      "given": "portable runtime repeats authorization",
+      "expected_output": "uses live MAS check through Synapse container",
+      "expected_state": "not an independent outage boot channel",
+      "tests": [
+        {
+          "file": "installer/tests/test_server_management.py",
+          "test": "ServerManagementTests.test_native_authorization_uses_live_mas_without_federation_state"
+        }
+      ]
+    },
+    {
+      "id": "management.interrupted",
+      "commands": [
+        "admin.history"
+      ],
+      "surfaces": [
+        "telegram",
+        "matrix_admin"
+      ],
+      "axes": [
+        "interruption",
+        "retry",
+        "state"
+      ],
+      "level": "backend",
+      "given": "old active worker no longer exists",
+      "expected_output": "job becomes interrupted",
+      "expected_state": "never replay previously running job automatically",
+      "tests": [
+        {
+          "file": "installer/tests/test_server_management.py",
+          "test": "ServerManagementTests.test_inactive_old_worker_is_interrupted_and_never_replayed"
+        }
+      ]
+    },
+    {
+      "id": "telegram.check-detail",
+      "commands": [
+        "check"
+      ],
+      "surfaces": [
+        "telegram"
+      ],
+      "axes": [
+        "failure",
+        "output"
+      ],
+      "level": "presentation",
+      "given": "failed availability record contains safe reason",
+      "expected_output": "show safe reason and repeat button",
+      "expected_state": "do not substitute raw provider text",
+      "tests": [
+        {
+          "file": "bots/telegram/tests/test_worker.py",
+          "test": "WorkerTests.test_failed_checks_show_safe_backend_details_and_repeat_button"
+        }
+      ]
+    },
+    {
+      "id": "telegram.stop-warning",
+      "commands": [
+        "stop"
+      ],
+      "surfaces": [
+        "telegram"
+      ],
+      "axes": [
+        "preconditions",
+        "output"
+      ],
+      "level": "presentation",
+      "given": "administrator prepares stop",
+      "expected_output": "warn about loss of bot access and show SSH start/check",
+      "expected_state": "confirmation only, not mutation",
+      "tests": [
+        {
+          "file": "bots/telegram/tests/test_worker.py",
+          "test": "WorkerTests.test_stop_confirmation_has_ssh_return_instructions"
+        }
+      ]
+    },
+    {
+      "id": "telegram.member-menu",
+      "commands": [
+        "member.invite"
+      ],
+      "surfaces": [
+        "telegram"
+      ],
+      "axes": [
+        "permissions",
+        "output"
+      ],
+      "level": "interaction",
+      "given": "active nonadmin opens menu",
+      "expected_output": "member invitation actions without federation/admin menu",
+      "expected_state": "role not elevated",
+      "tests": [
+        {
+          "file": "bots/telegram/tests/test_worker.py",
+          "test": "WorkerTests.test_normal_member_menu_hides_federation"
+        }
+      ]
+    },
+    {
+      "id": "telegram.statistics-unknown",
+      "commands": [
+        "admin.statistics"
+      ],
+      "surfaces": [
+        "telegram"
+      ],
+      "axes": [
+        "failure",
+        "output"
+      ],
+      "level": "presentation",
+      "given": "activity counters unavailable",
+      "expected_output": "unknown counters not invented",
+      "expected_state": "no false zero",
+      "tests": [
+        {
+          "file": "bots/telegram/tests/test_worker.py",
+          "test": "WorkerTests.test_unavailable_statistics_do_not_invent_counts"
+        }
+      ]
+    },
+    {
+      "id": "matrix.confirmation",
+      "commands": [
+        "admin.restart"
+      ],
+      "surfaces": [
+        "matrix_admin"
+      ],
+      "axes": [
+        "preconditions",
+        "retry",
+        "state"
+      ],
+      "level": "interaction",
+      "given": "prepared maintenance with one bound confirmation",
+      "expected_output": "accepted task identifier, not completed assertion",
+      "expected_state": "one matching mutation",
+      "tests": [
+        {
+          "file": "bots/matrix-federation/tests/logic.test.js",
+          "test": "server maintenance needs one bound confirmation and returns its saved task identifier"
+        }
+      ]
+    },
+    {
+      "id": "matrix.current-rights",
+      "commands": [
+        "admin.history"
+      ],
+      "surfaces": [
+        "matrix_admin"
+      ],
+      "axes": [
+        "permissions",
+        "failure",
+        "output"
+      ],
+      "level": "interaction",
+      "given": "current owner rights revoked during operation",
+      "expected_output": "no reply to unauthorized owner",
+      "expected_state": "no privilege from earlier session",
+      "tests": [
+        {
+          "file": "bots/matrix-federation/tests/logic.test.js",
+          "test": "owner revocation during an operation prevents its reply"
+        }
+      ]
+    },
+    {
+      "id": "matrix.result-states",
+      "commands": [
+        "federation requests status",
+        "federation operations"
+      ],
+      "surfaces": [
+        "matrix_admin"
+      ],
+      "axes": [
+        "success",
+        "failure",
+        "output"
+      ],
+      "level": "presentation",
+      "given": "queued/running/partial/complete operation records",
+      "expected_output": "acceptance/execution/completion distinct",
+      "expected_state": "formatter does not mutate",
+      "tests": [
+        {
+          "file": "bots/matrix-federation/tests/logic.test.js",
+          "test": "operation presentation separates acceptance, execution and completion"
+        }
+      ]
+    },
+    {
+      "id": "matrix.broadcast",
+      "commands": [
+        "admin.broadcast"
+      ],
+      "surfaces": [
+        "matrix_admin"
+      ],
+      "axes": [
+        "preconditions",
+        "success",
+        "state"
+      ],
+      "level": "interaction",
+      "given": "draft broadcast edited or cancelled before send",
+      "expected_output": "separate literal preview and confirmation",
+      "expected_state": "no delivery before confirmation",
+      "tests": [
+        {
+          "file": "bots/matrix-federation/tests/logic.test.js",
+          "test": "broadcast preview is separate from confirmation, edit and cancel require no delivery"
+        }
+      ]
+    },
+    {
+      "id": "referral.owner",
+      "commands": [
+        "member.revoke"
+      ],
+      "surfaces": [
+        "matrix_referral"
+      ],
+      "axes": [
+        "permissions",
+        "state"
+      ],
+      "level": "interaction",
+      "given": "member requests code revocation",
+      "expected_output": "request remains bound to sender",
+      "expected_state": "no federation capability exposed",
+      "tests": [
+        {
+          "file": "bots/matrix-referral/tests/logic.test.js",
+          "test": "revoke stays bound to sender and no federation action is exposed"
+        }
+      ]
+    },
+    {
+      "id": "referral.dedupe",
+      "commands": [
+        "member.invite"
+      ],
+      "surfaces": [
+        "matrix_referral"
+      ],
+      "axes": [
+        "success",
+        "retry",
+        "state"
+      ],
+      "level": "interaction",
+      "given": "same Matrix event replayed in encrypted direct chat",
+      "expected_output": "same request result",
+      "expected_state": "one invitation per event",
+      "tests": [
+        {
+          "file": "bots/matrix-referral/tests/logic.test.js",
+          "test": "local encrypted direct chat creates one invitation per event"
+        }
+      ]
+    },
+    {
+      "id": "referral.no-plaintext",
+      "commands": [
+        "member.invite"
+      ],
+      "surfaces": [
+        "matrix_referral"
+      ],
+      "axes": [
+        "permissions",
+        "failure",
+        "state"
+      ],
+      "level": "interaction",
+      "given": "foreign user/group/plaintext room",
+      "expected_output": "no successful creation reply",
+      "expected_state": "no issuance",
+      "tests": [
+        {
+          "file": "bots/matrix-referral/tests/logic.test.js",
+          "test": "foreign accounts, group rooms and plaintext rooms cannot issue codes"
+        }
+      ]
+    },
+    {
+      "id": "referral.delivery-retry",
+      "commands": [
+        "member.invite"
+      ],
+      "surfaces": [
+        "matrix_referral"
+      ],
+      "axes": [
+        "failure",
+        "retry",
+        "state"
+      ],
+      "level": "interaction",
+      "given": "delivery failed after issuance",
+      "expected_output": "repeat uses controller request ID",
+      "expected_state": "no duplicate mutation from same event",
+      "tests": [
+        {
+          "file": "bots/matrix-referral/tests/logic.test.js",
+          "test": "retry after failed delivery keeps the controller request ID"
+        }
+      ]
+    },
+    {
+      "id": "backup.scope-gap",
+      "commands": [
+        "backup create",
+        "backup verify",
+        "storage status"
+      ],
+      "surfaces": [
+        "ui",
+        "telegram",
+        "matrix_admin"
+      ],
+      "axes": [
+        "output"
+      ],
+      "level": "presentation",
+      "given": "local/external copy or external MAS; missing/old verification record",
+      "expected_output": "show exact destination/age/scope; missing data unknown; uploaded not restore verified",
+      "expected_state": "do not change backup state merely to render",
+      "gap": "Separate per-surface outcome regressions still need exact links; a backend test alone cannot prove this presentation."
+    },
+    {
+      "id": "outage.integration-gap",
+      "commands": [
+        "start",
+        "admin.restart"
+      ],
+      "surfaces": [
+        "telegram",
+        "matrix_admin"
+      ],
+      "axes": [
+        "success",
+        "failure",
+        "interruption"
+      ],
+      "level": "interaction",
+      "given": "real bot disappears during job and returns after services recover",
+      "expected_output": "eventual persisted result, no silent lost task",
+      "expected_state": "one mutation with current privileges",
+      "gap": "Isolated queue tests do not prove real MAS/Matrix/systemd outage behavior; dedicated integration acceptance is required."
+    },
+    {
+      "id": "cli.invariants-gap",
+      "commands": [
+        "*"
+      ],
+      "surfaces": [
+        "cli"
+      ],
+      "axes": [
+        "interruption",
+        "retry"
+      ],
+      "level": "backend",
+      "given": "operation interrupted at a persisted boundary or repeated after lost reply",
+      "expected_output": "specific recovery or harmless repeated read",
+      "expected_state": "ownership/identity/checkpoint must remain valid",
+      "gap": "Routing coverage is not lifecycle coverage. Link a command-specific failure/recovery test, or document why the case is inapplicable."
+    },
+    {
+      "id": "ui.storage-proof",
+      "commands": [
+        "storage status"
+      ],
+      "surfaces": [
+        "ui"
+      ],
+      "axes": [
+        "output"
+      ],
+      "level": "presentation",
+      "given": "missing upload metadata or past scheduled restoration proof",
+      "expected_output": "unknown remains unknown; upload integrity and historical restore time/scope separated",
+      "expected_state": "formatting performs no operation",
+      "tests": [
+        {
+          "file": "installer/tests/test_terminal_results.py",
+          "test": "ResultTests.test_storage_distinguishes_upload_integrity_from_historical_restore"
+        },
+        {
+          "file": "installer/tests/test_terminal_results.py",
+          "test": "ResultTests.test_storage_unknown_values_do_not_claim_disabled_or_verified"
+        },
+        {
+          "file": "installer/tests/test_terminal_results.py",
+          "test": "ResultTests.test_existing_selected_backup_restore_is_independent_of_upload"
+        }
+      ]
+    },
+    {
+      "id": "ui.error-provenance",
+      "commands": [
+        "storage database connect"
+      ],
+      "surfaces": [
+        "ui"
+      ],
+      "axes": [
+        "output"
+      ],
+      "level": "presentation",
+      "given": "documented database transition failure versus unrelated provider record",
+      "expected_output": "keep owned recovery explanation; no unrelated provider text or promise of rollback",
+      "expected_state": "formatting preserves uncertain transition",
+      "tests": [
+        {
+          "file": "installer/tests/test_terminal_results.py",
+          "test": "ResultTests.test_database_failure_preserves_reason_without_promising_rollback"
+        },
+        {
+          "file": "installer/tests/test_terminal_results.py",
+          "test": "ResultTests.test_error_text_requires_matching_product_producer_and_route"
+        }
+      ]
+    },
+    {
+      "id": "ui.update-result",
+      "commands": [
+        "update latest"
+      ],
+      "surfaces": [
+        "ui"
+      ],
+      "axes": [
+        "output"
+      ],
+      "level": "presentation",
+      "given": "failed/unchanged/unknown or later progress after result",
+      "expected_output": "failure distinguished from applied and no-op; useful result retained",
+      "expected_state": "no repeated mutation",
+      "tests": [
+        {
+          "file": "installer/tests/test_terminal_results.py",
+          "test": "ResultTests.test_release_failed_unchanged_and_unknown_are_distinct"
+        },
+        {
+          "file": "installer/tests/test_terminal_results.py",
+          "test": "IntegrationTests.test_fullscreen_result_keeps_update_summary_after_later_progress"
+        }
+      ]
+    },
+    {
+      "id": "ui.schedule-proof",
+      "commands": [
+        "backup schedule status"
+      ],
+      "surfaces": [
+        "ui"
+      ],
+      "axes": [
+        "output"
+      ],
+      "level": "presentation",
+      "given": "never executed, active or historically verified timer",
+      "expected_output": "no default systemd success; timestamp remains historical; timer unknown distinct from disabled",
+      "expected_state": "read only",
+      "tests": [
+        {
+          "file": "installer/tests/test_terminal_results.py",
+          "test": "ResultTests.test_schedule_never_run_does_not_inherit_systemd_default_success"
+        },
+        {
+          "file": "installer/tests/test_terminal_results.py",
+          "test": "ResultTests.test_missing_timer_observation_is_not_no_scheduled_backup"
+        },
+        {
+          "file": "installer/tests/test_terminal_results.py",
+          "test": "ResultTests.test_active_run_and_historical_verified_copy_stay_separate"
+        },
+        {
+          "file": "installer/tests/test_terminal_results.py",
+          "test": "IntegrationTests.test_fullscreen_schedule_retains_configuration_and_execution_results"
+        }
+      ]
+    },
+    {
+      "id": "ui.backup-upload",
+      "commands": [
+        "backup external create"
+      ],
+      "surfaces": [
+        "ui"
+      ],
+      "axes": [
+        "output"
+      ],
+      "level": "presentation",
+      "given": "uploaded archive whose integrity is checked",
+      "expected_output": "does not promise databases restore; artifact location retained",
+      "expected_state": "formatting no mutation",
+      "tests": [
+        {
+          "file": "installer/tests/test_terminal_results.py",
+          "test": "ResultTests.test_external_upload_does_not_claim_database_restore_was_tested"
+        }
+      ]
+    },
+    {
+      "id": "telegram.backup-scope",
+      "commands": [
+        "backup create"
+      ],
+      "surfaces": [
+        "telegram"
+      ],
+      "axes": [
+        "output"
+      ],
+      "level": "presentation",
+      "given": "local destination or external MAS outside backup scope",
+      "expected_output": "actual destination and authentication backup scope before confirmation",
+      "expected_state": "no execution until confirmation",
+      "tests": [
+        {
+          "file": "bots/telegram/tests/test_worker.py",
+          "test": "WorkerTests.test_backup_confirmation_uses_actual_destination_and_authentication_scope"
+        }
+      ]
+    },
+    {
+      "id": "telegram.storage-unknown",
+      "commands": [
+        "storage status"
+      ],
+      "surfaces": [
+        "telegram"
+      ],
+      "axes": [
+        "output"
+      ],
+      "level": "presentation",
+      "given": "missing storage fields",
+      "expected_output": "no false disconnected/verified claim",
+      "expected_state": "read only",
+      "tests": [
+        {
+          "file": "bots/telegram/tests/test_worker.py",
+          "test": "WorkerTests.test_storage_unknown_fields_never_appear_disconnected"
+        }
+      ]
+    },
+    {
+      "id": "telegram.invitation-detail",
+      "commands": [
+        "member.invitations",
+        "member.invitation-detail"
+      ],
+      "surfaces": [
+        "telegram"
+      ],
+      "axes": [
+        "output"
+      ],
+      "level": "presentation",
+      "given": "list and select own code",
+      "expected_output": "compact list then explicit code detail",
+      "expected_state": "selection reads selected ID without regeneration",
+      "tests": [
+        {
+          "file": "bots/telegram/tests/test_worker.py",
+          "test": "WorkerTests.test_tokens_list_is_compact_and_selected_token_is_read_separately"
+        }
+      ]
+    },
+    {
+      "id": "ui.semantic-outcome",
+      "commands": [
+        "update apply"
+      ],
+      "surfaces": [
+        "ui"
+      ],
+      "axes": [
+        "output"
+      ],
+      "level": "interaction",
+      "given": "recognized final failure or partial result with child exit0",
+      "expected_output": "failure summary, no green success and no reopening updated UI",
+      "expected_state": "no automatic second mutation; preserve diagnostics",
+      "tests": [
+        {
+          "file": "installer/tests/test_terminal_results.py",
+          "test": "IntegrationTests.test_child_zero_explicit_failure_and_partial_cannot_reopen_updated_ui"
+        }
+      ]
+    },
+    {
+      "id": "management.backup-contract",
+      "commands": [
+        "backup create",
+        "backup verify"
+      ],
+      "surfaces": [
+        "telegram",
+        "matrix_admin"
+      ],
+      "axes": [
+        "failure",
+        "state"
+      ],
+      "level": "backend",
+      "given": "empty or unrelated final records and exit0",
+      "expected_output": "backend_unconfirmed instead of green completion",
+      "expected_state": "no synthesized verified copy",
+      "tests": [
+        {
+          "file": "installer/tests/test_server_output_contract.py",
+          "test": "SafeServerOutputTests.test_empty_or_unrelated_output_cannot_confirm_backup"
+        }
+      ]
+    },
+    {
+      "id": "management.storage-recency",
+      "commands": [
+        "storage status"
+      ],
+      "surfaces": [
+        "telegram",
+        "matrix_admin"
+      ],
+      "axes": [
+        "success",
+        "failure"
+      ],
+      "level": "backend",
+      "given": "latest failed upload versus old verified or same-second ambiguity",
+      "expected_output": "latest failure or unknown, not old success; impossible verification date removed",
+      "expected_state": "read only; receipt is not fabricated",
+      "tests": [
+        {
+          "file": "installer/tests/test_server_output_contract.py",
+          "test": "SafeServerOutputTests.test_native_latest_failure_does_not_reuse_older_upload_success"
+        },
+        {
+          "file": "installer/tests/test_server_output_contract.py",
+          "test": "SafeServerOutputTests.test_invalid_calendar_timestamp_is_not_a_verification_date"
+        }
+      ]
+    },
+    {
+      "id": "telegram.history-owner",
+      "commands": [
+        "admin.history"
+      ],
+      "surfaces": [
+        "telegram"
+      ],
+      "axes": [
+        "permissions",
+        "state"
+      ],
+      "level": "backend",
+      "given": "own and another actor tasks",
+      "expected_output": "bounded own task history only",
+      "expected_state": "no mutation/replay during read",
+      "tests": [
+        {
+          "file": "bots/telegram/tests/test_management.py",
+          "test": "ManagementTests.test_history_is_bounded_and_never_lists_another_actor"
+        }
+      ]
+    },
+    {
+      "id": "telegram.token-owner",
+      "commands": [
+        "member.invitation-detail"
+      ],
+      "surfaces": [
+        "telegram"
+      ],
+      "axes": [
+        "permissions",
+        "state"
+      ],
+      "level": "backend",
+      "given": "own/foreign token and current login",
+      "expected_output": "only own token accessible",
+      "expected_state": "no token regenerated",
+      "tests": [
+        {
+          "file": "bots/telegram/tests/test_management.py",
+          "test": "ManagementTests.test_token_read_requires_current_login_and_ownership"
+        }
+      ]
+    },
+    {
+      "id": "matrix.backup-output",
+      "commands": [
+        "backup create"
+      ],
+      "surfaces": [
+        "matrix_admin"
+      ],
+      "axes": [
+        "output"
+      ],
+      "level": "presentation",
+      "given": "backup result with destination and external MAS",
+      "expected_output": "visible local/external destination and external MAS exclusion",
+      "expected_state": "render only",
+      "tests": [
+        {
+          "file": "bots/matrix-federation/tests/logic.test.js",
+          "test": "backup outcome preserves the external MAS boundary and selected destination"
+        }
+      ]
+    },
+    {
+      "id": "matrix.storage-output",
+      "commands": [
+        "storage status"
+      ],
+      "surfaces": [
+        "matrix_admin"
+      ],
+      "axes": [
+        "output"
+      ],
+      "level": "presentation",
+      "given": "missing storage data and backend errors",
+      "expected_output": "unknown remains unknown; safe detail only",
+      "expected_state": "render only",
+      "tests": [
+        {
+          "file": "bots/matrix-federation/tests/logic.test.js",
+          "test": "safe check detail and unknown storage remain readable without leaking raw errors"
+        }
+      ]
+    }
+  ],
+  "surface_requirements": {
+    "telegram": {
+      "role": "current local MAS admin; active device login; configured action allowlist",
+      "runtime": "Telegram worker/control/MAS; portable mutations recheck via running Synapse; systemd for jobs"
+    },
+    "matrix_admin": {
+      "role": "current local MAS admin AND panel access allowlist; room power level is insufficient",
+      "runtime": "private encrypted Matrix chat; Synapse/MAS/admin bot/controller; systemd for jobs"
+    },
+    "matrix_referral": {
+      "role": "active local member, own invitations only",
+      "runtime": "private encrypted Matrix chat; Synapse/MAS/referral bot/controller"
+    }
+  },
+  "route_signatures": [
+    {
+      "file": "bots/telegram/worker.py",
+      "kind": "telegram_slash",
+      "values": [
+        "/auth",
+        "/backup",
+        "/backup_verify",
+        "/check",
+        "/data",
+        "/federation",
+        "/federation_add",
+        "/federation_invite",
+        "/federation_remove",
+        "/health",
+        "/help",
+        "/invite",
+        "/logout",
+        "/restart_services",
+        "/start",
+        "/start_services",
+        "/statistics",
+        "/status",
+        "/stop_services",
+        "/storage",
+        "/tokens",
+        "/update_components"
+      ]
+    },
+    {
+      "file": "bots/telegram/worker.py",
+      "kind": "telegram_callbacks",
+      "values": [
+        "fed_apply",
+        "fed_card",
+        "fed_job",
+        "fed_prepare",
+        "fed_requests",
+        "jobs",
+        "manage",
+        "manage_apply",
+        "manage_job",
+        "revoke",
+        "statistics",
+        "token",
+        "tokens"
+      ]
+    },
+    {
+      "file": "bots/matrix-federation/logic.js",
+      "kind": "matrix_exact_text",
+      "values": [
+        "безопасность",
+        "версия",
+        "выполнить подтверждаю",
+        "еще",
+        "ещё",
+        "заявки",
+        "изменить приветствие",
+        "история",
+        "копии",
+        "настройки",
+        "настройки федерации",
+        "обновить",
+        "обновить подтверждаю",
+        "обновления",
+        "обслуживание",
+        "отмена",
+        "отменить",
+        "отправить",
+        "приветствие",
+        "приглашения",
+        "рассылка",
+        "резервные копии",
+        "службы",
+        "статистика",
+        "уведомления",
+        "федерация"
+      ]
+    },
+    {
+      "file": "bots/telegram/worker.py",
+      "kind": "telegram_buttons",
+      "values": [
+        "/logout",
+        "auth_check",
+        "backups",
+        "fed_api",
+        "fed_check",
+        "fed_invite",
+        "fed_prepare|clear",
+        "fed_requests|incoming|0",
+        "fed_requests|outgoing|0",
+        "fed_requests|rejected|0",
+        "fed_servers",
+        "federation",
+        "invitations",
+        "invite",
+        "jobs|0",
+        "maintenance",
+        "manage|backup_schedule",
+        "manage|components",
+        "manage|storage",
+        "manage|update",
+        "more",
+        "overview",
+        "services",
+        "tokens|0",
+        "updates"
+      ]
+    }
+  ]
+}

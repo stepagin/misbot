@@ -131,6 +131,7 @@ names = [
     'terminal_input.py',
     'terminal_views.py',
     'terminal_diagnostics.py',
+    'terminal_results.py',
     'terminal_process.py',
     'terminal_output.py',
     'startup_process.py',

@@ -304,6 +304,20 @@ class Bridge:
             raise BotError('Управление службами этого сервера не подключено.')
         controls = load_backend(config)
         action = request['action']
+        if action == 'manage_jobs':
+            offset = request.get('offset', 0)
+            if type(offset) is not int or offset < 0:
+                raise BotError('Страница не распознана. Откройте историю заново.')
+            rows = self.db.execute(
+                'SELECT id,operation,state FROM management_jobs WHERE server=? AND uid=? ORDER BY rowid DESC LIMIT 6 OFFSET ?',
+                (name, uid, offset),
+            ).fetchall()
+            jobs = []
+            for row in rows[:5]:
+                jobs.append(self.management({'action': 'manage_job', 'job': row['id']}, name, uid))
+            if self.admin(name, uid)['id'] != user['id']:
+                raise BotError('Привязка аккаунта изменилась. Повторите вход.')
+            return {'jobs': jobs, 'has_more': len(rows) > 5}
         if action == 'manage_job':
             row = self.db.execute(
                 'SELECT * FROM management_jobs WHERE id=? AND server=? AND uid=?',
@@ -358,6 +372,9 @@ class Bridge:
                     'Затем повторите применение профиля; ключи доступа в чат не отправляйте.'
                 )
             key = secrets.token_urlsafe(16)
+            preview = (
+                controls.backup_preview(config['stack_root']) if operation == 'backup' else None
+            )
             version = ''
             if operation == 'update':
                 release = self.external(run_control, config, 'update_check').get('release', {})
@@ -369,10 +386,22 @@ class Bridge:
             self.db.execute('DELETE FROM confirmations WHERE expires<?', (int(time.time()),))
             self.db.execute(
                 'INSERT INTO confirmations VALUES (?,?,?,?,?,?)',
-                (key, name, uid, 'manage:' + operation, version, int(time.time()) + 300),
+                (
+                    key,
+                    name,
+                    uid,
+                    'manage:' + operation,
+                    json.dumps(preview, sort_keys=True) if preview else version,
+                    int(time.time()) + 300,
+                ),
             )
             self.db.commit()
-            return {'confirmation': key, 'operation': operation, 'version': version or None}
+            return {
+                'confirmation': key,
+                'operation': operation,
+                'version': version or None,
+                **({'backup': preview} if preview is not None else {}),
+            }
         if action == 'manage_apply':
             row = self.db.execute(
                 'SELECT * FROM confirmations WHERE id=? AND uid=? AND server=?',
@@ -385,6 +414,10 @@ class Bridge:
             operation = row['action'].removeprefix('manage:')
             if operation not in controls.WRITES or operation not in enabled:
                 raise BotError('Эта команда управления не подключена. Обратитесь к администратору.')
+            if operation == 'backup':
+                current = json.dumps(controls.backup_preview(config['stack_root']), sort_keys=True)
+                if row['domain'] != current:
+                    raise BotError('Параметры копии изменились. Запросите новое подтверждение.')
             # The host worker survives Telegram, MAS and controller restarts.
             self.management_runtime(name)
             import server_management
@@ -396,7 +429,12 @@ class Bridge:
                     operation,
                     actor=actor,
                     event_id='telegram-management:' + row['id'],
-                    argument=row['domain'] or None,
+                    argument=row['domain'] if operation == 'update' else None,
+                    **(
+                        {'confirmed_backup': json.loads(row['domain'])}
+                        if operation == 'backup'
+                        else {}
+                    ),
                 )
             except (RuntimeError, OSError, ValueError):
                 raise BotError(
@@ -420,6 +458,10 @@ class Bridge:
             actions = list(dict.fromkeys([*actions, 'statistics', 'update_check']))
             if 'start' in actions and 'stop' in actions:
                 actions.append('restart')
+            if any(action in actions for action in ('backup', 'backup_verify', 'storage')):
+                actions.append('backup_schedule')
+            if 'backup' in actions:
+                actions.append('backup_preview')
         config['management_actions'] = actions
         return config
 
@@ -447,6 +489,8 @@ class Bridge:
                 raise BotError(
                     'Общий API Misbot не подключён. Проверьте подключение компонентов через SSH.'
                 )
+            if operation == 'check':
+                return backend.operate('check', domain(request.get('target', '')), actor=actor)
             if operation in ('requests', 'api-status'):
                 return backend.operate(operation, actor=actor)
             if operation == 'operation':
@@ -971,7 +1015,13 @@ class Bridge:
             ):
                 raise BotError('Запрос не принят: пользователь Telegram не распознан.')
             name, api, policy = self.server(request)
-            if action in ('manage_read', 'manage_prepare', 'manage_apply', 'manage_job'):
+            if action in (
+                'manage_read',
+                'manage_prepare',
+                'manage_apply',
+                'manage_job',
+                'manage_jobs',
+            ):
                 return self.management(request, name, uid)
             if action == 'federation_notifications_ack':
                 self.notification_admin(name, uid)
@@ -1031,7 +1081,7 @@ class Bridge:
                     'username': attr['username'],
                     'admin': bool(attr.get('admin', attr.get('can_request_admin', False))),
                 }
-            if action in ('invite', 'tokens', 'revoke') and not matrix_action:
+            if action in ('invite', 'tokens', 'token', 'revoke') and not matrix_action:
                 user = self.member(name, uid)
             if action == 'invite':
                 attributes = user['attributes']
@@ -1097,6 +1147,17 @@ class Bridge:
                     ],
                     'has_more': len(rows) > 5,
                 }
+            if action == 'token':
+                resource = request.get('resource')
+                if (
+                    not isinstance(resource, str)
+                    or not self.db.execute(
+                        'SELECT 1 FROM invitations WHERE server=? AND uid=? AND resource=?',
+                        (name, uid, resource),
+                    ).fetchone()
+                ):
+                    raise BotError('Приглашение недоступно. Откройте ваш список заново.')
+                return api.api('user-registration-tokens/' + resource)['data']
             if action == 'revoke':
                 resource = request.get('resource')
                 own = self.db.execute(

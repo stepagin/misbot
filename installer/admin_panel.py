@@ -33,7 +33,18 @@ ACTIONS = {
     'panel-ack',
 }
 PREFERENCES = {'updates': True, 'registrations': True, 'statistics': True}
-SERVER_READS = frozenset(('status', 'check', 'statistics', 'storage', 'update_check'))
+SERVER_READS = frozenset(
+    (
+        'status',
+        'check',
+        'statistics',
+        'storage',
+        'update_check',
+        'components',
+        'backup_schedule',
+        'backup_preview',
+    )
+)
 SERVER_WRITES = frozenset(('start', 'stop', 'restart', 'backup', 'backup_verify'))
 STATISTICS_PERIODS = frozenset(('day', 'week', 'month', 'all'))
 
@@ -342,7 +353,11 @@ class Panel:
                 ),
             }
         if action in ('panel-server-read', 'panel-server-operation'):
-            if not isinstance(argument, dict) or set(argument) - {'operation', 'period'}:
+            if not isinstance(argument, dict) or set(argument) - {
+                'operation',
+                'period',
+                'backup_preview',
+            }:
                 raise ValueError('Invalid server operation')
             operation = argument.get('operation')
             allowed = SERVER_READS if action == 'panel-server-read' else SERVER_WRITES
@@ -355,6 +370,10 @@ class Panel:
                 or ('period' in argument and operation != 'statistics')
             ):
                 raise ValueError('Invalid statistics period')
+            if 'backup_preview' in argument and (
+                action != 'panel-server-operation' or operation != 'backup'
+            ):
+                raise ValueError('Invalid backup confirmation')
             if action == 'panel-server-read':
                 from server_management import run_control
 
@@ -370,7 +389,17 @@ class Panel:
                 raise ValueError('Invalid operation event')
             from server_management import queue_operation
 
-            return queue_operation(self.root, operation, actor=actor, event_id=event)
+            return queue_operation(
+                self.root,
+                operation,
+                actor=actor,
+                event_id=event,
+                **(
+                    {'confirmed_backup': argument['backup_preview']}
+                    if 'backup_preview' in argument
+                    else {}
+                ),
+            )
         if action == 'panel-status':
             return {
                 'installed': releases.installed(self.root),

@@ -870,6 +870,14 @@ class Installation:
             media_pending=(folder / 'media-journal.json').exists(),
             local_media_retained=True,
             last_backup_verified=selected.get('remote', {}).get('verified') is True,
+            manual_backup_destination='external' if backup.exists() else 'local',
+            upload_verified=selected.get('remote', {}).get('verified')
+            if selected.get('remote')
+            else None,
+            restore_verified=True if selected.get('remote', {}).get('verified') is True else None,
+            restore_scope='selected-backup'
+            if selected.get('remote', {}).get('verified') is True
+            else None,
             backup_pending=self.journal.exists(),
         )
 
