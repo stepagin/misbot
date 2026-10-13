@@ -76,6 +76,31 @@ class DatabasePasswordTests(unittest.TestCase):
             emit=Mock(),
         )
 
+    def test_foreign_runtime_does_not_mask_selected_pending_or_empty_recovery(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            foreign = root / 'other-installation'
+            foreign.mkdir()
+            state_store.write_json(foreign / 'installation.json', {'mas_mode': 'external'})
+            with (
+                patch.object(lifecycle, 'ROOT', foreign, create=True),
+                patch.object(lifecycle, 'emit') as emit,
+                patch.object(lifecycle, 'postgres') as sql,
+                patch.object(operation, 'claim') as claim,
+            ):
+                operation.recover(root)
+                emit.assert_called_once_with(
+                    'database_password_recovery', pending=False, changed=False
+                )
+                state_store.write_json(root / operation.JOURNAL, {'fictional': 'pending'})
+                before = (root / operation.JOURNAL).read_bytes()
+                with self.assertRaisesRegex(RuntimeError, 'Database password change is pending'):
+                    operation.rotate(root)
+                self.assertEqual((root / operation.JOURNAL).read_bytes(), before)
+                claim.assert_not_called()
+                sql.assert_not_called()
+            self.assertFalse((root / 'installation.json').exists())
+
     def test_failure_before_checkpoint_does_not_change_passwords(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
