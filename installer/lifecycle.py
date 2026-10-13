@@ -395,14 +395,30 @@ def wait(check, attempts=60, service='service'):
 
 
 def dns_check():
+    import configuration_schema
+
     metadata = state()
     referral.validate_saved(ROOT, metadata)
     try:
-        preflight.dns_check(metadata['domain'], metadata['public_ip'])
+        values = preflight.settings(ROOT)
+        mas_mode = values.get('MAS_MODE', 'local')
+        mas_domain = values.get('MAS_DOMAIN', '')
+        preflight.dns_check(
+            metadata['domain'],
+            metadata['public_ip'],
+            mas_domain=mas_domain,
+            mas_mode=mas_mode,
+            mas_public_ip=values.get('MAS_PUBLIC_IP', ''),
+        )
     except (RuntimeError, OSError):
         emit('dns', passed=False, failure_code='dns_validation')
         raise
-    emit('dns', hosts=7, passed=True)
+    hosts = configuration_schema.public_hosts(
+        {'DOMAIN': metadata['domain'], 'MAS_DOMAIN': mas_domain, 'MAS_MODE': mas_mode}
+    )
+    if mas_mode == 'external':
+        hosts.append(mas_domain)
+    emit('dns', hosts=len(set(hosts)), passed=True)
 
 
 def upgrade_legacy_network():
