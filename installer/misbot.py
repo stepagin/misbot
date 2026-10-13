@@ -26,6 +26,7 @@ MISSING_RUNTIME = (
     'sudo python3 misbot.py ui. Для новой установки выберите пустой каталог; '
     'оставшиеся данные и контейнеры автоматически не удаляются.'
 )
+DEFAULT_UPDATE_DIRECTORY = Path('/opt/matrix-stack')
 
 
 class Parser(argparse.ArgumentParser):
@@ -154,7 +155,12 @@ def operation_help(command, existing=False):
         )
     print('\nКаталог установки:')
     help_paragraph(
-        'По умолчанию выбран сохранённый системный каталог. Из распакованного комплекта укажите --directory. Для init/restore: /opt/matrix-stack.',
+        (
+            'Автоматически: установка рядом с командой, сохранённый системный каталог '
+            'или /opt/matrix-stack. Для другого сервера укажите --directory PATH.'
+            if command.backend in ('update', 'update-recover')
+            else 'По умолчанию выбран сохранённый системный каталог. Из распакованного комплекта укажите --directory. Для init/restore: /opt/matrix-stack.'
+        ),
         '  ',
     )
     if command.backend == 's3-check':
@@ -266,6 +272,10 @@ def help_text(topic=''):
             )
         print()
         help_commands(found)
+        if topic == 'update':
+            help_paragraph(
+                'Из распакованного комплекта: sudo python3 misbot.py update. Источник выбирается автоматически; --directory PATH уточняет установку.'
+            )
         print(
             '  misbot version\nКопии этого режима зашифрованы; recovery key хранится отдельно. Подробно: existing-compose.md.'
         )
@@ -288,6 +298,10 @@ def help_text(topic=''):
         raise InputError('Неизвестная область. Выполните misbot help.')
     print(vocabulary.TOPICS.get(topic, topic) + '\n')
     help_commands(found)
+    if topic == 'update':
+        help_paragraph(
+            'Из распакованного комплекта: sudo python3 misbot.py update. Источник выбирается автоматически; --directory PATH уточняет установку.'
+        )
     print('\nАргументы и условия: misbot COMMAND --help')
 
 
@@ -319,7 +333,8 @@ def parse(argv):
         if value.startswith('-'):
             break
         words.append(value)
-    command = vocabulary.BY_PATH.get(' '.join(words))
+    path = ' '.join(words)
+    command = vocabulary.BY_PATH.get(vocabulary.ALIASES.get(path, path))
     if command is None:
         topic = ' '.join(words)
         if topic in vocabulary.GROUPS:
@@ -345,16 +360,93 @@ def parse(argv):
     return command, defaults, vars(args)
 
 
+def update_directory(source, root, command, options):
+    """Select only known installations; never scan arbitrary server directories."""
+    launcher = source.parent if source.name == '.misbot' else source
+    action = 'update' if command.backend == 'update' else 'update recover'
+    hint = 'Укажите каталог установки: sudo python3 ' + shlex.quote(str(launcher / 'misbot.py'))
+    hint += ' ' + action + ' --directory /абсолютный/путь'
+    if options.source is not None and not any(
+        ord(char) < 32 or 127 <= ord(char) <= 159 for char in options.source
+    ):
+        hint += ' --source ' + shlex.quote(options.source)
+    elif (source / 'command.json').is_file() or options.source is not None:
+        hint += ' --source /путь/к/комплекту'
+    hint += '.'
+    if root is None:
+        try:
+            saved = command_wrapper.record()
+            if saved is not None:
+                root = Path(saved['directory'])
+        except (OSError, ValueError, RuntimeError, KeyError, TypeError, AttributeError):
+            raise InputError('Не удалось проверить сохранённый каталог Misbot. ' + hint) from None
+    if root is None and (DEFAULT_UPDATE_DIRECTORY / 'installation.json').exists():
+        root = DEFAULT_UPDATE_DIRECTORY
+    if root is None:
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            raise InputError('Установка для обновления не найдена. ' + hint)
+        try:
+            value = input(
+                'Каталог установленного сервера (абсолютный путь; Enter — выход): '
+            ).strip()
+        except EOFError:
+            raise InputError('Каталог не указан; обновление не запущено. ' + hint) from None
+        if not value:
+            raise InputError('Каталог не указан; обновление не запущено. ' + hint)
+        root = Path(value)
+    try:
+        command_wrapper.trusted_installation(root)
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError, AttributeError):
+        raise InputError(
+            'Каталог обновления не является доверенной установкой Misbot. ' + hint
+        ) from None
+    return root
+
+
+def update_source(options, source, root, command):
+    """Accept either archive layout without hiding the existing trust checks."""
+    if options.source is None:
+        if (source / 'command.json').is_file() or source == root:
+            action = 'update' if command.backend == 'update' else 'update recover'
+            raise InputError(
+                'Запустите sudo python3 /путь/к/новому/комплекту/misbot.py '
+                + action
+                + ' --directory '
+                + shlex.quote(str(root))
+                + ' или повторите исходную команду с --source /путь/к/комплекту.'
+            )
+        candidate = source
+    else:
+        candidate = Path(options.source)
+    if not candidate.is_absolute() or candidate.resolve() != candidate:
+        raise InputError('--source требует абсолютный каталог без symlinks и переходов ..')
+    if not (candidate / 'release.json').exists() and (candidate / '.misbot').exists():
+        candidate = candidate / '.misbot'
+        if candidate.resolve() != candidate:
+            raise InputError('--source требует абсолютный каталог без symlinks и переходов ..')
+    return candidate
+
+
 def plan(command, options, values, source=None):
     source = Path(source or Path(__file__).resolve().parent)
     if options.directory:
         root = Path(options.directory)
     else:
-        root = command_wrapper.default_directory()
+        try:
+            root = command_wrapper.default_directory()
+        except (OSError, ValueError, RuntimeError, KeyError, TypeError, AttributeError):
+            if command.backend not in ('update', 'update-recover'):
+                raise
+            raise InputError(
+                'Не удалось проверить сохранённый каталог Misbot. Повторите команду '
+                'с --directory /абсолютный/путь к установленному серверу.'
+            ) from None
         if root is None and (source / 'installation.json').is_file():
             root = source
         if root is None and command.backend in ('init', 'restore', 'restore-local'):
             root = Path('/opt/matrix-stack')
+    if command.backend in ('update', 'update-recover'):
+        root = update_directory(source, root, command, options)
     if root is not None and any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in str(root)):
         raise InputError('Каталог установки не должен содержать управляющие символы.')
     if command.backend.startswith('draft-'):
@@ -412,13 +504,7 @@ def plan(command, options, values, source=None):
                     'Команда не поддерживается для существующего Compose-стека. Настройки и данные сохранены; выполните misbot help.'
                 )
             if command.backend in ('update', 'update-recover'):
-                if not options.source:
-                    raise InputError(
-                        'Для update укажите --source PATH к доверенному распакованному комплекту.'
-                    )
-                candidate = Path(options.source)
-                if not candidate.is_absolute() or candidate.resolve() != candidate:
-                    raise InputError('--source требует абсолютный каталог без symlink.')
+                candidate = update_source(options, source, root, command)
                 info = command_wrapper.regular(candidate / 'existing_update.py')
                 if info.st_uid != 0 or info.st_mode & 0o022:
                     raise InputError('Source updater должен принадлежать root без чужой записи.')
@@ -506,13 +592,7 @@ def plan(command, options, values, source=None):
             raise InputError(MISSING_RUNTIME)
         command_wrapper.trusted_runtime(backend)
     if command.backend in ('update', 'update-recover'):
-        if options.source is None:
-            if not (source / 'command.json').is_file() and source != root:
-                backend = source
-            else:
-                raise InputError(
-                    'Для update укажите --source PATH к доверенному распакованному комплекту.'
-                )
+        backend = update_source(options, source, root, command)
         # The updater verifies the complete manifest and compatibility itself.
         # Do not import it from the intentionally small public help runtime.
         if not backend.is_absolute() or backend.resolve() != backend:
@@ -568,6 +648,9 @@ def main(argv=None):
         ):
             args.append('--human')
         os.execv(args[0], args)
+    except KeyboardInterrupt:
+        print('Операция не запущена: ввод отменён.', file=sys.stderr)
+        return 130
     except (InputError, OSError, ValueError, RuntimeError, KeyError):
         # Input/backend selection errors never expose credentials or raw driver text.
         message = (

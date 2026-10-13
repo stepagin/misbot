@@ -811,6 +811,7 @@ COMMANDS = [
     ),
 ]
 BY_PATH = {c.path: c for c in COMMANDS}
+ALIASES = {'update': 'update apply'}
 BY_BACKEND = {c.backend: c.path for c in COMMANDS}
 GROUPS = frozenset(
     ' '.join(command.path.split()[:length])

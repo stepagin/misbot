@@ -307,6 +307,8 @@ class CommandContractTests(unittest.TestCase):
         groups |= set(cli_commands.TOPICS)
         for group in groups - set(cli_commands.BY_PATH):
             for style in (group.split(), [*group.split(), '--help'], ['help', *group.split()]):
+                if group in cli_commands.ALIASES and style == group.split():
+                    continue
                 with (
                     self.subTest(group=group, style=style),
                     patch.object(command_wrapper, 'default_backend', return_value='portable'),

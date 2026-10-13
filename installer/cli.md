@@ -141,8 +141,8 @@ sudo misbot stop
 ```
 
 Группы: `config`, `users`, `storage`, `backup`, `update`, `credentials`, `federation`, `homepage`.
-Имя группы без действия открывает её справку: `misbot update`,
-`misbot backup schedule`, `misbot storage s3`. Эти команды ничего не применяют.
+Имя группы без действия открывает её справку: `misbot backup schedule`,
+`misbot storage s3`. Исключение — `update`: эта команда применяет локальный комплект.
 Можно также использовать `misbot help update`, `misbot update help`
 или `misbot update --help`. У конкретной операции справка показывает назначение,
 обязательные и дополнительные аргументы, пример, условия и восстановление.
@@ -165,7 +165,17 @@ sudo misbot config command remove
 sudo misbot remove
 ```
 
-`misbot update` показывает выбор действий. `update check` проверяет GitHub Releases;
+Из распакованного полного или компактного комплекта выполните
+`sudo python3 misbot.py update`. Источник — запущенный комплект; цель — установка
+рядом с командой, сохранённый системный каталог или проверенный `/opt/matrix-stack`.
+Явный `--directory PATH` имеет приоритет. Если цель не найдена, команда спрашивает
+путь в терминале либо показывает подсказку с `--directory`; неверный сохранённый
+каталог требует явного исправления и не заменяется другой установкой.
+`sudo misbot update --source PATH` принимает внешний каталог любого комплекта,
+в том числе компактного. `update` — сокращение `update apply`, без загрузки из сети.
+`update --help`, `update help` и `help update` только открывают справку.
+
+`update check` проверяет GitHub Releases;
 `update latest` загружает и применяет опубликованный стабильный комплект для обычной
 установки. `update apply --source PATH` применяет доверенный распакованный комплект;
 `update recover --source PATH` восстанавливает прерванное обновление.

@@ -285,9 +285,11 @@ with build_version(metadata['version']) as product_version:
         'Проверка комплекта: `sha256sum -c SHA256SUMS`. '
         'Лицензия Misbot MIT: `.misbot/LICENSE`; '
         'сторонние уведомления: `.misbot/third-party-licenses.md`.\n\n'
-        'Обновление существующего сервера: используйте совместимый '
-        '`matrix-installer.tar.gz` либо укажите `.misbot/` этого комплекта '
-        'как `--source`. Ключи и данные находятся в каталоге установки.\n'
+        'Обновление существующего сервера: `sudo python3 misbot.py update`. '
+        'Комплект и каталог сервера выбираются автоматически; если каталог не найден, '
+        'команда запросит путь в терминале или предложит `--directory /абсолютный/путь`. '
+        'Справка без изменений: `python3 misbot.py update --help`. '
+        'Ключи и данные находятся в каталоге установки.\n'
     ).encode()
     compact['SHA256SUMS'] = ''.join(
         hashlib.sha256(data).hexdigest() + '  ' + name + '\n' for name, data in compact.items()
