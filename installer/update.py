@@ -321,6 +321,33 @@ def release(source):
     return info
 
 
+def admit_release(root, installed, candidate):
+    """Shared, read-only version/schema admission before either updater mutates state."""
+    import sqlite3
+
+    import data_migrations
+
+    if installed.get('config_format_version', 1) not in CONFIG_FORMAT_VERSIONS:
+        fail(
+            'Unsupported configuration format; obtain a compatible installer before changing files'
+        )
+    previous = release(root) if (root / 'release.json').exists() else {}
+    for old_version in (previous.get('version'), installed.get('applied_release_version')):
+        if old_version is not None and version(candidate['version']) < version(old_version):
+            fail('Downgrade refused; use a dedicated restore procedure')
+    schema = previous.get('data_schema_version', 0)
+    path = data_migrations.database_path(root)
+    if path.exists():
+        # Read only: admission must not create a database or run candidate migrations.
+        db = sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=30)
+        try:
+            schema = max(schema, db.execute('PRAGMA user_version').fetchone()[0])
+        finally:
+            db.close()
+    if candidate.get('data_schema_version', 0) < schema:
+        fail('Data schema downgrade refused; use a dedicated restore procedure')
+
+
 def run_data_migrations(source, root, candidate, action, checkpoint=None):
     if not candidate.get('data_schema_version'):
         return
@@ -698,13 +725,7 @@ def perform_update(source, root, action):
     entries, revision = validate_manifest(source)
     candidate = release(source)
     installed = state(root, require_sources=action != 'seed')
-    if installed.get('config_format_version', 1) not in CONFIG_FORMAT_VERSIONS:
-        fail(
-            'Unsupported configuration format; obtain a compatible installer before changing files'
-        )
-    old_version = installed.get('applied_release_version', '0.0.0')
-    if version(candidate['version']) < version(old_version):
-        fail('Downgrade refused; use a dedicated restore procedure')
+    admit_release(root, installed, candidate)
     if action == 'seed':
         if installed.get('applied_release_version'):
             fail('Seed is only for first initialization')

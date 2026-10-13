@@ -42,6 +42,85 @@ class MirrorStateTests(unittest.TestCase):
         self.db.close()
         self.temp.cleanup()
 
+    def test_run_preserves_long_scan_across_intervals_and_resets_after_completion(self):
+        root = Path(self.temp.name)
+        token = root / 'token'
+        token.write_text('fictional-token')
+        token.chmod(0o600)
+        config = {'interval': 5, 'reconcile_interval': 60}
+        for side in ('source', 'target'):
+            config.update(
+                {
+                    side + '_url': 'https://' + side + '.example',
+                    side + '_user': '@mirror:' + side + '.example',
+                    side + '_token_file': str(token),
+                }
+            )
+        mirror.write_private(root / 'config.json', config)
+        now = [1000]
+        cycles = []
+        requests = {'source': [], 'target': []}
+        joined = [True]
+
+        class Client:
+            def __init__(self, side, config):
+                self.side = side
+
+            def get(self, path):
+                if path == 'account/whoami':
+                    return {'user_id': config[self.side + '_user']}
+                return {'joined_rooms': [ROOM] if joined[0] or self.side == 'source' else []}
+
+            def sync(self, since=None):
+                return {
+                    'next_batch': str(now[0]),
+                    'rooms': {'join': {ROOM: {'timeline': {'events': [], 'prev_batch': '1'}}}},
+                }
+
+            def messages(self, room_id, cursor):
+                page = int(cursor)
+                requests[self.side].append(page)
+                response = {'chunk': [{'event_id': '$' + str(page)}]}
+                if page < 100:
+                    response['end'] = str(page + 1)
+                return response
+
+        def tick(db, seconds):
+            cycles.append(
+                db.execute('SELECT source_done, target_done, status FROM rooms').fetchone()
+            )
+            now[0] += 70
+            if len(cycles) == 21:
+                joined[0] = False
+            if len(cycles) >= 22:
+                mirror.STOP = True
+
+        with (
+            patch.object(mirror, 'STOP', False),
+            patch.object(mirror, 'MatrixClient', Client),
+            patch.object(mirror.time, 'time', side_effect=lambda: now[0]),
+            patch.object(mirror, 'sleep_until_next', side_effect=tick),
+            patch.object(mirror.signal, 'signal'),
+        ):
+            mirror.run(root)
+        # Five pages per side/cycle: an elapsed interval must not erase progress.
+        self.assertIn((1, 1, 'LIVE'), cycles)
+        self.assertEqual(requests['source'][:100], list(range(1, 101)))
+        self.assertEqual(requests['target'][:100], list(range(1, 101)))
+        self.assertEqual(requests['source'][100], 1)
+        self.assertEqual(cycles[-1][2], 'WAIT_JOIN')
+
+    def test_membership_survives_reconcile_and_rejoin_preserves_inventory(self):
+        self.db.execute(
+            'INSERT INTO rooms(room_id,source_done,target_done) VALUES (?,1,1)', (ROOM,)
+        )
+        mirror.record_events(self.db, 'source', ROOM, [{'event_id': '$saved'}])
+        mirror.record_events(self.db, 'target', ROOM, [{'event_id': '$saved'}])
+        for joined, expected in (({ROOM}, 'LIVE'), (set(), 'WAIT_JOIN'), ({ROOM}, 'LIVE')):
+            mirror.reconcile(self.db, joined)
+            self.assertEqual(self.db.execute('SELECT status FROM rooms').fetchone()[0], expected)
+            self.assertEqual(self.db.execute('SELECT count(*) FROM events').fetchone()[0], 2)
+
     def test_backfill_resumes_and_reaches_live_only_after_event_ids_match(self):
         source_sync = {
             'next_batch': 'source-next',
@@ -76,7 +155,7 @@ class MirrorStateTests(unittest.TestCase):
         )
         mirror.scan_room(self.db, source, 'source', ROOM)
         mirror.scan_room(self.db, target, 'target', ROOM)
-        mirror.reconcile(self.db)
+        mirror.reconcile(self.db, {ROOM})
         self.assertEqual(self.db.execute('SELECT status FROM rooms').fetchone()[0], 'GAPS')
 
         # A later full scan can retrieve the old event after federation recovers.
@@ -86,7 +165,7 @@ class MirrorStateTests(unittest.TestCase):
             {'target-first': {'chunk': [{'event_id': '$old'}], 'start': 'target-first'}}
         )
         mirror.scan_room(self.db, target, 'target', ROOM)
-        mirror.reconcile(self.db)
+        mirror.reconcile(self.db, {ROOM})
         self.assertEqual(self.db.execute('SELECT status FROM rooms').fetchone()[0], 'LIVE')
 
         # The checkpoint and event IDs survive a worker restart.

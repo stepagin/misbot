@@ -583,7 +583,7 @@ class ReleaseDataMigrationTests(unittest.TestCase):
             patch.object(update, 'verified_backup') as backup,
             patch.object(update, 'snapshot') as snapshot,
         ):
-            with self.assertRaisesRegex(RuntimeError, 'data check failed'):
+            with self.assertRaisesRegex(RuntimeError, 'Data schema downgrade refused'):
                 update.perform_update(self.source, self.root, 'apply')
             backup.assert_not_called()
             snapshot.assert_not_called()

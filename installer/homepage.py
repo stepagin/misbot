@@ -155,7 +155,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def probe(model):
+def probe(model, api_enabled=True):
     """Verify actual public origin with normal TLS; never follow the external target."""
     opener = urllib.request.build_opener(NoRedirect)
 
@@ -177,6 +177,10 @@ def probe(model):
         raise RuntimeError('Переадресация не подтверждена')
     for path in ('/.well-known/matrix/client', '/.well-known/matrix/server', '/.well-known/misbot'):
         code, _, payload = get(origin + path)
+        if path.endswith('/misbot') and not api_enabled:
+            if code != 503 or json.loads(payload) != {'code': 'api_disabled'}:
+                raise RuntimeError('Отключённый Misbot API не подтверждён')
+            continue
         if code != 200 or not isinstance(json.loads(payload), dict):
             raise RuntimeError('Служебный discovery не подтверждён')
         document = json.loads(payload)
@@ -210,8 +214,13 @@ class Backend:
         self.root = Path(root)
         self.validator = validator or self.validate_proxy
         self.activate = activate or self.restart_proxy
-        self.verify = verify or probe
+        self.verify = verify or self.probe
         self.attempts = attempts
+
+    def probe(self, model):
+        import federation
+
+        return probe(model, api_enabled=federation.Backend(self.root).api_enabled())
 
     def ready(self, recovery=False):
         import lifecycle
