@@ -348,6 +348,41 @@ class UITests(unittest.TestCase):
                 'Fictional new name',
             )
 
+    def test_site_apply_uses_common_execution_and_retains_failure_or_interruption(self):
+        import homepage
+
+        for code in (0, 1, 130):
+            with self.subTest(code=code), tempfile.TemporaryDirectory() as folder:
+                interface = self.initialized_ui(folder, reader=lambda *args: '')
+                calls = []
+                interface.runner = lambda args: calls.append(args) or code
+                changes = {'SITE_NAME': 'Fictional name; $literal', 'SITE_SUPPORT_URL': ''}
+                with (
+                    patch('sys.stdout', new=io.StringIO()) as output,
+                    patch.object(interface, 'edit_fields', return_value=changes),
+                    patch.object(interface, 'confirm', return_value=True),
+                    patch.object(homepage.Backend, 'apply', side_effect=AssertionError('in UI')),
+                ):
+                    self.assertEqual(interface.homepage_menu(), code)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(
+                    calls[0][2:],
+                    [
+                        '--directory',
+                        str(interface.root),
+                        'homepage',
+                        'apply',
+                        '--name',
+                        changes['SITE_NAME'],
+                        '--support-url',
+                        '',
+                    ],
+                )
+                if code == 130:
+                    self.assertIn('прервана', output.getvalue())
+                elif code:
+                    self.assertIn('не завершена', output.getvalue())
+
     def test_field_error_and_secret_empty_input_keep_existing(self):
         with tempfile.TemporaryDirectory() as folder:
             values = iter(['wrong://domain', 'example.org', ''])

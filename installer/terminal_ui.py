@@ -2370,35 +2370,19 @@ class UI:
         self.view.message('Для применения обновится Caddy; возможен короткий перерыв HTTPS.')
         if not self.confirm('Проверить и применить эти изменения?'):
             return
-        if self.adopted():
-            names = {
-                'HOMEPAGE_MODE': 'mode',
-                'HOMEPAGE_URL': 'url',
-                'SITE_NAME': 'name',
-                'SITE_DESCRIPTION': 'description',
-                'SITE_SUPPORT_URL': 'support-url',
-            }
-            code = self.run(
-                'homepage apply', **{names[key]: value for key, value in changes.items()}
-            )
-            self.view.result('Сайт сервера', code, self.continuation())
-        else:
-            with (
-                self.view.busy('Проверяем и применяем настройки сайта'),
-                state_store.operation_guard(self.root),
-            ):
-                result = homepage.Backend(self.root).apply(changes)
-            self.view.heading('Сайт сервера')
-            self.view.message(
-                'Настройки сайта применены.'
-                if result['status'] == 'applied'
-                else 'Настройки сайта уже действуют.'
-                if result['status'] == 'unchanged'
-                else 'Восстановлены прежние настройки сайта.',
-                'green',
-            )
-            self.view.details([(schema.FIELDS[key].label, value) for key, value in changes.items()])
-        self.pause('Enter — вернуться к меню')
+        names = {
+            'HOMEPAGE_MODE': 'mode',
+            'HOMEPAGE_URL': 'url',
+            'SITE_NAME': 'name',
+            'SITE_DESCRIPTION': 'description',
+            'SITE_SUPPORT_URL': 'support_url',
+        }
+        self._result_waited = False
+        code = self.run('homepage apply', **{names[key]: value for key, value in changes.items()})
+        self.show_operation_result(ui_actions.Action('homepage apply', 'Сайт сервера'), code)
+        if not self._result_waited:
+            self.pause('Enter — вернуться к меню')
+        return code
 
     def settings_menu(self):
         from configuration import load, apply_settings
