@@ -152,9 +152,10 @@ def discover(root, backup_config=None):
     return model, targets
 
 
-def plan(root, targets, model, ask=input, say=print):
+def plan(root, targets, model, ask=input, say=print, decide=None, summary=None):
     root = Path(root)
     domain = configuration.read_private_json(root / 'installation.json')['domain']
+    confirm = decide or (lambda label: yes(label, ask))
     say(
         'Удаление сервера '
         + domain
@@ -162,11 +163,9 @@ def plan(root, targets, model, ask=input, say=print):
         + str(root)
         + '. Утилита misbot останется. Данные после удаления восстановить нельзя.'
     )
-    if not yes('Начать выбор удаляемых данных?', ask):
+    if not confirm('Начать выбор удаляемых данных?'):
         return None
-    selected = {
-        key: yes(description + ': удалить?', ask) for key, (description, _) in LOCAL.items()
-    }
+    selected = {key: confirm(description + ': удалить?') for key, (description, _) in LOCAL.items()}
     remote = []
     for target in targets:
         label = s3_label(target['profile'])
@@ -177,7 +176,7 @@ def plan(root, targets, model, ask=input, say=print):
             + label
             + '. Удаляются ВСЕ объекты, версии, delete markers и незавершённые uploads только в этом prefix; bucket сохраняется.'
         )
-        if yes('Удалить этот S3 prefix?', ask):
+        if confirm('Удалить этот каталог S3: ' + label + '?'):
             if (
                 ask('Для подтверждения введите: УДАЛИТЬ S3 ' + label + '\n')
                 != 'УДАЛИТЬ S3 ' + label
@@ -186,36 +185,53 @@ def plan(root, targets, model, ask=input, say=print):
             remote.append(target['identity'])
     external_db = False
     if model.get('POSTGRES_MODE') == 'external':
-        external_db = yes(
-            'Удалить во внешней PostgreSQL только installer-owned базы synapse/mas и их роли?', ask
+        external_db = confirm(
+            'Удалить во внешней PostgreSQL только базы synapse/mas и их роли, созданные Misbot?'
         )
         if external_db and ask('Введите: УДАЛИТЬ БАЗЫ synapse mas\n') != 'УДАЛИТЬ БАЗЫ synapse mas':
             raise RuntimeError('Подтверждение БД не совпало; удаление отменено.')
     vault = False
     if (root / 'config/vault-state.json').exists():
-        vault = yes(
-            'Навсегда удалить все версии принадлежащего этому серверу snapshot в Vault KV?', ask
+        vault = confirm(
+            'Навсегда удалить все версии принадлежащего этому серверу снимка в Vault KV?'
         )
         if vault and ask('Введите: УДАЛИТЬ VAULT\n') != 'УДАЛИТЬ VAULT':
             raise RuntimeError('Подтверждение Vault не совпало; удаление отменено.')
     say(
         'Секреты, recovery keys и выгрузки, вручную сохранённые вне установки, могут находиться в других местах. Копии у других Matrix-серверов и на устройствах пользователей удаляются их владельцами.'
     )
-    say(
-        'Итог: контейнеры и служебные units будут удалены. Локально: '
-        + ', '.join(k + '=' + ('удалить' if v else 'сохранить') for k, v in selected.items())
-        + '; S3 prefixes: '
-        + str(len(remote))
-        + '; внешние БД: '
-        + str(external_db)
-        + '; Vault: '
-        + str(vault)
+    rows = [('Контейнеры и службы Misbot', 'Удалить')]
+    rows.extend(
+        (description, 'Удалить' if selected[key] else 'Сохранить')
+        for key, (description, _) in LOCAL.items()
     )
+    rows.append(
+        ('Приватные черновики этой установки', 'Удалить' if selected['secrets'] else 'Сохранить')
+    )
+    rows.extend(
+        (
+            ('Медиа S3: ' if target['kind'] == 'media' else 'Копии S3: ')
+            + s3_label(target['profile']),
+            'Удалить каталог' if target['identity'] in remote else 'Сохранить',
+        )
+        for target in targets
+    )
+    if model.get('POSTGRES_MODE') == 'external':
+        rows.append(('Внешние базы Misbot', 'Удалить' if external_db else 'Сохранить'))
+    if (root / 'config/vault-state.json').exists():
+        rows.append(('Снимок секретов в Vault', 'Удалить' if vault else 'Сохранить'))
+    rows.append(('Утилита misbot, бакеты S3 и чужие каталоги', 'Сохранить'))
+    if summary:
+        summary(rows)
+    else:
+        say('Итог удаления:')
+        for label, value in rows:
+            say('  ' + label + ': ' + value)
     if all(selected.values()):
         say(
             'Также удалятся остальные runtime-файлы в выделенном каталоге установки, кроме исходников утилиты. Тег admin-panel и настройки уведомлений будут забыты.'
         )
-    if not yes('Этот точный список верен?', ask):
+    if not confirm('Этот точный список верен?'):
         return None
     if (
         ask('Финальное подтверждение: введите УДАЛИТЬ СЕРВЕР ' + domain + '\n')
@@ -415,7 +431,7 @@ def prune_runtime(root, sources):
     visit(root)
 
 
-def execute(root, record, targets, stop=None):
+def execute(root, record, targets, stop=None, say=print):
     root = Path(root)
     journal = root / 'remove-journal.json'
     installed = root / 'installation.json'
@@ -443,7 +459,12 @@ def execute(root, record, targets, stop=None):
             state_store.write_json(journal, record)
 
         removal_operation(name, perform)
-        print('Выполнено: ' + name, flush=True)
+        say(
+            '✓ '
+            + REMOVAL_STAGES.get(
+                name, 'Удаление каталога S3' if name.startswith('s3-') else 'Удаление черновиков'
+            )
+        )
 
     state_store.write_json(journal, record)
     step('services-stopped', stop or (lambda: stop_services(root)))
@@ -465,6 +486,10 @@ def execute(root, record, targets, stop=None):
     for key, (_, names) in LOCAL.items():
         if record['local'][key]:
             step('local-' + key, lambda names=names: [remove_path(root / name) for name in names])
+    if record['local']['secrets']:
+        import wizard_state
+
+        step('wizard-drafts', lambda: wizard_state.purge_installation_drafts(root))
 
     def finalize():
         if all(record['local'].values()):
@@ -481,13 +506,18 @@ def execute(root, record, targets, stop=None):
         journal.unlink()
 
     removal_operation('finalization', finalize)
-    print(
+    say(
         'Удаление выбранных ресурсов завершено. Утилита misbot сохранена.'
         + (
             ' Для нового сервера: sudo misbot config init --domain example.org'
             if all(record['local'].values())
             else ' Для новой установки сначала повторите remove с полным локальным удалением.'
         )
+    )
+    say(
+        'Черновик: sudo misbot --directory '
+        + __import__('shlex').quote(str(root))
+        + ' config draft reset --confirm discard-draft'
     )
 
 
@@ -637,6 +667,8 @@ def main():
         raise RuntimeError(
             'Удаление требует интерактивного терминала и всех подтверждений; флага --yes нет.'
         )
+    if os.environ.get('MISBOT_TERMINAL_UI') == '1':
+        return interactive_main(args)
     with state_store.operation_guard(args.directory):
         model, targets = discover(args.directory, args.backup_config)
         path = args.directory / 'remove-journal.json'
@@ -656,6 +688,78 @@ def main():
             record = plan(args.directory, targets, model)
         if record:
             execute(args.directory, record, targets)
+
+
+def interactive_main(args):
+    """Use the same deletion plan and exact confirmations in the terminal UI."""
+    from terminal_ui import UI, Back, Cancel, SaveExit
+
+    interface = UI(args.directory)
+    view = interface.view
+
+    def decide(label):
+        view.heading('Удалить сервер')
+        view.message(label)
+        choice = interface.choose(
+            'Подтверждение',
+            [('1', 'Да', ''), ('2', 'Нет, сохранить', '')],
+            exit_label='Отменить удаление',
+            aliases={'да': '1', 'нет': '2'},
+        )
+        if choice == '0':
+            raise Cancel()
+        return choice == '1'
+
+    try:
+        with view.screen(), state_store.operation_guard(args.directory):
+            model, targets = discover(args.directory, args.backup_config)
+            journal = args.directory / 'remove-journal.json'
+            if journal.exists():
+                record = configuration.read_private_json(journal)
+                view.heading('Продолжить удаление')
+                view.message('Прежний выбор сохранён; завершённые этапы не повторяются.')
+                expected = 'УДАЛИТЬ СЕРВЕР ' + record['domain']
+                if interface.ask('Введите ' + expected) != expected:
+                    return
+            else:
+                view.heading('Удалить сервер')
+                record = plan(
+                    args.directory,
+                    targets,
+                    model,
+                    interface.ask,
+                    view.message,
+                    decide=decide,
+                    summary=lambda rows: interface.report(
+                        'Итог удаления',
+                        rows,
+                        ['Проверьте каждый ресурс. После просмотра подтвердите выбор.'],
+                    ),
+                )
+            if record:
+                with view.busy('Удаляем выбранные ресурсы') as progress:
+                    # Backend steps are also visible in a plain terminal.
+                    execute(args.directory, record, targets, say=progress.log)
+                view.heading('Удаление завершено')
+                view.message('Выбранные ресурсы удалены. Утилита misbot сохранена.', 'green')
+                command = 'sudo misbot --directory ' + __import__('shlex').quote(
+                    str(args.directory)
+                )
+                if all(record['local'].values()):
+                    view.message('Создать новый сервер или войти в меню: ' + command + ' ui')
+                else:
+                    view.message(
+                        'Для нового сервера сначала завершите полное удаление: '
+                        + command
+                        + ' remove'
+                    )
+                view.message('Состояние черновика: ' + command + ' config draft show')
+                view.message(
+                    'Удалить черновик: ' + command + ' config draft reset --confirm discard-draft'
+                )
+                interface.pause('Enter — вернуться в Misbot')
+    except (Back, Cancel, SaveExit):
+        view.message('Удаление отменено.')
 
 
 def entrypoint():

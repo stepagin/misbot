@@ -37,6 +37,48 @@ SERVICES = {
     'referral-bot': 'Реферальный бот',
     'federation-bot': 'Панель и серверный помощник',
 }
+PENDING = {
+    'migration_frozen': 'Перенос: исходный сервер остановлен',
+    'restore_pending': 'Копия восстановлена; сервер ещё не активирован',
+    'credential_transition_pending': 'Смена пароля администратора',
+    'media_transition_pending': 'Перенос медиа',
+    'backup_recovery_pending': 'Возврат служб после резервной копии',
+    'database_recovery_pending': 'Перенос баз данных',
+    'database_password_recovery_pending': 'Смена паролей баз данных',
+    's3_credential_recovery_pending': 'Смена ключей S3',
+    'update_recovery_pending': 'Обновление Misbot',
+    'configuration_recovery_pending': 'Применение настроек',
+    'federation_recovery_pending': 'Изменение федерации',
+    'homepage_recovery_pending': 'Применение настроек сайта',
+    'user_password_recovery_pending': 'Смена пароля пользователя',
+    'admin_access_recovery_pending': 'Изменение доступа администраторов',
+}
+
+
+def status_messages(record: dict[str, object]) -> list[str]:
+    messages = []
+    if record.get('operation_running') is True:
+        messages.append('Выполняется операция. Дождитесь завершения; повторный запуск пока занят.')
+    elif record.get('operation_running') is False:
+        messages.append('Активных операций нет.')
+    else:
+        messages.append('Состояние активных операций не получено.')
+    if record.get('decommissioned') is True:
+        messages.append('Сервер удалён частично. Сохранённые данные защищены от нового запуска.')
+    elif record.get('installation_complete') is False:
+        messages.append(
+            'Установка не завершена. Выберите «Запустить сервер», затем «Проверить доступность».'
+        )
+    pending = [label for key, label in PENDING.items() if record.get(key) is True]
+    if pending:
+        messages.append('Требуют продолжения:')
+        messages.extend('• ' + label for label in pending)
+        messages.append('Откройте «Продолжить прерванную операцию» и выберите указанный этап.')
+    elif record.get('installation_complete') is True:
+        messages.append('Незавершённых этапов нет.')
+    return messages
+
+
 FAILURES = {
     'connection_refused': 'Соединение с TCP 443 отклонено. Подключение к этому адресу недоступно.',
     'timeout': 'Ответ не получен за отведённое время.',
@@ -80,6 +122,26 @@ def parse_checks(output: str) -> list[CheckResult]:
         name = record.get('check')
         if not isinstance(name, str):
             continue
+        if name in ('existing_status', 'server_status'):
+            for container in record.get('containers', []):
+                if isinstance(container, dict):
+                    results.extend(
+                        parse_checks(
+                            json.dumps(
+                                {
+                                    'check': 'service',
+                                    'name': container.get('name'),
+                                    'state': 'running'
+                                    if container.get('running') is True
+                                    else 'exited',
+                                    'health': ''
+                                    if container.get('health') == 'none'
+                                    else container.get('health', ''),
+                                }
+                            )
+                        )
+                    )
+            continue
         service = record.get('name')
         if name == 'service' and isinstance(service, str) and service in SERVICES:
             observed_state = record.get('state')
@@ -91,10 +153,16 @@ def parse_checks(output: str) -> list[CheckResult]:
                 'exited': 'Остановлена',
                 'created': 'Создана, но не запущена',
                 'paused': 'Приостановлена',
+                'missing': 'Не создана; запуск не завершён',
             }.get(
                 observed_state if isinstance(observed_state, str) else '',
                 'Состояние не определено',
             )
+            exit_code = record.get('exit_code')
+            if observed_state == 'exited' and type(exit_code) is int and exit_code != 0:
+                state += ' (код ' + str(exit_code) + ')'
+                if exit_code == 137:
+                    state += '; процесс завершён принудительно'
             results.append(
                 CheckResult(
                     'service:' + service, SERVICES[service], state, running and healthy, 'service'

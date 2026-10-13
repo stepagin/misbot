@@ -241,6 +241,17 @@ MENUS = {
         'Административный бот',
         (
             action('admin bot show', 'Показать настройки панели', read_only=True),
+            action('admin access list', 'Показать администраторов', read_only=True),
+            action(
+                'admin access add',
+                'Добавить администратора',
+                'Сначала зарегистрируйте личный аккаунт',
+            ),
+            action(
+                'admin access remove',
+                'Отозвать права администратора',
+                'Основной аккаунт администратора сохраняется',
+            ),
             action(
                 'admin bot set',
                 'Выбрать имя бота до его создания',
@@ -291,7 +302,6 @@ MENUS = {
             action('storage recover', 'Вернуть настройки после переноса медиа'),
             action('storage database recover', 'Продолжить перенос баз данных'),
             action('storage database abort', 'Отменить перенос баз до активации'),
-            action('storage s3 cleanup', 'Удалить собственный проверочный объект S3'),
         ),
     ),
     'recover-config': (
@@ -323,6 +333,7 @@ MENUS = {
         'Пароли и ключи после прерывания',
         (
             action('users password recover', 'Продолжить смену пароля пользователя'),
+            action('admin access recover', 'Продолжить изменение доступа администраторов'),
             action('credentials admin recover', 'Восстановить пароль администратора'),
             action('credentials database recover', 'Продолжить смену паролей баз'),
             action('credentials s3 recover', 'Продолжить смену ключей S3'),
@@ -351,6 +362,7 @@ ARGUMENTS = {
     'server': ('Домен другого Matrix-сервера без https://', ''),
     'request': ('Идентификатор заявки из списка', ''),
     'tag': ('Имя бота без @ и домена', 'admin-panel'),
+    'mxid': ('Зарегистрированный аккаунт: @имя:домен', ''),
     'purpose': ('Назначение S3: media или backup', 'media'),
 }
 

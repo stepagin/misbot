@@ -576,3 +576,29 @@ def operation_guard(root):
                 else:
                     os.environ[key] = value
         os.close(descriptor)
+
+
+def operation_running(root):
+    """Inspect the real lock without creating it or reading its private owner record."""
+    path = operation_lock_path(Path(root).resolve())
+    try:
+        descriptor = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return False
+    try:
+        info = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.geteuid()
+            or info.st_mode & 0o077
+            or info.st_nlink != 1
+        ):
+            raise RuntimeError('Installer operation lock is not a private owned regular file')
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(descriptor)

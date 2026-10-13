@@ -144,6 +144,8 @@ class UI:
             return False
         if command.installed and not self.installation():
             return False
+        if self.installation().get('decommissioned') and path not in ('status', 'remove'):
+            return False
         if path == 'admin bot set' and (
             self.installation().get('federation_provisioned')
             or any(
@@ -377,11 +379,19 @@ class UI:
             *path.split(),
         ]
         for key, value in values.items():
-            args += ['--' + key, str(value)]
+            args += ['--' + key.replace('_', '-')]
+            if value is not True:
+                args.append(str(value))
         if self.runner:
+            self.operation_records = []
             with self.view.busy(label):
                 return self.runner(args)
-        from terminal_process import read_output, present_output
+        from terminal_process import (
+            read_output,
+            read_interrupted_output,
+            present_output,
+            process_group_running,
+        )
 
         interactive = path in (
             'users invitation show',
@@ -390,9 +400,10 @@ class UI:
             'remove',
         )
         records = []
+        self.operation_records = []
         self.result_lines = []
         self.result_total = 0
-        if path == 'check':
+        if path in ('check', 'status'):
             self.check_results = []
 
         def collect_check(line):
@@ -401,14 +412,21 @@ class UI:
 
         # Only the UI writes the terminal while animation is active. Secret display
         # and interactive backend confirmations keep their foreground terminal.
-        child = subprocess.Popen(
-            args,
-            stdin=None if interactive else subprocess.DEVNULL,
-            stdout=None if interactive else subprocess.PIPE,
-            stderr=None if interactive else subprocess.STDOUT,
-            env={**os.environ, 'PYTHONUNBUFFERED': '1'},
-            bufsize=0,
-        )
+        input_mode = self.view.external_terminal() if interactive else nullcontext()
+        input_mode.__enter__()
+        try:
+            child = subprocess.Popen(
+                args,
+                stdin=None if interactive else subprocess.DEVNULL,
+                stdout=None if interactive else subprocess.PIPE,
+                stderr=None if interactive else subprocess.STDOUT,
+                env={**os.environ, 'PYTHONUNBUFFERED': '1', 'MISBOT_TERMINAL_UI': '1'},
+                bufsize=0,
+                start_new_session=not interactive,
+            )
+        except BaseException:
+            input_mode.__exit__(*sys.exc_info())
+            raise
         try:
             if interactive:
                 self.view.message(label)
@@ -416,11 +434,20 @@ class UI:
             with self.view.busy(label) as progress:
 
                 def emit(line):
-                    if path == 'check':
+                    if path in ('check', 'status'):
                         # Verification produces short structured records, not secrets.
                         collect_check(line)
-                    else:
+                    if path == 'status':
+                        return
+                    if path != 'check':
                         messages = present_output(path, line)
+                        try:
+                            record = json.loads(line)
+                            if isinstance(record, dict):
+                                self.operation_records.append(record)
+                                del self.operation_records[:-100]
+                        except ValueError:
+                            pass
                         try:
                             invitation_record = path == 'users invitation list' and isinstance(
                                 json.loads(line).get('invitations'), list
@@ -439,24 +466,52 @@ class UI:
                                 progress.log(message)
 
                 code = read_output(child, emit)
-            if path == 'check':
+            if path in ('check', 'status'):
                 self.check_results = parse_checks('\n'.join(records))
+            if path == 'status':
+                self.result_lines = [
+                    message
+                    for line in records
+                    for message in present_output(path, line)
+                    if not any(
+                        row.label + ': ' == message[: len(row.label) + 2]
+                        for row in self.check_results
+                    )
+                ]
             return code
         except (KeyboardInterrupt, state_store.OperationInterrupted):
-            if child.poll() is None:
-                child.send_signal(signal.SIGTERM)
+            if child.poll() is None or (not interactive and process_group_running(child)):
+                if not interactive and isinstance(getattr(child, 'pid', None), int):
+                    try:
+                        os.killpg(child.pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+                else:
+                    child.send_signal(signal.SIGTERM)
             self.view.message(
                 'Операция прервана. Ожидается завершение дочернего процесса; checkpoints сохраняются.'
             )
+
+            def collect_recovery(line):
+                if path in ('check', 'status'):
+                    collect_check(line)
+                try:
+                    record = json.loads(line)
+                    if isinstance(record, dict):
+                        self.operation_records.append(record)
+                        del self.operation_records[:-100]
+                except ValueError:
+                    pass
+
             with nullcontext() if interactive else self.view.busy('Завершаем прерванную операцию'):
-                while child.poll() is None:
+                while child.poll() is None or (not interactive and process_group_running(child)):
                     try:
-                        if interactive:
+                        if interactive or child.stdout is None:
                             child.wait(timeout=1)
                         else:
-                            read_output(
-                                child, collect_check if path == 'check' else lambda line: None
-                            )
+                            read_interrupted_output(child, collect_recovery)
+                            if process_group_running(child):
+                                time.sleep(0.2)
                     except subprocess.TimeoutExpired:
                         pass
                     except (KeyboardInterrupt, state_store.OperationInterrupted):
@@ -466,8 +521,11 @@ class UI:
             self.view.message(self.continuation())
             return 130
         finally:
-            if child.stdout is not None:
-                child.stdout.close()
+            try:
+                if child.stdout is not None:
+                    child.stdout.close()
+            finally:
+                input_mode.__exit__(None, None, None)
 
     def s3_form(self, purpose):
         import s3_diagnostics as probe
@@ -622,6 +680,8 @@ class UI:
             expected = 'source-stopped' if backend == 'restore-activate' else 'target-stopped'
             if value != expected:
                 raise ValueError('Подтверждение остановки другого сервера: ' + expected)
+        if key == 'external_mas_confirm' and value != 'preserved-state':
+            raise ValueError('Нужно подтвердить сохранность внешнего MAS: preserved-state.')
         if key == 'request' and not re.fullmatch(r'MB-[0-9a-f]{32}', value):
             raise ValueError('Выберите идентификатор заявки MB-… из показанного списка.')
         if key == 'tag':
@@ -634,6 +694,12 @@ class UI:
                 r'@[a-z0-9][a-z0-9._=-]{0,63}:' + re.escape(self.installation()['domain']), mxid
             ):
                 raise ValueError('Укажите локальное имя бота: строчные латинские буквы и цифры.')
+        if key == 'mxid':
+            domain = self.installation()['domain']
+            if not re.fullmatch(r'@[a-z0-9][a-z0-9._=-]{0,63}:' + re.escape(domain), value):
+                raise ValueError(
+                    'Укажите зарегистрированный аккаунт на этом сервере: @имя:' + domain
+                )
         if key == 'calendar':
             return self.calendar_value(value)
         if key == 'key':
@@ -1214,56 +1280,86 @@ class UI:
             return 'Меню: «Продолжить прерванную операцию» → «Сайт после прерывания».'
         return 'Меню: «Состояние и работа сервера» → «Показать состояние».'
 
-    def check_result(self, code):
-        results = self.check_results
+    def report(self, title, rows, messages=()):
+        """Show every result, with simple page navigation for short terminals."""
+        page = 0
         while True:
-            self.view.heading('Проверить доступность')
-            if code == 0:
-                self.view.message('Доступность подтверждена.', 'green')
-            elif code == 130:
-                self.view.message('Проверка прервана.', 'yellow')
-            else:
-                self.view.message('Доступность не подтверждена (код ' + str(code) + ').', 'red')
-            self.view.message(check_summary(results, code))
-            dns = next((row for row in results if row.key == 'dns'), None)
-            if dns:
-                self.view.message('DNS: ' + ('проверка пройдена.' if dns.passed else dns.message))
-            first = next((row for row in results if not row.passed and row is not dns), None)
-            if first:
-                self.view.message(first.label + ': ' + first.message, 'yellow')
-            inventory = next(
-                (row for row in results if row.key == 'service_inventory' and not row.passed), None
-            )
-            if inventory and inventory is not first:
-                self.view.message(
-                    'Не все службы созданы или готовы.' if self.view.compact else inventory.message,
-                    'yellow',
-                )
-            if code:
-                self.view.message(self.continuation())
-                if not (self.root / 'homepage-transition.json').exists():
-                    self.view.message(
-                        'После исправления: «Запустить сервер», затем «Проверить доступность».'
-                    )
+            self.view.heading(title)
+            for message in messages:
+                self.view.message(message)
+            pages = [rows]
+            if self.view.fullscreen and self.view.console:
+                budget = max(1, self.view.console.height - self.view.used_lines - 5)
+                pages, part = [], []
+                for row in rows:
+                    if part and self.view.details([*part, row], measure=True) > budget:
+                        pages.append(part)
+                        part = []
+                    part.append(row)
+                pages.append(part)
+            page = min(page, len(pages) - 1)
+            self.view.details(pages[page])
             if not self.view.fullscreen:
-                for row in results:
-                    self.view.message(row.label + ': ' + row.message)
                 return
-            if self.choose('Результат проверки', [('1', 'Показать подробности', '')]) == '0':
+            if len(pages) > 1:
+                self.view.message('Страница ' + str(page + 1) + '/' + str(len(pages)))
+            answer = self.ask(
+                '> далее · < ранее · Enter — вернуться к меню'
+                if len(pages) > 1
+                else 'Enter — вернуться к меню'
+            ).strip()
+            self._result_waited = True
+            if answer not in ('>', '<'):
                 return
-            while True:
-                self.view.heading('Подробности проверки доступности')
-                choice = self.choose(
-                    'Проверки и службы',
-                    [(str(i), row.label, row.message) for i, row in enumerate(results, 1)],
-                    keep_hints=True,
-                )
-                if choice == '0':
-                    break
-                row = results[int(choice) - 1]
-                self.view.heading(row.label)
-                self.view.message(row.message)
-                self.pause('Enter — вернуться к проверкам')
+            page = max(0, min(page + (1 if answer == '>' else -1), len(pages) - 1))
+
+    def check_result(self, code):
+        if code == 0:
+            outcome = 'Доступность подтверждена.'
+        elif code == 130:
+            outcome = 'Проверка прервана; некоторые результаты могут отсутствовать.'
+        else:
+            outcome = 'Доступность не подтверждена.'
+        messages = [outcome, check_summary(self.check_results, code)]
+        if code:
+            messages.append(
+                'Для остановленного сервера выберите «Запустить сервер» и повторите проверку.'
+            )
+        rows = [
+            (('✓ ' if row.passed else '× ') + row.label, row.message) for row in self.check_results
+        ]
+        self.report('Доступность сервера', rows, messages)
+
+    def status_result(self, code):
+        services = [row for row in self.check_results if row.kind == 'service']
+        running = sum(row.passed for row in services)
+        stopped = sum(row.message.startswith('Остановлена') for row in services)
+        if services and stopped == len(services):
+            outcome = 'Сервер остановлен. Для общения выберите «Запустить сервер».'
+        elif services and running == len(services):
+            outcome = 'Все созданные службы работают. Доступность проверяется отдельно.'
+        elif services:
+            outcome = 'Сервер работает частично; проверьте отмеченные службы.'
+        else:
+            outcome = 'Сведения о службах не получены.'
+        if code:
+            outcome += ' Просмотр состояния не завершён.'
+        rows = [
+            (
+                ('✓ ' if row.passed else '○ ' if row.message.startswith('Остановлена') else '× ')
+                + row.label,
+                row.message,
+            )
+            for row in services
+        ]
+        self.report('Состояние сервера', rows, [outcome, *self.result_lines])
+
+    def unavailable_reason(self, path):
+        if not self.installation():
+            return 'Сервер не создан или уже удалён. Для этого действия нужна установка.'
+        if self.installation().get('decommissioned'):
+            return 'Сервер удалён частично. Сначала завершите удаление сохранённых данных.'
+        return 'Действие недоступно для выбранного типа установки.'
 
     def available_actions(self, group):
         return [
@@ -1294,6 +1390,7 @@ class UI:
                             'Сначала восстановление, затем отдельная активация',
                         ),
                         ('3', 'О программе и лицензиях', 'Misbot MIT · Rich MIT'),
+                        ('4', 'Войти в меню', 'Создание сервера не начнётся'),
                     ],
                     exit_label='Выйти из Misbot',
                 )
@@ -1304,6 +1401,8 @@ class UI:
                 if choice == '3':
                     self.about()
                     continue
+                if choice == '4':
+                    return self.menu()
                 self.task_menu('restore')
                 if self.installation():
                     return self.menu()
@@ -1334,6 +1433,7 @@ class UI:
                         'Параметры черновика сохраняются',
                     ),
                     ('2', 'Начать новую настройку', 'Прежний черновик сохраняется отдельно'),
+                    ('3', 'Войти в меню', 'Создание сервера не начнётся'),
                 ],
                 exit_label='Выйти из Misbot',
             )
@@ -1341,6 +1441,8 @@ class UI:
             return 0
         if choice == '0':
             return 0
+        if choice == '3':
+            return self.menu()
         if choice == '2':
             from configuration import directory, read_private_json
 
@@ -1359,8 +1461,10 @@ class UI:
 
     def execute(self, item):
         if not self.supported(item.path):
-            self.view.message('Операция недоступна для выбранной установки.', 'yellow')
+            self.view.message(self.unavailable_reason(item.path), 'yellow')
             return 2
+        if item.path in ('storage s3 check', 'storage s3 connect'):
+            return self.execute_s3(item)
         command = cli_commands.BY_PATH[item.path]
         self.view.heading(item.title, item.hint)
         args = {}
@@ -1417,7 +1521,26 @@ class UI:
                 '',
                 lambda value: self.operation_argument('source', value, command.backend),
             )
-        if not item.read_only:
+        if (
+            command.backend == 'restore-activate'
+            and self.installation().get('mas_mode') == 'external'
+        ):
+            self.view.heading('Подтвердить сохранность внешнего MAS')
+            self.view.message(
+                'Копия Misbot не содержит пользователей, устройств, ключей и данных внешнего MAS. '
+                'Перед запуском Matrix сохраните или восстановите соответствующее состояние '
+                'внешнего MAS из отдельной копии. Его учётные записи должны соответствовать '
+                'восстановленной базе Matrix.',
+                'yellow',
+            )
+            args['external_mas_confirm'] = self.input_value(
+                'Введите preserved-state после проверки внешнего MAS',
+                '',
+                lambda value: self.operation_argument(
+                    'external_mas_confirm', value, command.backend
+                ),
+            )
+        if not item.read_only and command.path != 'remove':
             rows = [
                 ('Операция', item.title),
                 ('Установка', str(execution_root)),
@@ -1427,10 +1550,12 @@ class UI:
             rows.extend(
                 (ui_actions.ARGUMENTS[key][0], value)
                 for key, value in args.items()
-                if key != 'source'
+                if key not in ('source', 'external_mas_confirm')
             )
             if 'source' in args:
                 rows.append(('Комплект', args['source']))
+            if 'external_mas_confirm' in args:
+                rows.append(('Данные внешнего MAS', 'Сохранены или восстановлены отдельно'))
             self.view.details(rows)
             if not self.confirm():
                 self.view.message('Действие отменено.')
@@ -1444,7 +1569,15 @@ class UI:
         if command.path == 'check':
             self.check_result(code)
             return code
+        if command.path == 'status':
+            self.status_result(code)
+            return code
+        self.view.heading(item.title)
         self.view.result(item.title, code, self.operation_continuation(item.path))
+        if command.path == 'remove' and code == 0 and not self.installation():
+            self.draft.unlink(missing_ok=True)
+            self.model, self.backup = {}, {}
+            self.step = 0
         if command.path == 'users invitation list' and code == 0:
             self.show_result_lines(item.title)
         if command.backend in ('update', 'release-update') and code == 0:
@@ -1465,6 +1598,99 @@ class UI:
                 + shlex.quote(str(execution_root))
                 + ' backup activate --confirm source-stopped'
             )
+        return code
+
+    def execute_s3(self, item):
+        import tempfile
+        import s3_config
+        from configuration import directory, serialize
+
+        self.view.heading(item.title)
+        self.view.message('Введите параметры S3 здесь. Ключи доступа скрыты при вводе.')
+        self.view.message('«Назад» отменяет ввод; Ctrl+C прерывает выполняемую операцию.', 'dim')
+        purpose = 'media'
+        if item.path == 'storage s3 check':
+            choice = self.choose(
+                'Что проверить?',
+                [('1', 'Хранилище медиа', ''), ('2', 'Хранилище резервных копий', '')],
+                aliases={'media': '1', 'backup': '2'},
+            )
+            if choice == '0':
+                return 0
+            purpose = 'media' if choice == '1' else 'backup'
+        initial = self.model if purpose == 'media' else self.backup
+        values = self.s3_profile(initial)
+        self.view.heading(item.title, 'Проверьте настройки перед выполнением.')
+        self.view.details(
+            [
+                (
+                    schema.FIELDS[key].label,
+                    'настроен'
+                    if schema.FIELDS[key].secret
+                    else values[key] or 'AWS для выбранного региона',
+                )
+                for key in (
+                    'S3_BUCKET',
+                    'S3_ENDPOINT_URL',
+                    'S3_REGION',
+                    'S3_PREFIX',
+                    'S3_ACCESS_KEY_ID',
+                    'S3_SECRET_ACCESS_KEY',
+                )
+            ]
+        )
+        if item.path == 'storage s3 connect':
+            self.view.message(
+                'Для переноса будет создана копия и остановлен Matrix. Локальные файлы сохраняются.'
+            )
+        else:
+            self.view.message(
+                'Будет создан и удалён собственный проверочный объект. Текущие файлы сохраняются.'
+            )
+        if not self.confirm():
+            self.view.message('Действие отменено.')
+            return 0
+        parent = directory(self.draft.parent)
+        recovery_lines = []
+        with tempfile.TemporaryDirectory(prefix='.s3-operation-', dir=parent) as folder:
+            profile = Path(folder) / 'profile.env'
+            state_store.write_text(
+                profile, serialize({key: values[key] for key in sorted(s3_config.FIELDS)})
+            )
+            args = {'config': profile}
+            if item.path == 'storage s3 check':
+                args.update(purpose=purpose, json=True)
+            code = self.run(item.path, **args)
+            records = getattr(self, 'operation_records', [])
+            pending = next(
+                (record for record in records if record.get('cleanup_pending') is True), None
+            )
+            if pending:
+                # Keep only required recovery material when the provider refuses
+                # cleanup; all successful/cancelled temporary forms are removed.
+                recovery = parent / (
+                    self.draft.stem + '-s3-probe-recovery-' + secrets.token_hex(8) + '.env'
+                )
+                state_store.write_text(recovery, serialize(values))
+                recovery_lines.append(
+                    'Провайдер не подтвердил удаление проверочного объекта. Приватный профиль сохранён: '
+                    + str(recovery)
+                )
+                for action in pending.get('next_actions', []):
+                    if isinstance(action, str) and ' storage s3 cleanup ' in action:
+                        recovery_lines.append(
+                            action.replace(shlex.quote(str(profile)), shlex.quote(str(recovery)))
+                        )
+        self.view.heading(item.title)
+        self.view.result(item.title, code, self.operation_continuation(item.path))
+        for message in recovery_lines:
+            self.view.message(message, 'yellow')
+        for record in records:
+            if item.path == 'storage s3 check':
+                from terminal_process import present_output
+
+                for message in present_output(item.path, json.dumps(record)):
+                    self.view.message(message)
         return code
 
     def show_result_lines(self, title):
@@ -1513,7 +1739,16 @@ class UI:
     def task_menu(self, group):
         title = ui_actions.MENUS[group][0]
         while True:
-            actions = self.available_actions(group)
+            actions = (
+                self.available_actions(group)
+                if self.adopted()
+                or (
+                    group == 'restore'
+                    and not self.installation()
+                    and not (self.root / '.misbot-empty.json').exists()
+                )
+                else list(ui_actions.MENUS[group][1])
+            )
             if not actions:
                 self.view.message('Этот раздел недоступен для выбранной установки.')
                 return
@@ -1523,16 +1758,29 @@ class UI:
                     self.view.message(
                         'Сначала проверьте состояние. Выберите продолжение, указанное сервером; не удаляйте сохранённые этапы операции.'
                     )
-                choices = [(str(i), item.title, item.hint) for i, item in enumerate(actions, 1)]
-                choice = self.choose('Что сделать?', choices)
+                choices = []
+                for i, item in enumerate(actions, 1):
+                    available = (
+                        bool(self.available_actions(item.path[1:]))
+                        if item.path.startswith('@')
+                        else self.supported(item.path)
+                    )
+                    hint = (
+                        item.hint
+                        if available
+                        else 'Недоступно: ' + self.unavailable_reason(item.path)
+                    )
+                    choices.append((str(i), item.title, hint))
+                choice = self.choose('Что сделать?', choices, keep_hints=True)
                 if choice == '0':
                     return
                 item = actions[int(choice) - 1]
                 if item.path.startswith('@'):
                     self.task_menu(item.path[1:])
                 else:
+                    self._result_waited = False
                     self.execute(item)
-                    if item.path != 'check':
+                    if not self._result_waited:
                         self.pause('Enter — вернуться к меню')
             except (Back, Cancel, KeyboardInterrupt):
                 self.view.message('Ввод отменён.')
@@ -1542,11 +1790,16 @@ class UI:
         state = self.installation()
         version = json.loads((self.source / 'release.json').read_text())['version']
         self.view.heading('Открываем управление сервером')
-        self.run('status')
+        if state:
+            self.run('status')
         while True:
             try:
+                state = self.installation()
                 self.view.heading(
-                    'Misbot ' + version, 'Управление сервером ' + state.get('domain', '')
+                    'Misbot ' + version,
+                    'Управление сервером ' + state['domain']
+                    if state
+                    else 'Сервер не создан или удалён',
                 )
                 self.view.details(
                     [
@@ -1568,9 +1821,27 @@ class UI:
                     choices.append(
                         ('12', 'Дополнительные компоненты', 'Подключить подготовленный план')
                     )
-                choice = self.choose('Главное меню', choices, exit_label='Выйти из Misbot')
+                if not state:
+                    choices = [
+                        (
+                            number,
+                            title,
+                            hint if number in ('4', '11') else 'Недоступно: нужен созданный сервер',
+                        )
+                        for number, title, hint in choices
+                    ]
+                    choices.append(('n', 'Создать новый сервер', 'Открыть мастер настройки'))
+                choice = self.choose(
+                    'Главное меню', choices, exit_label='Выйти из Misbot', keep_hints=True
+                )
                 if choice == '0':
                     return 0
+                if choice == 'n':
+                    return self.wizard()
+                if not state and choice in ('5', '7'):
+                    self.view.message(self.unavailable_reason('homepage show'), 'yellow')
+                    self.pause('Enter — вернуться к меню')
+                    continue
                 if choice == '5':
                     self.homepage_menu()
                 elif choice == '7':
@@ -1662,6 +1933,7 @@ class UI:
             return
         for key, value in changes.items():
             schema.field_value(key, value)
+        self.view.heading('Применить настройки сайта', 'Проверьте выбранные изменения.')
         self.view.details(
             [
                 (schema.FIELDS[key].label, before[key] + ' → ' + value)
@@ -1689,9 +1961,17 @@ class UI:
                 state_store.operation_guard(self.root),
             ):
                 result = homepage.Backend(self.root).apply(changes)
+            self.view.heading('Сайт сервера')
             self.view.message(
-                'Результат: ' + result['status'] + '. Просмотр: sudo misbot homepage show'
+                'Настройки сайта применены.'
+                if result['status'] == 'applied'
+                else 'Настройки сайта уже действуют.'
+                if result['status'] == 'unchanged'
+                else 'Восстановлены прежние настройки сайта.',
+                'green',
             )
+            self.view.details([(schema.FIELDS[key].label, value) for key, value in changes.items()])
+        self.pause('Enter — вернуться к меню')
 
     def settings_menu(self):
         from configuration import load, apply_settings
@@ -1721,6 +2001,7 @@ class UI:
             self.view.message('Изменения не применялись.')
             return
         schema.validate(self.model)
+        self.view.heading('Применить настройки сервера', 'Проверьте выбранные изменения.')
         self.view.details(
             [
                 (schema.FIELDS[key].label, before[key] + ' → ' + value)
@@ -1769,6 +2050,8 @@ def interaction(ui):
 
         command_wrapper.trusted_installation(ui.root)
         state = json.loads((ui.root / 'installation.json').read_text())
+        if state.get('decommissioned'):
+            return ui.menu()
         if state.get('backend') == 'existing-compose':
             return ui.menu()
         if (ui.root / 'configuration-transition.json').exists():
@@ -1791,6 +2074,8 @@ def interaction(ui):
             if ui.draft.exists() and 7 <= ui.step <= 9:
                 return ui.wizard()
             return ui.menu()
+    if (ui.root / '.misbot-empty.json').exists():
+        return ui.welcome()
     if ui.draft.exists() and ui.step >= 8 and not ui.installation():
         return ui.restart_without_installation()
     return ui.wizard() if ui.draft.exists() or ui.installation() else ui.welcome()
