@@ -224,16 +224,48 @@ def verify_external_mas_state():
 
 def verify_external_bot_tokens():
     import configuration
+    import federation_runtime
+    import stat
 
     metadata = state()
     tokens = []
-    for role in ('referral', 'federation', 'welcome'):
+    journals = {
+        'referral': 'session.json',
+        'federation': 'federation-session.json',
+        'welcome': 'welcome-session.json',
+    }
+    for role, journal_name in journals.items():
         if not metadata.get(role + '_provisioned'):
             continue
-        config = configuration.read_private_json(ROOT / 'config' / (role + '-bot.json'))
+        runtime_path = ROOT / 'config' / (role + '-bot.json')
+        journal_path = ROOT / 'data/referral-control' / journal_name
+        session_path = ROOT / 'secrets' / (role + '-session.json')
+        if any(
+            path.resolve() != path.absolute() for path in (runtime_path, journal_path, session_path)
+        ):
+            raise RuntimeError('Saved external MAS bot files cannot contain symbolic links')
+        info = runtime_path.lstat()
+        owner = 10002 if role == 'referral' else 10003
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+            or info.st_uid not in (os.geteuid(), owner)
+            or info.st_mode & 0o077
+        ):
+            raise RuntimeError(
+                'Saved bot configuration must retain its private managed owner and permissions'
+            )
+        # Controller journals belong to the operator; runtime configs belong to
+        # the bot's container UID and cannot use the operator-only private loader.
+        config = configuration.read_private_json(journal_path)['config']
+        session = configuration.read_private_json(session_path)
+        if any(config.get(key) != session.get(key) for key in ('user_id', 'device_id')):
+            raise RuntimeError('Saved external MAS bot identity differs; restore its checkpoint')
         tokens.append({key: config[key] for key in ('access_token', 'user_id', 'device_id')})
     if not tokens:
         return
+    referral.validate_saved(ROOT, metadata)
+    federation_runtime.validate(ROOT, metadata)
     script = """import json, sys, urllib.request
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs): return None
