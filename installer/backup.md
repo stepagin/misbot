@@ -218,8 +218,10 @@ Legacy unverified объект проверяет администратор ч�
 
 ## Регулярные копии через systemd
 
-Установка расписания сначала создаёт реальную копию и восстанавливает
-обе базы во временных БД. Timer включается лишь после успешной проверки.
+Установка расписания сначала создаёт реальную копию и проверяет её дампы
+во временных БД: Synapse и MAS при локальном MAS, только Synapse при внешнем.
+Внешний MAS сохраняют отдельно по [условиям выше](#копии-при-внешнем-mas).
+Timer включается лишь после успешной проверки.
 Команды выполняют по SSH на активном initialized сервере; они могут ненадолго
 остановить запись. После настройки проверьте реальный запуск таймера и восстановление копии.
 
@@ -244,15 +246,17 @@ sudo misbot backup schedule status
 `Result` и `ExecMainStatus`; после успешного запуска service имеет Result=success,
 ExecMainStatus=0. Systemd может сбросить эти значения после выгрузки неактивной
 службы, например при отключении timer. status отдельно показывает
-`last_verified` с UTC-временем и `two_database_restores=true`, сохранённые после
-успешной проверки копии. `execution_metadata_available=false` означает, что
+`last_verified` с UTC-временем, сохранённым после успешной проверки копии.
+При внешнем MAS эта запись не подтверждает копию или восстановление внешней
+службы авторизации. `execution_metadata_available=false` означает, что
 показанные systemd Result/Status не подтверждают последний запуск. Отсутствие
 last_verified у прежней версии означает отсутствие записи, а не потерю архива.
 Last_verified — последняя успешная копия, не результат всех последующих попыток;
 ошибки смотрите в service и приватном журнале. После переноса на иной ROOT старая
 запись не подтверждает проверку на новой машине. В `stages/backup-scheduled.log` ожидается
-`scheduled_backup_verified passed=true`: external download/manifest и оба дампа
-проверены. Просматривайте файл только приватно, он содержит сведения о вашей копии.
+`scheduled_backup_verified passed=true`: проверены все включённые дампы,
+для внешней копии также download/manifest. Просматривайте файл только приватно,
+он содержит сведения о вашей копии.
 
 Timer Persistent догоняет пропущенный запуск после включения машины;
 активная oneshot-служба не стартует второй раз. Общая installer lock также
@@ -303,6 +307,14 @@ sudo python3 misbot.py backup fetch --config /root/matrix-backup-s3.env --key /r
 sudo python3 misbot.py backup restore --archive /root/matrix-restored.tar.gz --sha256 ARCHIVE_SHA256 --public-ip 203.0.113.20 --directory /opt/matrix-stack
 ```
 
+До успешной активации на чистой машине системная команда `misbot` ещё
+не зарегистрирована. Для всех последующих staged-проверок, отключения Vault
+и активации используйте тот же проверенный комплект: заменяйте `sudo misbot`
+на `sudo python3 misbot.py` и добавляйте `--directory /opt/matrix-stack`.
+Активация копии актуального комплекта регистрирует системную команду.
+Если старый архив её ещё не содержит, продолжайте из проверенного совместимого
+комплекта с `--directory` до обновления runtime по [руководству CLI](cli.md).
+
 Замените заглавные заполнители и IPv4 значениями своей копии и новой машины.
 `backup-fetch` сообщает `external_backup_download passed=true` и SHA256
 расшифрованного архива. Он не заменяет существующий файл. При неверном ключе,
@@ -330,7 +342,7 @@ SHA256, усечённом или подменённом файле архив �
 активации выполните :
 
 ```bash
-sudo misbot credentials vault disconnect
+sudo python3 misbot.py credentials vault disconnect --directory /opt/matrix-stack
 ```
 
 Ожидается `vault_disconnected`, `local_files_retained=true`,
@@ -363,13 +375,15 @@ sudo misbot status
 `migration_external_media_snapshot` означают проверку всех live-prefix объектов
 и докачивание отсутствующих оригиналов. Длительность зависит от объёма медиа,
 диска и сети; требуется место для временной сверки даже существующих файлов.
-Успех — `migration_source_frozen` с архивом и SHA256, обе DB restore проверки;
+Успех — `migration_source_frozen` с архивом и SHA256, проверки восстановления
+всех включённых дампов (Synapse и локального MAS);
 writers остаются остановленными. Другой успешный backup не подтверждает этот
 финальный снимок.
 
 Архив пока локальный и открытый. До удаления источника создайте независимую
-зашифрованную копию через `backup-external PRIVATE_S3_ENV KEY_FILE`, затем
-`restore-check`, скачайте её и восстановите на другой машине по инструкциям
+зашифрованную копию через
+`sudo misbot backup external create --config PRIVATE_S3_ENV --key KEY_FILE`, затем
+`sudo misbot backup verify`, скачайте её и восстановите на другой машине по инструкциям
 выше. На frozen source эта операция также сохраняет остановку записи.
 Перед переносом внешних PostgreSQL/Vault/OIDC services нужна их собственная
 согласованная копия: содержимого Matrix архива для их восстановления недостаточно.
@@ -399,9 +413,10 @@ original и scratch как две жёсткие ссылки. Исходные 
 `status`, freeze и доступность ресурса. Обычный `check` требует работающих
 служб и при frozen source ожидаемо сообщает об остановленных writers.
 
-Полный архив включает логические дампы Synapse и MAS, роли локальной БД,
+Полный архив включает логический дамп Synapse и, при локальном MAS, дамп MAS,
+роли локальной БД,
 проверочные количества записей, `server_name`, настройки OAuth и S3,
-внутренние credentials, signing key Synapse, ключи MAS, конфигурации, доверенный
+внутренние credentials, signing key Synapse, ключи локального MAS, конфигурации, доверенный
 комплект исходников, сертификаты Caddy, медиа, сессию и криптобазу referral-бота,
 cross-signing keys бота, его диалоги и базу владения приглашениями.
 `backup-external` добавляет все объекты live S3-prefix и их SHA256 inventory.
@@ -424,8 +439,11 @@ PostgreSQL в локальную реализовано отдельной ко�
 
 ## Внешняя PostgreSQL: восстановление в локальную
 
-`restore-local` принимает полный архив локальной или внешней PostgreSQL18
-и импортирует обе БД в отдельную локальную PostgreSQL18. Это явная смена
+`restore-local` принимает полный архив локальной или внешней PostgreSQL 18
+и импортирует включённые БД в отдельную локальную PostgreSQL 18:
+Synapse и MAS при локальном MAS, только Synapse при внешнем.
+Внешний MAS сохраняется отдельно по [условиям выше](#копии-при-внешнем-mas).
+Это явная смена
 размещения при восстановлении снимка. Команда `restore` по-прежнему отвергает
 external архив с сообщением о доступном маршруте. Реализация и изолированные
 проверки не заменяют полный серверный проход. Проверяйте публичный DNS, реальные клиенты и внешний Vault отдельно. Перенос в другой внешний кластер не поддерживается.
@@ -434,11 +452,11 @@ external архив с сообщением о доступном маршрут
 
 ```bash
 sudo python3 misbot.py backup restore-local --archive /root/matrix-restored.tar.gz --sha256 ARCHIVE_SHA256 --public-ip 203.0.113.20 --directory /opt/matrix-stack
-sudo misbot backup verify
+sudo python3 misbot.py backup verify --directory /opt/matrix-stack
 ```
 
 Замените пути, checksum и IPv4. Каталог должен быть пустым; `init` не нужен.
-Ожидаются две `restored_database`, сравнение row inventory и `restore_staged`
+Ожидаются `restored_database` для каждой включённой БД, сравнение row inventory и `restore_staged`
 с database_mode=local/source_database_mode=external/writers_disabled=true.
 Запущена только новая PostgreSQL. Исходный внешний кластер не используется:
 сетевой доступ и его административный пароль для этого импорта не нужны.
@@ -477,7 +495,8 @@ keys произвольного клиентского устройства. Д�
 от VPS; password reset и полный серверный архив её не создают.
 
 Для финального переезда остановите источник, восстановите окончательный снимок,
-проверьте две БД и вложения, смените DNS и выполните `restore-activate source-stopped`
+проверьте включённые БД и вложения, смените DNS и выполните
+`sudo python3 misbot.py backup activate --directory /opt/matrix-stack --confirm source-stopped`
 по README. Смена режима через снимок требует перерыва записи; это не zero downtime
 или online replication. Возврат после новых writes на назначении требует новой
 согласованной копии этих writes, а не запуска устаревшей source БД.
