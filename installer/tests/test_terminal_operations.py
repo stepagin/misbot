@@ -3,8 +3,15 @@
 import io
 import json
 import os
+import errno
+import fcntl
 from pathlib import Path
+import pty
+import select
+import struct
+import subprocess
 import sys
+import termios
 import tempfile
 import time
 import unittest
@@ -17,6 +24,7 @@ import state_store
 import terminal_process
 import terminal_ui as ui
 from terminal_views import TerminalView
+import terminal_views
 import ui_actions
 import wizard_state
 
@@ -90,6 +98,214 @@ class OperationTests(unittest.TestCase):
                 self.assertIn('Внимание:', shown)
                 self.assertIn('пользователи, устройства, ключи', shown)
                 self.assertIn('Keep the corresponding external snapshot', shown)
+
+    @unittest.skipIf(terminal_views.Console is None, 'Rich is optional')
+    def test_backup_result_page_replays_archive_warning_and_final_record_after_clear(self):
+        from rich.console import Group
+
+        with tempfile.TemporaryDirectory() as folder:
+            base = Path(folder)
+            root = base / 'target'
+            root.mkdir(mode=0o700)
+            state_store.write_json(root / 'installation.json', {'domain': 'example.org'})
+            records = [
+                {
+                    'check': 'consistent_backup',
+                    'archive': '/opt/example/backups/matrix.tar.gz',
+                    'sha256': 'a' * 64,
+                    'authentication': 'external-MAS-not-included',
+                    'next_action': 'Сохраните внешний MAS отдельно.',
+                },
+                {
+                    'check': 'backup_finished',
+                    'passed': True,
+                    'next_action': 'sudo misbot backup verify',
+                    'sdk_body': 'FICTIONAL_RAW_SDK_SECRET',
+                },
+            ]
+            (base / 'misbot.py').write_text(
+                'print(' + repr('\n'.join(json.dumps(record) for record in records)) + ')'
+            )
+            output = io.StringIO()
+            console = terminal_views.Console(file=output, force_terminal=True, width=100, height=40)
+            view = TerminalView(console=console)
+            answers = iter(['да', ''])
+            with patch('configuration.load', return_value={'DOMAIN': 'example.org'}):
+                interface = ui.UI(
+                    root,
+                    source=base,
+                    draft=base / 'draft.json',
+                    view=view,
+                    reader=lambda *_: next(answers),
+                )
+            with patch.dict(os.environ, {'TERM': 'xterm'}, clear=True), view.screen():
+                self.assertEqual(
+                    interface.execute(ui_actions.Action('backup create', 'Создать копию')), 0
+                )
+                frame = '\n'.join(
+                    ''.join(segment.text for segment in line)
+                    for line in console.render_lines(Group(*view.snapshot()), pad=False)
+                )
+            self.assertIn('Архив копии: /opt/example/backups/matrix.tar.gz', frame)
+            self.assertIn('Внимание: пользователи, устройства, ключи', frame)
+            self.assertIn('sudo misbot backup verify', frame)
+            self.assertIn('Подтверждено:', frame)
+            self.assertNotIn('FICTIONAL_RAW_SDK_SECRET', frame)
+            self.assertEqual(interface.operation_records, [])
+
+    @unittest.skipIf(terminal_views.Console is None, 'Rich is optional')
+    def test_failure_reason_remains_on_final_operation_page(self):
+        from rich.console import Group
+
+        with tempfile.TemporaryDirectory() as folder:
+            base = Path(folder)
+            root = base / 'target'
+            root.mkdir(mode=0o700)
+            state_store.write_json(root / 'installation.json', {'domain': 'example.org'})
+            record = {
+                'check': 'failed',
+                'error_type': 'RuntimeError',
+                'message': 'Another installer operation is running for this directory. private owner details',
+            }
+            (base / 'misbot.py').write_text(
+                'print(' + repr(json.dumps(record)) + '); raise SystemExit(1)'
+            )
+            output = io.StringIO()
+            console = terminal_views.Console(file=output, force_terminal=True, width=100, height=40)
+            view = TerminalView(console=console)
+            answers = iter(['да', ''])
+            with patch('configuration.load', return_value={'DOMAIN': 'example.org'}):
+                interface = ui.UI(
+                    root,
+                    source=base,
+                    draft=base / 'draft.json',
+                    view=view,
+                    reader=lambda *_: next(answers),
+                )
+            with patch.dict(os.environ, {'TERM': 'xterm'}, clear=True), view.screen():
+                self.assertEqual(
+                    interface.execute(ui_actions.Action('start', 'Запустить сервер')), 1
+                )
+                frame = '\n'.join(
+                    ''.join(segment.text for segment in line)
+                    for line in console.render_lines(Group(*view.snapshot()), pad=False)
+                )
+            self.assertIn('другая операция', frame)
+            self.assertIn('Операция не завершена:', frame)
+            self.assertNotIn('private owner details', frame)
+
+    @unittest.skipIf(terminal_views.Console is None, 'Rich is optional')
+    def test_plain_admin_guidance_remains_on_final_page_without_sdk_dump(self):
+        from rich.console import Group
+
+        with tempfile.TemporaryDirectory() as folder:
+            base = Path(folder)
+            root = base / 'target'
+            root.mkdir(mode=0o700)
+            state_store.write_json(root / 'installation.json', {'domain': 'example.org'})
+            (base / 'misbot.py').write_text(
+                "print('Проверьте имя зарегистрированного аккаунта.')\n"
+                'print(\'[{"token":"FICTIONAL_RAW_SDK_SECRET"}]\')\n'
+                "print('Traceback FICTIONAL_INTERNAL_TRACE')\n"
+                "print('Authorization: Bearer FICTIONAL_RAW_SDK_SECRET')\n"
+                'raise SystemExit(1)\n'
+            )
+            console = terminal_views.Console(
+                file=io.StringIO(), force_terminal=True, width=100, height=40
+            )
+            view = TerminalView(console=console)
+            answers = iter(['@personal:example.org', 'да', ''])
+            frames = []
+
+            def reader(prompt, *_):
+                if prompt == 'Enter — вернуться к меню: ':
+                    frames.append(
+                        '\n'.join(
+                            ''.join(segment.text for segment in line)
+                            for line in console.render_lines(Group(*view.snapshot()), pad=False)
+                        )
+                    )
+                return next(answers)
+
+            with patch('configuration.load', return_value={'DOMAIN': 'example.org'}):
+                interface = ui.UI(
+                    root, source=base, draft=base / 'draft.json', view=view, reader=reader
+                )
+            with patch.dict(os.environ, {'TERM': 'xterm'}, clear=True), view.screen():
+                self.assertEqual(
+                    interface.execute(ui_actions.Action('admin access add', 'Добавить')), 1
+                )
+            self.assertEqual(len(frames), 1)
+            self.assertIn('Проверьте имя зарегистрированного аккаунта.', frames[0])
+            self.assertNotIn('FICTIONAL_RAW_SDK_SECRET', frames[0])
+            self.assertNotIn('FICTIONAL_INTERNAL_TRACE', frames[0])
+            self.assertNotIn('FICTIONAL_RAW_SDK_SECRET', repr(interface.result_messages))
+            self.assertEqual(interface.operation_records, [])
+
+    @unittest.skipIf(terminal_views.Console is None, 'Rich is optional')
+    def test_restore_continuation_is_visible_before_final_acknowledgement(self):
+        from rich.console import Group
+        import shlex
+
+        for path in ('backup restore', 'backup restore-local'):
+            for mode in ('local', 'external'):
+                with self.subTest(path=path, mode=mode), tempfile.TemporaryDirectory() as folder:
+                    base = Path(folder)
+                    root = base / 'selected'
+                    target = base / 'restored target'
+                    root.mkdir(mode=0o700)
+                    state_store.write_json(root / 'installation.json', {'domain': 'example.org'})
+                    (base / 'misbot.py').write_text(
+                        'import json,os,sys\nfrom pathlib import Path\n'
+                        "root=Path(sys.argv[sys.argv.index('--directory')+1]);root.mkdir(mode=0o700)\n"
+                        "metadata=root/'installation.json'\n"
+                        'metadata.write_text(json.dumps(' + repr({'mas_mode': mode}) + '))\n'
+                        'os.chmod(metadata,0o600)\n'
+                        'print(json.dumps({"check":"restore_staged"}))\n'
+                    )
+                    output = io.StringIO()
+                    console = terminal_views.Console(
+                        file=output, force_terminal=True, width=240, height=40
+                    )
+                    view = TerminalView(console=console)
+                    answers = iter(
+                        [str(target), '/opt/example/backup.tar.gz', 'a' * 64, '8.8.8.8', 'да', '']
+                    )
+                    final_frames = []
+
+                    def reader(prompt, *_):
+                        if prompt == 'Enter — вернуться к меню: ':
+                            final_frames.append(
+                                '\n'.join(
+                                    ''.join(segment.text for segment in line)
+                                    for line in console.render_lines(
+                                        Group(*view.snapshot()), pad=False
+                                    )
+                                )
+                            )
+                        return next(answers)
+
+                    with patch('configuration.load', return_value={'DOMAIN': 'example.org'}):
+                        interface = ui.UI(
+                            root, source=base, draft=base / 'draft.json', view=view, reader=reader
+                        )
+                    with patch.dict(os.environ, {'TERM': 'xterm'}, clear=True), view.screen():
+                        self.assertEqual(
+                            interface.execute(ui_actions.Action(path, 'Восстановить')), 0
+                        )
+                    self.assertEqual(len(final_frames), 1)
+                    frame = final_frames[0]
+                    expected = (
+                        'sudo misbot --directory '
+                        + shlex.quote(str(target))
+                        + ' backup activate --confirm source-stopped'
+                    )
+                    self.assertIn(expected, frame)
+                    self.assertIn('остановите источник и переключите DNS', frame)
+                    self.assertEqual(
+                        '--external-mas-confirm preserved-state' in frame, mode == 'external'
+                    )
+                    self.assertEqual(interface.root, root)
 
     def test_external_mas_activation_preserves_both_confirmations(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -343,6 +559,96 @@ class OperationTests(unittest.TestCase):
                 self.assertEqual(interface.run('start'), 130)
             self.assertTrue(done.exists())
             self.assertFalse(state_store.operation_running(target))
+
+
+@unittest.skipUnless(
+    sys.platform.startswith('linux')
+    and terminal_views.Console
+    and hasattr(TerminalView, 'external_terminal'),
+    'Linux PTY, Rich and integrated terminal mode guard required',
+)
+class SensitiveDisplayTests(unittest.TestCase):
+    def receive(self, master, expected, process, output=b''):
+        deadline = time.monotonic() + 5
+        while expected not in output and time.monotonic() < deadline:
+            if select.select([master], [], [], 0.1)[0]:
+                try:
+                    output += os.read(master, 65536)
+                except OSError as error:
+                    if error.errno == errno.EIO:
+                        break
+                    raise
+        self.assertIn(expected, output)
+        return output
+
+    def test_foreground_secret_stays_visible_until_enter_without_saved_history(self):
+        for command in ('credentials admin show', 'users invitation show'):
+            with self.subTest(command=command), tempfile.TemporaryDirectory() as folder:
+                base = Path(folder)
+                (base / 'misbot.py').write_text("print('FICTIONAL_VISIBLE_CREDENTIAL',flush=True)")
+                master, slave = pty.openpty()
+                fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 32, 80, 0, 0))
+                script = """
+import fcntl,os,sys,termios
+from pathlib import Path
+os.setsid();fcntl.ioctl(0,termios.TIOCSCTTY,0)
+sys.path.insert(0,sys.argv[1])
+from terminal_views import TerminalView
+from rich.console import Group
+sys.path.insert(0,sys.argv[2])
+import terminal_ui as ui,configuration,state_store,ui_actions
+base=Path(sys.argv[3]);root=base/'target';root.mkdir(mode=0o700)
+state_store.write_json(root/'installation.json',{'domain':'example.org'})
+configuration.load=lambda *args,**kw:{'DOMAIN':'example.org'}
+settings=termios.tcgetattr(0);view=TerminalView()
+interface=ui.UI(root,source=base,draft=base/'draft.json',view=view)
+with view.screen():
+ interface.execute(ui_actions.Action(sys.argv[4],'Показать секрет'))
+ content=''.join(segment.text for line in view.console.render_lines(Group(*view.page),pad=False) for segment in line)
+ print('NO_SECRET_HISTORY:'+str('FICTIONAL_VISIBLE_CREDENTIAL' not in content),flush=True)
+ print('NO_SECRET_RECORDS:'+str(interface.operation_records==[] and interface.result_messages==[] and interface.result_notices==[]),flush=True)
+print('RESTORED:'+str(settings==termios.tcgetattr(0)),flush=True)
+"""
+                process = subprocess.Popen(
+                    [
+                        sys.executable,
+                        '-B',
+                        '-c',
+                        script,
+                        str(Path(terminal_views.__file__).parent),
+                        str(Path(ui.__file__).parent),
+                        str(base),
+                        command,
+                    ],
+                    stdin=slave,
+                    stdout=slave,
+                    stderr=slave,
+                    env={
+                        key: value
+                        for key, value in dict(os.environ, TERM='xterm').items()
+                        if key != 'NO_COLOR'
+                    },
+                )
+                os.close(slave)
+                try:
+                    output = self.receive(master, 'Выполнить операцию?'.encode(), process)
+                    os.write(master, 'да\n'.encode())
+                    output = self.receive(master, b'Enter', process, output)
+                    self.assertIn(b'FICTIONAL_VISIBLE_CREDENTIAL', output)
+                    time.sleep(0.15)
+                    self.assertIsNone(process.poll())
+                    clear = max(output.rfind(b'\x1b[2J\x1b[H'), output.rfind(b'\x1b[H\x1b[2J'))
+                    self.assertIn(b'FICTIONAL_VISIBLE_CREDENTIAL', output[clear:])
+                    os.write(master, b'\n')
+                    output = self.receive(master, b'RESTORED:True', process, output)
+                    self.assertIn(b'NO_SECRET_HISTORY:True', output)
+                    self.assertIn(b'NO_SECRET_RECORDS:True', output)
+                    self.assertEqual(process.wait(timeout=5), 0)
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                        process.wait(timeout=5)
+                    os.close(master)
 
 
 class RemovalScopeTests(unittest.TestCase):
