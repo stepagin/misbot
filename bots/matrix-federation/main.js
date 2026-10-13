@@ -14,7 +14,12 @@ const { StoreType } = require("@matrix-org/matrix-sdk-crypto-nodejs");
 const { FederationBot, errorText, sendNotice } = require("./logic"),
     { ensureCrossSigning } = require("./signing");
 const { WelcomeBot, DeliveryQueue, privateRoom } = require("./welcome");
-const { SerialQueue, controlTimeout, DecryptionRetry } = require("./runtime");
+const {
+    SerialQueue,
+    controlTimeout,
+    DecryptionRetry,
+    startNotificationPolling
+} = require("./runtime");
 let stage = "configuration";
 let lastControl = Date.now();
 LogService.setLogger({ trace() {}, debug() {}, info() {}, warn() {}, error() {} });
@@ -283,7 +288,7 @@ async function main() {
     setInterval(() => queue.add("deliveries", () => deliveries.poll(), true), 5000).unref();
     setInterval(() => queue.add("decryption", () => decrypted.retry(), true), 10000).unref();
     ready = true;
-    setInterval(() => queue.add("notifications", () => bot.notifications(), true), 30000).unref();
+    startNotificationPolling(queue, () => bot.notifications(), setTimeout);
     http.createServer((req, res) => {
         const ok =
             ready &&

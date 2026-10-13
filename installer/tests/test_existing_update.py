@@ -202,8 +202,14 @@ class ExistingUpdateTests(unittest.TestCase):
                     )
                 else:
                     markup = (site / 'index.html').read_text()
-                    self.assertIn(
-                        'https://code.example.org/next?from=landing&amp;release=next', markup
+                    self.assertNotIn('https://code.example.org/', markup)
+                    self.assertNotIn('Подключить свой сервер', markup)
+                    self.assertIn('Сделано через Misbot', markup)
+                    self.assertEqual(
+                        json.loads((installation.root / 'release.json').read_text())[
+                            'homepage_setup_url'
+                        ],
+                        'https://code.example.org/next?from=landing&release=next',
                     )
                     self.assertIn('Our server', markup)
                     self.assertIn('код приглашения', markup)

@@ -76,6 +76,25 @@ def bot_call(backend, request, uid):
             return admin_panel.Panel(backend.root).handle(
                 action, request.get('argument'), request.get('event_id'), actor=request.get('actor')
             )
+    if action == 'validate':
+        actor = request.get('actor')
+        if not isinstance(actor, str) or actor == 'root':
+            raise protocol.ProtocolError('local_authorization_required')
+        try:
+            intent = request.get('argument')
+            if isinstance(intent, str):
+                intent = json.loads(intent)
+        except (TypeError, ValueError) as error:
+            raise protocol.ProtocolError('invalid_request') from error
+        if not isinstance(intent, dict) or set(intent) != {'action', 'argument'}:
+            raise protocol.ProtocolError('invalid_request')
+        if not isinstance(intent['action'], str) or intent['action'] not in MUTATIONS:
+            raise protocol.ProtocolError('unknown_operation')
+        with backend.guard():
+            admin_panel.authorize(backend, actor)
+            backend.ready(intent['action'] in ('recover', 'rollback'))
+            backend.validate_mutation(backend.load(), intent['action'], intent['argument'])
+            return {'valid': True}
     if action in ('notifications', 'auto-invitation', 'authorize'):
         with backend.guard():
             if not (backend.root / 'update-journal.json').exists():
@@ -88,14 +107,7 @@ def bot_call(backend, request, uid):
                 admin_panel.authorize(backend, actor)
                 return {'authorized': True}
             if action == 'notifications':
-                return {
-                    'requests': backend.requests(data),
-                    'operations': [
-                        {'id': k, 'state': v['state'], 'result': v.get('result', {})}
-                        for k, v in data.get('jobs', {}).items()
-                        if v['state'] in ('complete', 'failed', 'interrupted')
-                    ],
-                }
+                return notification_page(backend, data, request.get('argument'))
             claim = json.loads(request.get('argument', '{}'))
             mxid = claim.get('sender')
             room = claim.get('room')
@@ -133,6 +145,100 @@ def bot_call(backend, request, uid):
     return backend.operate(action, request.get('argument'), request['actor'], request['event_id'])
 
 
+def job_result_view(job):
+    """Project a bounded result for notifications and replayed acknowledgements."""
+    result_keys = (
+        'id',
+        'server',
+        'direction',
+        'state',
+        'code',
+        'safe_error',
+        'delivery_pending',
+        'delivery_confirmed',
+        'status',
+        'next_action',
+        'count',
+        'enabled',
+        'local_applied',
+        'remote_applied',
+        'expires_at',
+    )
+    result = {
+        name: value
+        for name, value in job.get('result', {}).items()
+        if name in result_keys
+        and (
+            value is None
+            or type(value) in (bool, int)
+            or isinstance(value, str)
+            and len(value) <= 2048
+        )
+    }
+    if len(json.dumps(result, ensure_ascii=True).encode('utf-8')) > 18000:
+        return {'code': 'invalid_operation_state'}
+    return result
+
+
+def notification_page(backend, data, argument=None):
+    """Bound each RPC reply while retaining terminal decisions in the feed."""
+    if argument is None:
+        argument = {}
+    if not isinstance(argument, dict) or set(argument) - {'cursor'}:
+        raise protocol.ProtocolError('invalid_request')
+    cursor = argument.get('cursor', '')
+    if not isinstance(cursor, str) or len(cursor) > 64:
+        raise protocol.ProtocolError('invalid_request')
+    entries = [
+        ('request:' + rid, 'requests', rid)
+        for rid, item in data['requests'].items()
+        if not item.get('superseded_by')
+    ]
+    entries.extend(
+        ('operation:' + jid, 'operations', jid)
+        for jid, job in data.get('jobs', {}).items()
+        if job['state'] in ('complete', 'failed', 'interrupted')
+    )
+    page = {'requests': [], 'operations': [], 'next_cursor': None}
+    size = 128
+    count = 0
+    last = None
+    for key, collection, identifier in sorted(entries):
+        if key <= cursor:
+            continue
+        if collection == 'requests':
+            item = backend.view(backend.request(data, identifier))
+        else:
+            job = data['jobs'][identifier]
+            item = {
+                'id': identifier,
+                'state': job['state'],
+                **{
+                    name: value if isinstance(value, str) and len(value) <= 255 else None
+                    for name, value in (
+                        ('action', job.get('action')),
+                        ('argument', job.get('argument')),
+                        ('actor', job.get('actor')),
+                    )
+                },
+                'result': job_result_view(job),
+            }
+        entry_size = len(json.dumps(item, ensure_ascii=True).encode('utf-8')) + 2
+        if collection == 'operations' and entry_size > 23000:
+            # Older daemons accepted arbitrary unused arguments/results. Keep
+            # the checkpoint, but never let one old record block the whole feed.
+            item['result'] = {'code': 'invalid_operation_state'}
+            entry_size = len(json.dumps(item, ensure_ascii=True).encode('utf-8')) + 2
+        if count and (count >= 40 or size + entry_size > 24000):
+            page['next_cursor'] = last
+            break
+        page[collection].append(item)
+        size += entry_size
+        count += 1
+        last = key
+    return page
+
+
 def queue_job(backend, request):
     """Internal root callers must supply an independently confirmed MAS actor."""
     action = request.get('action')
@@ -160,6 +266,7 @@ def queue_job(backend, request):
             'event_id': event,
         }
         if jid not in jobs:
+            backend.validate_mutation(data, action, request.get('argument'))
             if (
                 action in ('recover', 'rollback')
                 and not (backend.root / 'federation-transition.json').is_file()
@@ -171,11 +278,20 @@ def queue_job(backend, request):
             backend.save(data)
         elif any(jobs[jid].get(k) != v for k, v in expected.items()):
             raise protocol.ProtocolError('event_mismatch')
+        result = (
+            job_result_view(jobs[jid])
+            if jobs[jid]['state'] in ('complete', 'failed', 'interrupted')
+            else {}
+        )
         return {
+            **result,
             'operation_id': jid,
             'status': jobs[jid]['state'],
             'plan': plan,
-            'next_action': 'Итог доступен через misbot federation operations и административного Matrix-бота.',
+            'next_action': result.get(
+                'next_action',
+                'Итог доступен через misbot federation operations и административного Matrix-бота.',
+            ),
         }
 
 
@@ -193,7 +309,7 @@ def job_step(backend):
         backend.save(data)
     try:
         result = backend.operate(job['action'], job['argument'], job['actor'], job['event_id'])
-        status = 'complete'
+        status = 'failed' if result.get('code') else 'complete'
     except protocol.ProtocolError as error:
         result = {'code': error.code}
         status = 'failed'

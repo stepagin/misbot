@@ -128,6 +128,28 @@ class FederationOutputTests(unittest.TestCase):
         self.assertNotIn('\x1b', output.getvalue())
         self.assertNotIn('private', output.getvalue())
 
+    def test_receipt_is_reported_only_with_signed_confirmation_and_time_is_moscow(self):
+        original = {
+            'id': 'MB-example',
+            'server': 'other.example.org',
+            'state': 'pending',
+            'direction': 'outgoing',
+            'expires_at': 0,
+        }
+        for confirmation in (None, False, True):
+            record = dict(original)
+            if confirmation is not None:
+                record['delivery_confirmed'] = confirmation
+            shown = '\n'.join(
+                terminal_process.present_output('federation invite', json.dumps(record))
+            )
+            self.assertIn('01.01.1970 03:00 МСК', shown)
+            if confirmation is True:
+                self.assertIn('Получение заявки другим сервером подтверждено.', shown)
+            else:
+                self.assertIn('Получение заявки другим сервером пока не подтверждено.', shown)
+        self.assertNotIn('delivery_confirmed', original)
+
     def test_operation_recovery_and_request_direction_remain_actionable(self):
         shown = '\n'.join(
             terminal_process.present_output(

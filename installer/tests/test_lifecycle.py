@@ -278,6 +278,7 @@ class LifecycleTests(unittest.TestCase):
                     'read_text',
                     side_effect=AssertionError('Status must not read journal/secret contents'),
                 ),
+                patch('server_management.host_statistics', return_value={}),
                 patch.object(
                     lifecycle, 'dc', side_effect=RuntimeError('Protected Docker unavailable')
                 ) as dc,

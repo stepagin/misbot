@@ -26,6 +26,41 @@ import verify
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_configuration_busy_or_invalid_is_not_a_dns_failure(self):
+        for error in (state_store.OperationBusy('busy'), RuntimeError('invalid config')):
+            with (
+                self.subTest(error=type(error).__name__),
+                patch.object(lifecycle, 'ROOT', Path('/fictional'), create=True),
+                patch.object(lifecycle, 'state', return_value={}),
+                patch.object(lifecycle.referral, 'validate_saved'),
+                patch.object(lifecycle.preflight, 'settings', side_effect=error),
+                patch.object(lifecycle.preflight, 'dns_check') as dns,
+                patch.object(lifecycle, 'emit') as emit,
+                self.assertRaises(type(error)),
+            ):
+                lifecycle.dns_check()
+            dns.assert_not_called()
+            emit.assert_not_called()
+
+    def test_resource_presentation_preserves_unknown_and_rejects_unsafe_values(self):
+        self.assertIn('CPU: нет данных', diagnostics.resource_messages({}))
+        messages = diagnostics.resource_messages(
+            {
+                'cpu_used_percent': 25,
+                'memory_used_bytes': 1024**3,
+                'memory_total_bytes': 2 * 1024**3,
+                'swap_total_bytes': 0,
+                'swap_used_bytes': 0,
+                'disk_total_bytes': 'PRIVATE_MARKER',
+                'uptime_seconds': 90000,
+            }
+        )
+        self.assertIn('CPU: 25 %', messages)
+        self.assertIn('RAM: 1.0 / 2.0 ГиБ (50 %)', messages)
+        self.assertIn('Swap: не используется', messages)
+        self.assertIn('Диск установки: нет данных', messages)
+        self.assertNotIn('PRIVATE_MARKER', str(messages))
+
     def test_failure_codes_unwrap_network_errors_without_printing_secrets(self):
         errors = (
             (ConnectionRefusedError(errno.ECONNREFUSED, 'PRIVATE_MARKER'), 'connection_refused'),

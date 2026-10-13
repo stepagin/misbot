@@ -439,7 +439,7 @@ class Backend:
                 'remote_applied',
             )
         }
-        for key in ('delivery_pending', 'safe_error', 'superseded_by'):
+        for key in ('delivery_pending', 'delivery_confirmed', 'safe_error', 'superseded_by'):
             if key in item:
                 result[key] = item[key]
         return result
@@ -452,25 +452,10 @@ class Backend:
                     return item
         return None
 
-    def dismiss_connected(self, data, item):
-        """Hide stale unapproved requests without disrupting an applying saga."""
-        if item['state'] not in ACTIVE or (
-            item.get('local_approval') and item.get('remote_approval')
-        ):
-            return False
-        if item.get('local_applied') or item.get('remote_applied'):
-            return False
-        if item['server'] not in self.servers():
-            return False
-        item.update(state='cancelled', dismissed=True, delivery_pending=True)
-        self.save(data)
-        return True
-
     def requests(self, data):
         visible = []
         for rid in data['requests']:
             item = self.request(data, rid)
-            self.dismiss_connected(data, item)
             if item['state'] in (*ACTIVE, 'rejected', 'expired') and not item.get('cleared'):
                 visible.append(self.view(item))
         return visible
@@ -525,27 +510,79 @@ class Backend:
         if protocol.INVITATION_CAPABILITY not in document['capabilities']:
             raise protocol.ProtocolError('invitation_unsupported')
 
+    def validate_mutation(self, data, action, argument, event_id=None):
+        """Check current intent under the writer guard before queueing and execution."""
+        request_actions = ('approve', 'reject', 'cancel', 'retry')
+        if action in ('api-enable', 'api-disable', 'recover', 'rollback') and argument is not None:
+            raise protocol.ProtocolError('invalid_request')
+        if action in ('add', 'remove', 'invite') and (
+            not isinstance(argument, str) or len(argument) > 253
+        ):
+            raise protocol.ProtocolError('invalid_request')
+        if (
+            action == 'clear-rejected'
+            and argument is not None
+            and (not isinstance(argument, str) or not REQUEST.fullmatch(argument))
+        ):
+            raise protocol.ProtocolError('invalid_request_id')
+        if action == 'invite':
+            server = schema.domain(argument)
+            self.require_api(data)
+            if server == data['server_name']:
+                raise protocol.ProtocolError('self_invitation')
+            if self.active_for(data, server):
+                raise protocol.ProtocolError('pending_request_exists')
+            peer = data['peers'].get(server)
+            if (
+                peer
+                and server in self.servers()
+                and data['requests'].get(peer.get('request_id'), {}).get('state') == 'connected'
+            ):
+                raise protocol.ProtocolError('peer_already_connected')
+            if len(data['requests']) >= 1000:
+                raise protocol.ProtocolError('request_capacity')
+            if int(time.time()) - data.get('last_invitation_at', 0) < INVITATION_INTERVAL:
+                raise protocol.ProtocolError('invitation_rate_limit')
+        elif action in request_actions:
+            item = self.request(data, argument)
+            server = item['server']
+            if action != 'retry':
+                if item['state'] in TERMINAL or item['state'] == 'connected':
+                    raise protocol.ProtocolError('invalid_transition')
+                direction = 'outgoing' if action == 'cancel' else 'incoming'
+                if item['direction'] != direction:
+                    raise protocol.ProtocolError('invalid_transition')
+                if (
+                    item.get('local_applied')
+                    or item.get('remote_applied')
+                    or item['state'] != 'pending'
+                ):
+                    raise protocol.ProtocolError('request_in_progress')
+        else:
+            return
+        for job in data.get('jobs', {}).values():
+            if job['state'] not in ('queued', 'running') or (
+                event_id is not None and job.get('event_id') == event_id
+            ):
+                continue
+            queued_action, queued_argument = job.get('action'), job.get('argument')
+            queued_request = (
+                data['requests'].get(queued_argument, {})
+                if queued_action in request_actions and isinstance(queued_argument, str)
+                else {}
+            )
+            if (queued_action == 'invite' and queued_argument == server) or (
+                queued_action in request_actions and queued_request.get('server') == server
+            ):
+                raise protocol.ProtocolError('request_in_progress')
+
     def invitation_candidate(self, data, server, document):
         """Describe eligibility without creating a request or posting an envelope."""
         result = {'supported': False, 'ready': False, 'expires_after': protocol.REQUEST_TTL}
         try:
             self.require_invitation_support(document)
             result['supported'] = True
-            self.require_api(data)
-            if server == data['server_name']:
-                raise protocol.ProtocolError('self_invitation')
-            if server in self.servers():
-                raise protocol.ProtocolError('peer_already_connected')
-            active = self.active_for(data, server)
-            if active and active['direction'] == 'incoming':
-                raise protocol.ProtocolError('pending_request_exists')
-            if not active and len(data['requests']) >= 1000:
-                raise protocol.ProtocolError('request_capacity')
-            if (
-                not active
-                and int(time.time()) - data.get('last_invitation_at', 0) < INVITATION_INTERVAL
-            ):
-                raise protocol.ProtocolError('invitation_rate_limit')
+            self.validate_mutation(data, 'invite', server)
             result['ready'] = True
         except protocol.ProtocolError as error:
             result['code'] = error.code
@@ -575,6 +612,7 @@ class Backend:
             or reply.get('request_id') != item['id']
         ):
             raise protocol.ProtocolError('invalid_response')
+        item['delivery_confirmed'] = True
         if reply.get('approved'):
             item['remote_approval'] = True
         # These are saga milestones. A delayed signed status must not regress
@@ -611,26 +649,10 @@ class Backend:
             }
             self.save(data)
 
-    def invite(self, data, server, actor):
+    def invite(self, data, server, actor, event_id=None):
         server = schema.domain(server)
-        if server == data['server_name']:
-            raise protocol.ProtocolError('self_invitation')
-        self.require_api(data)
-        if server in self.servers():
-            for old in data['requests'].values():
-                if old['server'] == server:
-                    self.dismiss_connected(data, old)
-            raise protocol.ProtocolError('peer_already_connected')
-        old = self.active_for(data, server)
-        if old:
-            if old['direction'] == 'incoming':
-                raise protocol.ProtocolError('pending_request_exists')
-            return self.retry(data, old['id'])
+        self.validate_mutation(data, 'invite', server, event_id=event_id)
         now = int(time.time())
-        if now - data.get('last_invitation_at', 0) < INVITATION_INTERVAL:
-            raise protocol.ProtocolError('invitation_rate_limit')
-        if len(data['requests']) >= 1000:
-            raise protocol.ProtocolError('request_capacity')
         doc = self.peer(data, server)
         self.require_invitation_support(doc)
         rid = 'MB-' + secrets.token_hex(16)
@@ -648,6 +670,8 @@ class Backend:
             'local_applied': False,
             'remote_applied': False,
             'entry_preexisted': server in self.servers(),
+            'delivery_pending': True,
+            'delivery_confirmed': False,
         }
         data['requests'][rid] = item
         data['last_invitation_at'] = now
@@ -682,12 +706,16 @@ class Backend:
                 self.local_apply(data, item)
         except protocol.ProtocolError as error:
             item['safe_error'] = error.code
+            item['delivery_pending'] = True
             self.save(data)
             return {
                 **self.view(item),
                 'code': error.code,
                 'next_action': 'sudo misbot federation requests retry --request ' + rid,
             }
+        item.pop('delivery_pending', None)
+        item.pop('next_delivery_at', None)
+        self.save(data)
         return self.view(item)
 
     @staticmethod
@@ -782,7 +810,7 @@ class Backend:
                         'direction': 'incoming',
                         'actor': None,
                         'expires_at': expiration,
-                        'state': 'cancelled' if action == 'cancelled' or connected else 'pending',
+                        'state': 'cancelled' if action == 'cancelled' else 'pending',
                         'local_approval': False,
                         'remote_approval': body['approved'],
                         'local_applied': False,
@@ -804,7 +832,6 @@ class Backend:
                     raise protocol.ProtocolError('invalid_transition')
                 if action == 'invite' and item['direction'] != 'incoming':
                     raise protocol.ProtocolError('invalid_transition')
-                self.dismiss_connected(data, item)
                 if item['state'] in ACTIVE:
                     if action in ('cancelled', 'rejected'):
                         # Removing policy is a SEPARATE local admin operation, never implicit rollback.
@@ -870,6 +897,7 @@ class Backend:
             )
             self.authorize(actor)
             data = self.load()
+            self.validate_mutation(data, action, argument, event_id=event_id)
             if event_id and action not in (
                 'servers',
                 'check',
@@ -959,7 +987,7 @@ class Backend:
                     )
                 return result
             if action == 'invite':
-                return self.invite(data, argument, actor)
+                return self.invite(data, argument, actor, event_id)
             if action == 'requests':
                 return {'requests': self.requests(data)}
             if action == 'peers':
@@ -978,30 +1006,15 @@ class Backend:
                 }
             if action in ('approve', 'reject', 'cancel', 'retry', 'request-status'):
                 item = self.request(data, argument)
-                self.dismiss_connected(data, item)
                 if action == 'request-status':
                     return self.view(item)
                 if action == 'retry':
+                    self.validate_mutation(data, action, argument, event_id=event_id)
                     return self.retry(data, argument)
-                if item['server'] in self.servers():
-                    raise protocol.ProtocolError('peer_already_connected')
+                self.validate_mutation(data, action, argument, event_id=event_id)
                 if action == 'approve':
-                    if item['direction'] != 'incoming' or item['state'] in TERMINAL:
-                        raise protocol.ProtocolError('invalid_transition')
                     item.update(local_approval=True, actor=actor, state='accepted')
                     self.save(data)
-                    return self.retry(data, argument)
-                if action == 'reject' and item['direction'] != 'incoming':
-                    raise protocol.ProtocolError('invalid_transition')
-                if action == 'cancel' and item['direction'] != 'outgoing':
-                    raise protocol.ProtocolError('invalid_transition')
-                if (
-                    item['state'] == 'connected'
-                    or item.get('local_applied')
-                    or item.get('remote_applied')
-                ):
-                    raise protocol.ProtocolError('request_in_progress')
-                if item['state'] in TERMINAL:
                     return self.retry(data, argument)
                 item.update(
                     state='rejected' if action == 'reject' else 'cancelled', delivery_pending=True

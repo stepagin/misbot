@@ -57,7 +57,6 @@ const REQUESTS = `Действия с заявками
 2. \`подтвердить N\` / \`отклонить N\` — решение по входящей заявке
 3. \`отменить N\` — отозвать своё приглашение
 4. \`повторить N\` / \`статус N\` — продолжить или посмотреть результат
-5. \`очистить отклонённые\` — убрать завершённые заявки
 
 Памятка: N — номер заявки в списке; номер сохраняется после перезапуска.
 Назад: \`федерация\``;
@@ -111,13 +110,13 @@ function humanDate(value) {
     if (!Number.isFinite(date.getTime())) return "дата недоступна";
     return (
         date.toLocaleString("ru-RU", {
-            timeZone: "UTC",
+            timeZone: "Europe/Moscow",
             year: "numeric",
             month: "long",
             day: "numeric",
             hour: "2-digit",
             minute: "2-digit"
-        }) + " UTC"
+        }) + " МСК"
     );
 }
 const WRITES = new Set([
@@ -131,8 +130,7 @@ const WRITES = new Set([
     "recover",
     "rollback",
     "api-enable",
-    "api-disable",
-    "clear-rejected"
+    "api-disable"
 ]);
 
 function parse(text) {
@@ -146,9 +144,7 @@ function parse(text) {
         "откатить изменение федерации": "rollback",
         "api": "api-status",
         "api включить": "api-enable",
-        "api выключить": "api-disable",
-        "очистить отклонённые": "clear-rejected",
-        "очистить отклоненные": "clear-rejected"
+        "api выключить": "api-disable"
     };
     const command = text.toLowerCase();
     if (Object.hasOwn(single, command)) return { action: single[command] };
@@ -169,8 +165,7 @@ function parse(text) {
         "отклонить": "reject",
         "отменить": "cancel",
         "повторить": "retry",
-        "статус": "request-status",
-        "очистить": "clear-rejected"
+        "статус": "request-status"
     };
     m = text.match(/^([^\s]+) (MB-[0-9a-f]{32})$/);
     if (m && Object.hasOwn(requests, m[1].toLowerCase()))
@@ -223,7 +218,7 @@ function stateText(state) {
         expired: "срок истёк",
         cancelled: "отменено"
     };
-    return Object.hasOwn(labels, state) ? `${labels[state]} (${state})` : state;
+    return Object.hasOwn(labels, state) ? labels[state] : state;
 }
 
 function shellCommands(text) {
@@ -323,15 +318,24 @@ function serverText(result) {
         );
     if (result.resources || result.statistics) {
         const r = result.resources || result.statistics;
+        if (r.cpu_used_percent != null) lines.push(`CPU: ${r.cpu_used_percent.toFixed(1)}%`);
         if (r.cpu_count != null) lines.push(`Процессоров: ${r.cpu_count}`);
         if (r.cpu_load != null) lines.push(`Средняя нагрузка за минуту: ${r.cpu_load}`);
         if (r.load_1m != null) lines.push(`Средняя нагрузка за минуту: ${r.load_1m}`);
         if (r.memory_used_bytes != null && r.memory_total_bytes != null)
             lines.push(
-                `Память: ${Math.round(r.memory_used_bytes / 1048576)} / ${Math.round(r.memory_total_bytes / 1048576)} МиБ`
+                `RAM: ${Math.round(r.memory_used_bytes / 1048576)} / ${Math.round(r.memory_total_bytes / 1048576)} МиБ`
             );
         if (r.memory_available_bytes != null)
             lines.push(`Доступно памяти: ${Math.round(r.memory_available_bytes / 1048576)} МиБ`);
+        if (r.swap_total_bytes != null && r.swap_used_bytes != null)
+            lines.push(
+                `Swap: ${Math.round(r.swap_used_bytes / 1048576)} / ${Math.round(r.swap_total_bytes / 1048576)} МиБ`
+            );
+        if (r.disk_total_bytes != null && r.disk_used_bytes != null)
+            lines.push(
+                `Диск: ${(r.disk_used_bytes / 1073741824).toFixed(1)} / ${(r.disk_total_bytes / 1073741824).toFixed(1)} ГиБ`
+            );
         if (r.disk_free_bytes != null)
             lines.push(`Свободное место: ${(r.disk_free_bytes / 1073741824).toFixed(1)} ГиБ`);
         if (r.uptime_seconds != null)
@@ -403,7 +407,6 @@ function confirmationText(action, argument) {
         rollback: "Восстановить прежнюю местную политику",
         "api-enable": "Включить межсерверный API Misbot",
         "api-disable": "Выключить межсерверный API Misbot",
-        "clear-rejected": "Очистить отклонённые заявки",
         start: "Запустить службы",
         stop: "Остановить службы",
         restart: "Перезапустить службы",
@@ -425,13 +428,7 @@ function confirmationText(action, argument) {
         lines.push(
             "Существующая Matrix-политика сохраняется. Новые межсерверные обмены Misbot будут недоступны до включения API."
         );
-    if (action === "clear-rejected")
-        lines.push(
-            "Очистка убирает карточки из местного списка и сохраняет сведения для безопасных повторов."
-        );
-    lines.push(
-        "Подтверждение: `выполнить подтверждаю`. Отмена: `отмена`. Предложение действует 5 минут."
-    );
+    lines.push("Подтверждение: `выполнить подтверждаю`. Отмена: `отмена`.");
     return lines.join("\n");
 }
 
@@ -441,7 +438,7 @@ function errorText(code) {
         invitation_rate_limit:
             "Новое приглашение можно создать не чаще одного раза в минуту. Повторите позже.",
         peer_already_connected:
-            "Сервер уже добавлен. Заявка больше не требуется; откройте «\`серверы\`».",
+            "Подключение серверов уже согласовано. Новая заявка не требуется; откройте «\`серверы\`».",
         pending_request_exists:
             "Для этого сервера уже есть актуальная заявка. Откройте «\`заявки\`».",
         peer_upgrade_required:
@@ -449,7 +446,7 @@ function errorText(code) {
         request_not_found: "Заявка не найдена. Откройте актуальный список «\`заявки\`».",
         invalid_transition: "Это действие уже недоступно. Проверьте актуальное состояние заявки.",
         request_in_progress:
-            "Настройки уже применяются. Проверьте состояние операции перед следующим действием.",
+            "Действие по этой заявке уже принято или выполняется. Дождитесь результата; команда `операции`.",
         peer_identity_changed:
             "Identity удалённого сервера изменилась. Проверьте её через SSH; прежнее доверие не перенесено.",
         self_invitation: "Нужно указать другой сервер.",
@@ -511,7 +508,7 @@ class FederationBot {
     }
     resolveRequest(original) {
         const match = original.match(
-            /^(подтвердить|отклонить|отменить|повторить|статус|очистить) (\d{1,4})$/i
+            /^(подтвердить|отклонить|отменить|повторить|статус) (\d{1,4})$/i
         );
         if (!match) return parse(original);
         const saved = this.store.getValue("request-index");
@@ -572,6 +569,62 @@ class FederationBot {
     }
     async call(action, argument, event) {
         return this.control({ action, argument, actor: event.sender, event_id: event.event_id });
+    }
+    async validate(request, event) {
+        try {
+            await this.call(
+                "validate",
+                { action: request.action, argument: request.argument ?? null },
+                {
+                    ...event,
+                    event_id:
+                        "validate:" + createHash("sha256").update(event.event_id).digest("hex")
+                }
+            );
+            return null;
+        } catch (error) {
+            if (
+                [
+                    "invalid_transition",
+                    "pending_request_exists",
+                    "request_in_progress",
+                    "peer_already_connected",
+                    "request_not_found",
+                    "invitation_rate_limit"
+                ].includes(error?.code)
+            )
+                return errorText(error.code);
+            throw error;
+        }
+    }
+    operationText(operation, result) {
+        const requestId =
+            typeof operation.argument === "string" && operation.argument.startsWith("MB-")
+                ? operation.argument
+                : result.id?.startsWith("MB-")
+                  ? result.id
+                  : null;
+        const target = requestId ? `заявка №${this.requestNumber(requestId)}` : operation.argument;
+        const title = operation.action
+            ? confirmationText(operation.action, target).split("\n")[0]
+            : "Результат операции федерации";
+        if (result.status === "queued")
+            return `${title}\nПринято. Ожидает выполнения. Сообщу результат после завершения.`;
+        if (result.status === "running")
+            return `${title}\nВыполняю. Сообщу результат после завершения.`;
+        const detail = { ...result };
+        delete detail.operation_id;
+        if (result.status === "complete") delete detail.status;
+        let prefix =
+            result.status === "complete" && !result.delivery_pending && !result.safe_error
+                ? "Выполнено."
+                : "";
+        if (operation.action === "invite" && result.status === "complete")
+            prefix =
+                result.delivery_confirmed === true && !result.delivery_pending
+                    ? "Получение заявки другим сервером подтверждено."
+                    : "Доставка приглашения пока не подтверждена. Проверьте заявку позже.";
+        return `${title}\n${prefix}\n${resultText(detail)}`.replace(/\n\n/g, "\n");
     }
     async message(room, event) {
         if (
@@ -635,13 +688,29 @@ class FederationBot {
                 await reply("Действующего предложения нет. Выберите действие заново.");
                 return;
             }
+            if (WRITES.has(draft.action) && !draft.submitted) {
+                const refusal = await this.validate(draft, event);
+                if (refusal) {
+                    this.store.setValue(key, null);
+                    await reply(refusal);
+                    return;
+                }
+            }
+            this.store.setValue(key, { ...draft, submitted: true });
             const result = await this.call(draft.action, draft.argument, {
                 ...event,
                 event_id: draft.id
             });
+            if (result.operation_id && WRITES.has(draft.action))
+                this.store.setValue("operation-context:" + result.operation_id, {
+                    action: draft.action,
+                    argument: draft.argument
+                });
             this.store.setValue(key, null);
             await reply(
-                resultText(result) +
+                (WRITES.has(draft.action)
+                    ? this.operationText(draft, result)
+                    : resultText(result)) +
                     (result.operation_id && draft.action === "panel-server-operation"
                         ? `\nПроверить: \`задача ${result.operation_id}\``
                         : "")
@@ -935,7 +1004,28 @@ class FederationBot {
             return;
         }
         if (WRITES.has(request.action)) {
+            if (
+                draft?.kind === "operation" &&
+                draft.action === request.action &&
+                draft.argument === request.argument
+            ) {
+                const target = draft.argument?.startsWith?.("MB-")
+                    ? "заявка №" + this.requestNumber(draft.argument)
+                    : draft.argument;
+                await reply(
+                    "Уже ожидает подтверждения:\n" +
+                        confirmationText(draft.action, target) +
+                        "\nСначала подтвердите это действие или отправьте `отмена`."
+                );
+                return;
+            }
+            const replaced = draft?.kind === "operation";
             clearProposal();
+            const refusal = await this.validate(request, event);
+            if (refusal) {
+                await reply(refusal);
+                return;
+            }
             if (["recover", "rollback"].includes(request.action)) {
                 const result = await this.call("operations", null, event);
                 if (result.recovery_available !== true) {
@@ -975,7 +1065,8 @@ class FederationBot {
                 created: Date.now()
             });
             await reply(
-                (details?.server ? `Сервер: ${details.server}.\n` : "") +
+                (replaced ? "Предыдущее предложение заменено.\n" : "") +
+                    (details?.server ? `Сервер: ${details.server}.\n` : "") +
                     confirmationText(
                         request.action,
                         request.argument?.startsWith("MB-")
@@ -997,72 +1088,129 @@ class FederationBot {
         );
     }
     async notifications() {
-        const snapshot = await this.control({ action: "notifications" });
+        const cursor = this.store.getValue("notifications-cursor");
+        const snapshot = await this.control({
+            action: "notifications",
+            argument: cursor ? { cursor } : null
+        });
         const delivered = new Set();
         for (const room of await this.client.getJoinedRooms()) {
-            if (!(await this.privateRoom(room))) continue;
-            const state = await this.client.getRoomState(room);
-            const admin = state.find(
-                (item) =>
-                    item.type === "m.room.member" &&
-                    item.content?.membership === "join" &&
-                    this.local(item.state_key)
-            )?.state_key;
-            if (!admin || delivered.has(admin)) continue;
             try {
+                if (!(await this.privateRoom(room))) continue;
+                const state = await this.client.getRoomState(room);
+                const admin = state.find(
+                    (item) =>
+                        item.type === "m.room.member" &&
+                        item.content?.membership === "join" &&
+                        this.local(item.state_key)
+                )?.state_key;
+                if (!admin || delivered.has(admin)) continue;
                 await this.authorize(admin);
+                for (const item of snapshot.requests || []) {
+                    const receipt =
+                        item.direction === "outgoing" &&
+                        item.state === "pending" &&
+                        item.delivery_confirmed === true &&
+                        !item.delivery_pending;
+                    if (
+                        item.hidden ||
+                        item.cleared ||
+                        (item.direction === "outgoing" && item.state === "pending" && !receipt)
+                    )
+                        continue;
+                    const key =
+                        "notified:" +
+                        item.id +
+                        ":" +
+                        (receipt ? "receipt" : item.state) +
+                        ":" +
+                        admin;
+                    // Recipient-less legacy markers do not establish who received a notice.
+                    // Replay once per current administrator, then retain recipient deduplication.
+                    if (this.store.getValue(key)) continue;
+                    const number = this.requestNumber(item.id);
+                    const actions = receipt
+                        ? `\n\nПосмотреть: \`статус ${number}\`\nОтозвать: \`отменить ${number}\``
+                        : item.state === "pending" && item.direction !== "outgoing"
+                          ? `\n\nПринять: \`подтвердить ${number}\`\nОтклонить: \`отклонить ${number}\``
+                          : ["rejected", "expired"].includes(item.state)
+                            ? "\n\nПосмотреть: `заявки отклонённые`"
+                            : `\n\nПосмотреть: \`статус ${number}\``;
+                    await this.authorize(admin);
+                    if (!(await this.privateRoom(room))) break;
+                    await sendNotice(
+                        this.client,
+                        room,
+                        (item.direction === "incoming"
+                            ? `Получена заявка №${number} от ${item.server}.`
+                            : `Заявка №${number}: ${item.server}`) +
+                            (receipt
+                                ? "\nПолучение заявки другим сервером подтверждено."
+                                : `\nСостояние: ${item.state === "connected" ? "одобрено; " : ""}${stateText(item.state)}.`) +
+                            actions
+                    );
+                    this.store.setValue(key, true);
+                }
+                for (const item of snapshot.operations || []) {
+                    if (item.actor && item.actor !== admin) continue;
+                    const key = "operation-notified:" + item.id + ":" + item.state + ":" + admin;
+                    if (this.store.getValue(key)) continue;
+                    const staleDeliveryFailure =
+                        item.action === "invite" &&
+                        item.state === "failed" &&
+                        item.result?.id &&
+                        item.result.direction === "outgoing" &&
+                        item.result.state === "pending" &&
+                        item.result.delivery_confirmed === false &&
+                        item.result.delivery_pending === true;
+                    if (
+                        staleDeliveryFailure &&
+                        (this.store.getValue("notified:" + item.result.id + ":receipt:" + admin) ||
+                            this.store.getValue(
+                                "notified:" + item.result.id + ":connected:" + admin
+                            ) ||
+                            this.store.getValue(
+                                "notified:" + item.result.id + ":rejected:" + admin
+                            ))
+                    ) {
+                        this.store.setValue(key, true);
+                        continue;
+                    }
+                    const receiptKey =
+                        item.action === "invite" &&
+                        item.state === "complete" &&
+                        item.result?.id &&
+                        item.result.delivery_confirmed === true &&
+                        !item.result.delivery_pending
+                            ? "notified:" + item.result.id + ":receipt:" + admin
+                            : null;
+                    if (receiptKey && this.store.getValue(receiptKey)) {
+                        this.store.setValue(key, true);
+                        continue;
+                    }
+                    await this.authorize(admin);
+                    if (!(await this.privateRoom(room))) break;
+                    await sendNotice(
+                        this.client,
+                        room,
+                        this.operationText(
+                            item.action
+                                ? item
+                                : this.store.getValue("operation-context:" + item.id) || {},
+                            { ...item.result, status: item.state }
+                        )
+                    );
+                    this.store.setValue(key, true);
+                    if (receiptKey) this.store.setValue(receiptKey, true);
+                }
+                delivered.add(admin);
             } catch {
+                // A failed DM stays pending and must not block other administrators.
                 continue;
             }
-            for (const item of snapshot.requests || []) {
-                if (
-                    item.hidden ||
-                    item.cleared ||
-                    (item.direction === "outgoing" && item.state === "pending")
-                )
-                    continue;
-                const key = "notified:" + item.id + ":" + item.state + ":" + admin;
-                const legacy = "notified:" + item.id + ":" + item.state;
-                if (
-                    this.store.getValue(key) ||
-                    (admin === this.config.administrator_mxids?.[0] && this.store.getValue(legacy))
-                )
-                    continue;
-                const number = this.requestNumber(item.id);
-                const actions =
-                    item.state === "pending" && item.direction !== "outgoing"
-                        ? `\n\nПринять: \`подтвердить ${number}\`\nОтклонить: \`отклонить ${number}\``
-                        : ["rejected", "expired"].includes(item.state)
-                          ? "\n\nПосмотреть: `заявки отклонённые`"
-                          : `\n\nПосмотреть: \`статус ${number}\``;
-                await this.authorize(admin);
-                if (!(await this.privateRoom(room))) break;
-                await sendNotice(
-                    this.client,
-                    room,
-                    `Заявка №${number}: ${item.server}\nСостояние: ${stateText(item.state)}.${actions}`
-                );
-                this.store.setValue(key, true);
-            }
-            for (const item of snapshot.operations || []) {
-                const key = "operation-notified:" + item.id + ":" + item.state + ":" + admin;
-                const legacy = "operation-notified:" + item.id + ":" + item.state;
-                if (
-                    this.store.getValue(key) ||
-                    (admin === this.config.administrator_mxids?.[0] && this.store.getValue(legacy))
-                )
-                    continue;
-                await this.authorize(admin);
-                if (!(await this.privateRoom(room))) break;
-                await sendNotice(
-                    this.client,
-                    room,
-                    "Задача " + item.id + "\n" + resultText({ ...item.result, status: item.state })
-                );
-                this.store.setValue(key, true);
-            }
-            delivered.add(admin);
         }
+        this.store.setValue("notifications-cursor", snapshot.next_cursor || null);
+        return Boolean(snapshot.next_cursor);
     }
 }
 module.exports = {

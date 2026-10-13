@@ -5,6 +5,7 @@ from contextlib import contextmanager
 import fcntl
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -40,6 +41,22 @@ ACTIVE = frozenset(('queued', 'running'))
 FINISHED = frozenset(('complete', 'failed', 'interrupted'))
 MAX_JOBS = 1000
 MAX_QUEUE_BYTES = 4 * 1024 * 1024
+RESOURCE_FIELDS = frozenset(
+    (
+        'cpu_used_percent',
+        'cpu_count',
+        'cpu_load',
+        'memory_total_bytes',
+        'memory_used_bytes',
+        'memory_available_bytes',
+        'swap_total_bytes',
+        'swap_used_bytes',
+        'disk_total_bytes',
+        'disk_used_bytes',
+        'disk_free_bytes',
+        'uptime_seconds',
+    )
+)
 RECOVERY = 'Завершение операции не подтверждено. Проверьте sudo misbot status через SSH; при pending используйте указанную команду восстановления.'
 
 
@@ -87,6 +104,16 @@ def sanitized(operation, response):
     for item in records(response.stdout or b''):
         kind = item.get('check')
         if kind in ('existing_status', 'server_status'):
+            resources = item.get('resources')
+            if isinstance(resources, dict):
+                result['resources'] = {
+                    key: value
+                    for key, value in resources.items()
+                    if key in RESOURCE_FIELDS
+                    and type(value) in (int, float)
+                    and math.isfinite(value)
+                    and value >= 0
+                }
             result['backup_pending'] = item.get('backup_pending') is True
             result['containers'] = [
                 {
@@ -146,11 +173,25 @@ def sanitized(operation, response):
     return result
 
 
+def cpu_sample():
+    # Guest time is already counted in user/nice; do not count it twice.
+    fields = Path('/proc/stat').read_text().splitlines()[0].split()
+    if fields[0] != 'cpu' or len(fields) < 5:
+        raise ValueError('CPU counters unavailable')
+    counters = [int(value) for value in fields[1:9]]
+    if any(value < 0 for value in counters):
+        raise ValueError('CPU counters unavailable')
+    idle = counters[3] + (counters[4] if len(counters) > 4 else 0)
+    return sum(counters), idle
+
+
 def host_statistics(root):
     result = {}
     try:
         disk = shutil.disk_usage(root)
-        result.update(disk_free_bytes=disk.free, disk_total_bytes=disk.total)
+        result.update(
+            disk_free_bytes=disk.free, disk_total_bytes=disk.total, disk_used_bytes=disk.used
+        )
     except OSError:
         pass
     try:
@@ -158,12 +199,32 @@ def host_statistics(root):
         for line in Path('/proc/meminfo').read_text().splitlines():
             name, value = line.split(':', 1)
             memory[name] = int(value.strip().split()[0]) * 1024
-        result['memory_total_bytes'] = memory['MemTotal']
-        result['memory_used_bytes'] = memory['MemTotal'] - memory['MemAvailable']
+        if 0 <= memory['MemAvailable'] <= memory['MemTotal']:
+            result['memory_total_bytes'] = memory['MemTotal']
+            result['memory_available_bytes'] = memory['MemAvailable']
+            result['memory_used_bytes'] = memory['MemTotal'] - memory['MemAvailable']
+        if 0 <= memory.get('SwapFree', -1) <= memory.get('SwapTotal', -1):
+            result['swap_total_bytes'] = memory['SwapTotal']
+            result['swap_used_bytes'] = memory['SwapTotal'] - memory['SwapFree']
     except (OSError, ValueError, KeyError, IndexError):
         pass
     try:
         result['cpu_load'] = round(os.getloadavg()[0], 2)
+    except OSError:
+        pass
+    count = os.cpu_count()
+    if count is not None:
+        result['cpu_count'] = count
+    try:
+        before_total, before_idle = cpu_sample()
+        time.sleep(0.1)
+        after_total, after_idle = cpu_sample()
+        elapsed, idle = after_total - before_total, after_idle - before_idle
+        if elapsed > 0 and 0 <= idle <= elapsed:
+            result['cpu_used_percent'] = round(100 * (elapsed - idle) / elapsed, 1)
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
         result['uptime_seconds'] = int(float(Path('/proc/uptime').read_text().split()[0]))
     except (OSError, ValueError, IndexError):
         pass
@@ -249,8 +310,12 @@ def run_control(config, operation, *, period='day', runner=subprocess.run):
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return {'operation': operation, 'ok': False, 'recovery_required': True}
-    return sanitized(operation, response)
+        result = {'operation': operation, 'ok': False, 'recovery_required': True}
+    else:
+        result = sanitized(operation, response)
+    if operation == 'status' and 'resources' not in result:
+        result['resources'] = host_statistics(root)
+    return result
 
 
 def native_status(root):
@@ -261,6 +326,7 @@ def native_status(root):
     rows = lifecycle.service_rows()
     return {
         'check': 'server_status',
+        'resources': host_statistics(root),
         'backup_pending': (root / 'backup-writers.json').exists(),
         'containers': [
             {

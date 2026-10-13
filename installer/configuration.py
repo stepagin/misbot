@@ -167,8 +167,8 @@ def _load(root, complete=False, preview=False):
 
 
 def load(root, complete=False, preview=False):
-    # A reader shares the writer lock: checking a marker alone has a TOCTOU race.
-    with state_store.operation_guard(root):
+    # Readers wait for short background writers while preserving the same atomic snapshot.
+    with state_store.operation_guard(root, wait_seconds=5):
         return _load(root, complete, preview)
 
 

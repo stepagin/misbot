@@ -1,7 +1,12 @@
 "use strict";
 const test = require("node:test"),
     assert = require("node:assert/strict");
-const { SerialQueue, DecryptionRetry, controlTimeout } = require("../runtime");
+const {
+    SerialQueue,
+    DecryptionRetry,
+    controlTimeout,
+    startNotificationPolling
+} = require("../runtime");
 
 test("stalled periodic work coalesces and input runs before waiting background work", async () => {
     const calls = [];
@@ -194,4 +199,41 @@ test("a missing key in the first batch does not starve later encrypted events", 
     await retry.retry();
     await retry.retry();
     assert.ok(x.attempts.includes("$event8"));
+});
+
+test("notification pagination yields to commands and retries errors on the normal interval", async () => {
+    const timers = [],
+        calls = [],
+        errors = [];
+    const queue = new SerialQueue((code) => errors.push(code));
+    const schedule = (callback, delay) => {
+        timers.push({ callback, delay });
+        return { unref() {} };
+    };
+    let page = 0;
+    startNotificationPolling(
+        queue,
+        async () => {
+            calls.push("page" + ++page);
+            if (page === 2) throw new Error("private RPC failure");
+            return page === 1;
+        },
+        schedule
+    );
+    assert.equal(timers[0].delay, 30000);
+    timers.shift().callback();
+    await queue.idle();
+    assert.equal(timers[0].delay, 1000);
+    timers.shift().callback();
+    queue.add("command", () => calls.push("command"));
+    await queue.idle();
+    assert.deepEqual(calls, ["page1", "command", "page2"]);
+    assert.deepEqual(errors, ["operation_unconfirmed"]);
+    assert.equal(timers[0].delay, 30000);
+    timers.shift().callback();
+    await queue.idle();
+    assert.equal(calls.at(-1), "page3");
+    assert.equal(timers.length, 1);
+    assert.equal(timers[0].delay, 30000);
+    assert.equal(queue.keys.size, 0);
 });

@@ -46,6 +46,27 @@ class SerialQueue {
     }
 }
 
+// Continue a bounded snapshot one page at a time, yielding to user commands.
+function startNotificationPolling(queue, notify, schedule = setTimeout) {
+    const later = (delay) => schedule(poll, delay).unref();
+    const poll = () => {
+        const admitted = queue.add(
+            "notifications",
+            async () => {
+                let more = false;
+                try {
+                    more = await notify();
+                } finally {
+                    later(more ? 1000 : 30000);
+                }
+            },
+            true
+        );
+        if (!admitted) later(30000);
+    };
+    later(30000);
+}
+
 function controlTimeout(action) {
     if (["authorize", "panel-outbox", "panel-ack", "notifications"].includes(action)) return 10000;
     if (["check", "panel-server-read"].includes(action)) return 90000;
@@ -139,4 +160,4 @@ class DecryptionRetry {
     }
 }
 
-module.exports = { SerialQueue, controlTimeout, DecryptionRetry };
+module.exports = { SerialQueue, controlTimeout, DecryptionRetry, startNotificationPolling };

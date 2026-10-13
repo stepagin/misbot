@@ -1,5 +1,6 @@
 """Real publication faults and shared runtime loading, with fictional data only."""
 
+import fcntl
 import hashlib
 import json
 import os
@@ -7,6 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -18,6 +20,21 @@ import preflight
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_load_waits_for_short_background_writer(self):
+        descriptor = os.open(
+            state_store.operation_lock_path(self.root),
+            os.O_RDWR | os.O_CREAT,
+            0o600,
+        )
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        timer = threading.Timer(0.1, lambda: fcntl.flock(descriptor, fcntl.LOCK_UN))
+        timer.start()
+        try:
+            self.assertEqual(config.load(self.root)['DOMAIN'], 'fictional.example.org')
+        finally:
+            timer.join()
+            os.close(descriptor)
+
     def test_typed_validation_keeps_public_failure_shape_and_hides_values(self):
         for value in (42, 'FICTIONAL_SECRET\nunsafe'):
             with self.subTest(value_type=type(value).__name__):

@@ -118,7 +118,9 @@ class LifecycleDNSTests(unittest.TestCase):
         path = self.root / 'settings.env'
         path.chmod(0o644)
         before = json.loads((self.root / 'installation.json').read_text())
-        self.failed('mode 0600')
+        with self.assertRaisesRegex(RuntimeError, 'mode 0600'):
+            lifecycle.dns_check()
+        self.emit.assert_not_called()
         self.assertEqual(self.queries, [])
         self.assertEqual(json.loads((self.root / 'installation.json').read_text()), before)
 

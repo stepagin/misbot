@@ -3,6 +3,7 @@
 from collections.abc import Sequence
 from dataclasses import dataclass
 import json
+import math
 
 CHECKS = {
     'dns': 'DNS',
@@ -55,8 +56,43 @@ PENDING = {
 }
 
 
-def status_messages(record: dict[str, object]) -> list[str]:
+def resource_messages(value: object) -> list[str]:
+    if not isinstance(value, dict):
+        return []
+
+    def number(key: str) -> float | None:
+        item = value.get(key)
+        if isinstance(item, bool) or not isinstance(item, (int, float)):
+            return None
+        return float(item) if math.isfinite(item) and item >= 0 else None
+
     messages = []
+    cpu = number('cpu_used_percent')
+    messages.append(f'CPU: {cpu:g} %' if cpu is not None and cpu <= 100 else 'CPU: нет данных')
+    load, cores = number('cpu_load'), number('cpu_count')
+    if load is not None and cores is not None:
+        messages.append(f'Нагрузка за минуту: {load:g}; процессоров: {cores:g}')
+    for title, prefix in (('RAM', 'memory'), ('Диск установки', 'disk'), ('Swap', 'swap')):
+        total, used = number(prefix + '_total_bytes'), number(prefix + '_used_bytes')
+        if total is None or used is None or used > total:
+            messages.append(title + ': нет данных')
+        elif total == 0:
+            messages.append(title + ': не используется')
+        else:
+            messages.append(
+                f'{title}: {used / 1024**3:.1f} / {total / 1024**3:.1f} ГиБ '
+                f'({100 * used / total:.0f} %)'
+            )
+    uptime = number('uptime_seconds')
+    if uptime is not None:
+        messages.append(
+            f'Без перезагрузки: {int(uptime // 86400)} д. {int(uptime % 86400 // 3600)} ч.'
+        )
+    return messages
+
+
+def status_messages(record: dict[str, object]) -> list[str]:
+    messages = resource_messages(record.get('resources'))
     if record.get('operation_running') is True:
         messages.append('Выполняется операция. Дождитесь завершения; повторный запуск пока занят.')
     elif record.get('operation_running') is False:

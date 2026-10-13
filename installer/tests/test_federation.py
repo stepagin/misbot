@@ -231,7 +231,9 @@ class FederationTests(unittest.TestCase):
         rid = first['id']
         self.assertEqual(first['code'], 'timeout')
         self.assertEqual(len(self.b.load()['requests']), 1)
-        self.assertEqual(self.a.operate('invite', 'b.example')['id'], rid)
+        with self.assertRaisesRegex(protocol.ProtocolError, 'pending_request_exists'):
+            self.a.operate('invite', 'b.example')
+        self.assertEqual(self.a.operate('retry', rid)['id'], rid)
         self.b.operate('approve', rid)
         self.a.operate('retry', rid)
         self.assertEqual(len(self.b.load()['requests']), 1)
@@ -257,8 +259,10 @@ class FederationTests(unittest.TestCase):
         self.assertEqual(self.b.operate('requests')['requests'][0]['state'], 'rejected')
         self.assertEqual(len(self.b.operate('requests')['requests']), 1)
         self.a.operate('add', 'b.example')
-        with self.assertRaisesRegex(protocol.ProtocolError, 'peer_already_connected'):
-            self.invite()
+        with patch.object(federation.time, 'time', return_value=int(time.time()) + 122):
+            rid = self.invite()
+            self.assertEqual(self.b.operate('request-status', rid)['state'], 'pending')
+            self.a.operate('cancel', rid)
         self.assertIn('b.example', self.a.servers())
 
     def test_simultaneous_invites_and_expiration(self):
@@ -405,7 +409,8 @@ class FederationTests(unittest.TestCase):
         with patch.object(federation.time, 'time', return_value=now):
             rid = self.invite()
             self.assertEqual(self.a.load()['requests'][rid]['expires_at'], now + 30 * 86400)
-            self.assertEqual(self.a.operate('invite', 'b.example')['id'], rid)
+            with self.assertRaisesRegex(protocol.ProtocolError, 'pending_request_exists'):
+                self.a.operate('invite', 'b.example')
             self.a.operate('cancel', rid)
             with self.assertRaisesRegex(protocol.ProtocolError, 'invitation_rate_limit'):
                 self.invite()
@@ -631,16 +636,218 @@ class FederationTests(unittest.TestCase):
         self.a.operate('api-enable')
         self.assertEqual(self.a.operate('api-enable')['status'], 'unchanged')
 
-    def test_connected_stale_requests_cannot_be_accepted_or_rejected(self):
-        rid = self.invite()
+    def test_preexisting_allowlist_does_not_hide_invites_or_block_approval(self):
+        self.a.operate('add', 'b.example')
         self.b.operate('add', 'a.example')
-        self.assertEqual(self.b.operate('requests')['requests'], [])
-        for action in ('approve', 'reject'):
-            with self.assertRaisesRegex(protocol.ProtocolError, 'peer_already_connected'):
-                self.b.operate(action, rid)
-        self.b.maintain()
-        self.assertEqual(self.a.operate('requests')['requests'], [])
+        rid = self.invite()
+        self.assertEqual(self.b.operate('requests')['requests'][0]['id'], rid)
+        self.assertEqual(self.a.operate('requests')['requests'][0]['id'], rid)
+        self.assertTrue(self.a.operate('request-status', rid)['delivery_confirmed'])
+        self.assertEqual(self.b.operate('approve', rid)['state'], 'connected')
+        self.assertEqual(self.a.operate('request-status', rid)['state'], 'connected')
+        self.assertEqual(self.a.servers().count('b.example'), 1)
+        self.assertEqual(self.b.servers().count('a.example'), 1)
+
+    def test_explicit_policy_removal_allows_new_agreement(self):
+        now = int(time.time())
+        first = self.invite()
+        self.b.operate('approve', first)
+        self.a.operate('remove', 'b.example')
+        with patch.object(federation.time, 'time', return_value=now + 61):
+            second = self.invite()
+            self.assertEqual(self.b.operate('approve', second)['state'], 'connected')
+        self.assertNotEqual(first, second)
+        self.assertIn('b.example', self.a.servers())
         self.assertIn('a.example', self.b.servers())
+
+    def test_rejection_allows_fresh_invite_and_preserves_notifications(self):
+        now = int(time.time())
+        first = self.invite()
+        self.b.operate('reject', first)
+        with patch.object(federation.time, 'time', return_value=now + 61):
+            second = self.invite()
+        self.assertNotEqual(first, second)
+        listed = self.b.operate('requests')['requests']
+        self.assertEqual(
+            {item['id']: item['state'] for item in listed},
+            {
+                first: 'rejected',
+                second: 'pending',
+            },
+        )
+        with patch.object(federation.time, 'time', return_value=now + 61):
+            self.b.operate('approve', second)
+            notices = federation_service.bot_call(self.b, {'action': 'notifications'}, 10003)
+        self.assertEqual(
+            {item['id']: item['state'] for item in notices['requests']},
+            {
+                first: 'rejected',
+                second: 'connected',
+            },
+        )
+
+    def test_failed_invite_is_not_confirmed_and_maintenance_retries_delivery(self):
+        original = self.a.transport
+        with patch.object(
+            self.a,
+            'transport',
+            side_effect=lambda server, path, body=None: original(server, path, body)
+            if body is None
+            else (_ for _ in ()).throw(protocol.ProtocolError('timeout')),
+        ):
+            first = self.a.operate('invite', 'b.example')
+        self.assertFalse(first['delivery_confirmed'])
+        self.assertTrue(first['delivery_pending'])
+        self.assertEqual(self.b.load()['requests'], {})
+        self.a.maintain()
+        result = self.a.operate('request-status', first['id'])
+        self.assertTrue(result['delivery_confirmed'])
+        self.assertFalse(result.get('delivery_pending', False))
+        self.assertEqual(len(self.b.load()['requests']), 1)
+
+    def test_notification_pages_cover_history_below_rpc_byte_limit(self):
+        rid = self.invite()
+        data = self.a.load()
+        template = data['requests'][rid]
+        data['requests'] = {
+            'MB-' + format(index, '032x'): dict(
+                template, id='MB-' + format(index, '032x'), state='rejected'
+            )
+            for index in range(200)
+        }
+        data['jobs'] = {
+            'FO-' + format(index, '032x'): {
+                'state': 'complete',
+                'action': 'reject',
+                'actor': '@admin:a.example',
+                'argument': 'MB-' + format(index, '032x'),
+                'result': {'state': 'rejected', 'irrelevant_large_field': 'x' * 50000},
+            }
+            for index in range(200)
+        }
+        self.a.save(data)
+        cursor = None
+        seen = {'requests': [], 'operations': []}
+        pages = 0
+        while True:
+            page = federation_service.bot_call(
+                self.a,
+                {
+                    'action': 'notifications',
+                    'argument': {'cursor': cursor} if cursor else None,
+                },
+                10003,
+            )
+            self.assertLess(len(json.dumps({'ok': True, 'result': page}).encode()), 32768)
+            for collection in seen:
+                seen[collection].extend(item['id'] for item in page[collection])
+            pages += 1
+            cursor = page['next_cursor']
+            if cursor is None:
+                break
+            self.assertLess(pages, 30)
+        for collection, values in seen.items():
+            expected = data['requests' if collection == 'requests' else 'jobs']
+            self.assertEqual(set(values), set(expected))
+            self.assertEqual(len(values), len(expected))
+        self.assertGreater(pages, 1)
+
+    def test_unused_arguments_are_rejected_and_legacy_oversized_jobs_do_not_block_feed(self):
+        actor = '@admin:a.example'
+        for action in ('api-enable', 'api-disable', 'recover', 'rollback'):
+            before = self.a.path.read_bytes()
+            with self.assertRaisesRegex(protocol.ProtocolError, 'invalid_request'):
+                federation_service.queue_job(
+                    self.a,
+                    {
+                        'action': action,
+                        'argument': 'я' * 4500,
+                        'actor': actor,
+                        'event_id': '$oversized-' + action,
+                    },
+                )
+            self.assertEqual(self.a.path.read_bytes(), before)
+        data = self.a.load()
+        data['jobs'] = {
+            'FO-' + 'f' * 32: {
+                'action': 'api-disable',
+                'argument': 'я' * 4500,
+                'actor': actor,
+                'state': 'complete',
+                'result': {'enabled': False},
+            }
+        }
+        self.a.save(data)
+        before = self.a.path.read_bytes()
+        page = federation_service.bot_call(self.a, {'action': 'notifications'}, 10003)
+        self.assertIsNone(page['operations'][0]['argument'])
+        self.assertEqual(page['operations'][0]['result'], {'enabled': False})
+        self.assertLess(len(json.dumps(page).encode()), 32768)
+        self.assertEqual(self.a.path.read_bytes(), before)
+
+    def test_terminal_and_duplicate_intents_fail_before_creating_job(self):
+        rid = self.invite()
+        self.b.operate('reject', rid)
+        for backend, action, actor in (
+            (self.b, 'approve', '@admin:b.example'),
+            (self.b, 'reject', '@admin:b.example'),
+            (self.a, 'cancel', '@admin:a.example'),
+        ):
+            request = {'action': action, 'argument': rid, 'actor': actor, 'event_id': '$' + action}
+            with self.subTest(action=action):
+                before = backend.path.read_bytes()
+                with self.assertRaisesRegex(protocol.ProtocolError, 'invalid_transition'):
+                    federation_service.queue_job(backend, request)
+                self.assertEqual(backend.path.read_bytes(), before)
+                with self.assertRaisesRegex(protocol.ProtocolError, 'invalid_transition'):
+                    federation_service.bot_call(
+                        backend,
+                        {
+                            'action': 'validate',
+                            'actor': actor,
+                            'argument': {'action': action, 'argument': rid},
+                        },
+                        10003,
+                    )
+                self.assertEqual(backend.path.read_bytes(), before)
+
+    def test_queue_reserves_request_and_execution_rechecks_remote_cancellation(self):
+        rid = self.invite()
+        request = {
+            'action': 'approve',
+            'argument': rid,
+            'actor': '@admin:b.example',
+            'event_id': '$approve-one',
+        }
+        first = federation_service.queue_job(self.b, request)
+        self.assertEqual(federation_service.queue_job(self.b, request), first)
+        for action in ('approve', 'reject'):
+            with self.assertRaisesRegex(protocol.ProtocolError, 'request_in_progress'):
+                federation_service.queue_job(self.b, dict(request, action=action, event_id='$two'))
+        self.a.operate('cancel', rid)
+        federation_service.job_step(self.b)
+        job = self.b.load()['jobs'][first['operation_id']]
+        self.assertEqual(job['state'], 'failed')
+        self.assertEqual(job['result']['code'], 'invalid_transition')
+        self.assertNotIn('a.example', self.b.servers())
+        self.assertEqual(len(self.b.load()['jobs']), 1)
+
+    def test_duplicate_invite_rejected_before_queue_and_before_job_execution(self):
+        request = {
+            'action': 'invite',
+            'argument': 'b.example',
+            'actor': '@admin:a.example',
+            'event_id': '$invite-one',
+        }
+        first = federation_service.queue_job(self.a, request)
+        with self.assertRaisesRegex(protocol.ProtocolError, 'request_in_progress'):
+            federation_service.queue_job(self.a, dict(request, event_id='$invite-two'))
+        federation_service.job_step(self.a)
+        self.assertEqual(self.a.load()['jobs'][first['operation_id']]['state'], 'complete')
+        with self.assertRaisesRegex(protocol.ProtocolError, 'pending_request_exists'):
+            federation_service.queue_job(self.a, dict(request, event_id='$invite-three'))
+        self.assertEqual(len(self.a.load()['jobs']), 1)
+        self.assertEqual(len(self.b.load()['requests']), 1)
 
     def test_legacy_peer_requires_upgrade_before_new_thirty_day_invitation(self):
         transport = self.a.transport
@@ -804,6 +1011,27 @@ class FederationTests(unittest.TestCase):
         self.assertEqual(
             self.a.load()['jobs'][ack['operation_id']]['result']['code'], 'admin_unconfirmed'
         )
+
+    def test_completed_event_replay_preserves_receipt_without_repeating_exchange(self):
+        request = {
+            'action': 'invite',
+            'argument': 'b.example',
+            'actor': '@admin:a.example',
+            'event_id': '$lost-rpc-response',
+        }
+        accepted = federation_service.queue_job(self.a, request)
+        federation_service.job_step(self.a)
+        before = self.a.path.read_bytes()
+        with patch.object(self.a, 'transport') as transport:
+            replay = federation_service.queue_job(self.a, request)
+        transport.assert_not_called()
+        self.assertEqual(replay['operation_id'], accepted['operation_id'])
+        self.assertEqual(replay['status'], 'complete')
+        self.assertTrue(replay['delivery_confirmed'])
+        self.assertEqual(replay['id'], next(iter(self.a.load()['requests'])))
+        self.assertEqual(self.a.path.read_bytes(), before)
+        self.assertEqual(len(self.a.load()['jobs']), 1)
+        self.assertEqual(len(self.b.load()['requests']), 1)
 
     def test_queued_event_cannot_change_actor_or_action(self):
         request = {

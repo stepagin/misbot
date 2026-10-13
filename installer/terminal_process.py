@@ -1,7 +1,7 @@
 """Drain a child without blocking animation or retaining unbounded output."""
 
 import codecs
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
@@ -164,9 +164,9 @@ def primary_output(path, line):
 
         return [row.label + ': ' + row.message for row in parse_checks(line)]
     if record.get('check') in ('existing_status', 'server_status'):
-        from terminal_diagnostics import parse_checks
+        from terminal_diagnostics import parse_checks, resource_messages
 
-        messages = []
+        messages = resource_messages(record.get('resources'))
         for container in record.get('containers', []):
             if not isinstance(container, dict):
                 continue
@@ -469,7 +469,9 @@ def federation_details(record):
         try:
             messages.append(
                 'Срок: до '
-                + datetime.fromtimestamp(expires, timezone.utc).strftime('%d.%m.%Y %H:%M UTC')
+                + datetime.fromtimestamp(expires, timezone(timedelta(hours=3))).strftime(
+                    '%d.%m.%Y %H:%M МСК'
+                )
             )
         except (OverflowError, ValueError, OSError):
             messages.append('Срок не подтверждён.')
@@ -481,6 +483,11 @@ def federation_details(record):
             + ('да' if record['remote_applied'] is True else 'не подтверждено')
             + '.'
         )
+    if record.get('direction') == 'outgoing':
+        if record.get('delivery_confirmed') is True:
+            messages.append('Получение заявки другим сервером подтверждено.')
+        else:
+            messages.append('Получение заявки другим сервером пока не подтверждено.')
     if record.get('delivery_pending') is True:
         messages.append(
             'Доставка решения другой стороне ещё не подтверждена; повторите проверку заявки.'

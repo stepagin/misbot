@@ -250,6 +250,94 @@ class ServerManagementTests(unittest.TestCase):
         self.assertTrue(result['result']['ok'])
         self.assertNotIn('FICTIONAL_SECRET', json.dumps(result))
 
+    def test_host_resources_measure_cpu_and_preserve_unavailable_independently(self):
+        files = {
+            '/proc/meminfo': 'MemTotal: 2048 kB\nMemAvailable: 512 kB\nSwapTotal: 1024 kB\nSwapFree: 256 kB\n',
+            '/proc/uptime': '90000.1 0',
+        }
+        with (
+            patch.object(Path, 'read_text', lambda path: files[str(path)]),
+            patch.object(management, 'cpu_sample', side_effect=[(100, 50), (200, 75)]),
+            patch.object(management.time, 'sleep') as sleep,
+            patch.object(management.os, 'getloadavg', return_value=(0.3, 0.2, 0.1)),
+            patch.object(management.os, 'cpu_count', return_value=2),
+            patch.object(
+                management.shutil,
+                'disk_usage',
+                return_value=SimpleNamespace(total=100, used=70, free=30),
+            ),
+        ):
+            result = management.host_statistics(self.root)
+        self.assertEqual(result['cpu_used_percent'], 75)
+        self.assertEqual(result['memory_used_bytes'], 1536 * 1024)
+        self.assertEqual(result['swap_used_bytes'], 768 * 1024)
+        self.assertEqual(result['disk_free_bytes'], 30)
+        self.assertEqual(result['uptime_seconds'], 90000)
+        sleep.assert_called_once_with(0.1)
+        with (
+            patch.object(Path, 'read_text', side_effect=OSError),
+            patch.object(management.os, 'getloadavg', return_value=(0, 0, 0)),
+            patch.object(management.os, 'cpu_count', return_value=None),
+            patch.object(management.shutil, 'disk_usage', side_effect=OSError),
+        ):
+            self.assertEqual(management.host_statistics(self.root), {'cpu_load': 0})
+
+    def test_cpu_counters_do_not_double_count_guest_and_reject_reset(self):
+        with patch.object(Path, 'read_text', return_value='cpu 10 20 30 40 50 60 70 80 90 100\n'):
+            self.assertEqual(management.cpu_sample(), (360, 90))
+        for samples in ([(100, 50), (100, 50)], [(100, 50), (90, 40)]):
+            with (
+                patch.object(management, 'cpu_sample', side_effect=samples),
+                patch.object(management.time, 'sleep'),
+            ):
+                self.assertNotIn('cpu_used_percent', management.host_statistics(self.root))
+
+    def test_status_includes_resources_for_portable_and_adopted_installations(self):
+        for kind in ('portable', 'existing-compose'):
+            with self.subTest(kind=kind):
+                state_store.write_json(self.root / 'installation.json', {'backend': kind})
+                response = subprocess.CompletedProcess(
+                    [],
+                    0,
+                    b'{"check":"server_status","containers":[{"name":"synapse","running":true}]}',
+                )
+                with patch.object(
+                    management, 'host_statistics', return_value={'cpu_used_percent': 25}
+                ):
+                    result = management.run_control(
+                        {'stack_root': str(self.root), 'management_actions': ['status']},
+                        'status',
+                        runner=Mock(return_value=response),
+                    )
+                self.assertTrue(result['ok'])
+                self.assertEqual(result['resources'], {'cpu_used_percent': 25})
+
+    def test_status_reuses_safe_metrics_from_child_without_second_sample(self):
+        response = subprocess.CompletedProcess(
+            [],
+            0,
+            json.dumps(
+                {
+                    'check': 'existing_status',
+                    'containers': [{'name': 'synapse', 'running': True}],
+                    'resources': {
+                        'cpu_used_percent': 25,
+                        'secret': 'PRIVATE_MARKER',
+                        'cpu_load': 'unsafe',
+                    },
+                }
+            ),
+        )
+        with patch.object(management, 'host_statistics') as sample:
+            result = management.run_control(
+                {'stack_root': str(self.root), 'management_actions': ['status']},
+                'status',
+                runner=Mock(return_value=response),
+            )
+        sample.assert_not_called()
+        self.assertEqual(result['resources'], {'cpu_used_percent': 25})
+        self.assertNotIn('PRIVATE_MARKER', json.dumps(result))
+
     def test_statistics_failure_keeps_counters_unknown(self):
         with (
             patch('admin_panel.Panel', side_effect=RuntimeError('FICTIONAL_SECRET')),

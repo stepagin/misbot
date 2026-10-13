@@ -256,7 +256,8 @@ function installation(directory, options = {}) {
             process: { umask() {}, exit: finish },
             console: { log: (message) => logs.push(message) },
             Date: options.now ? { now: options.now } : Date,
-            setInterval: () => ({ unref() {} })
+            setInterval: () => ({ unref() {} }),
+            setTimeout: () => ({ unref() {} })
         });
         const code = await done;
         let status;

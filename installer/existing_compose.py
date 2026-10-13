@@ -300,9 +300,12 @@ class Installation:
         emit('existing_configuration', passed=True, server_name=self.state['domain'])
 
     def status(self):
+        from server_management import host_statistics
+
         containers = [self.container(name) for name in self.services]
         emit(
             'existing_status',
+            resources=host_statistics(self.root),
             directory=str(self.root),
             server_name=self.state['domain'],
             containers=containers,

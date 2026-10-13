@@ -444,10 +444,11 @@ def dns_check():
 
     metadata = state()
     referral.validate_saved(ROOT, metadata)
+    # Loading configuration can fail because it is busy or invalid, before DNS is tried.
+    values = preflight.settings(ROOT)
+    mas_mode = values.get('MAS_MODE', 'local')
+    mas_domain = values.get('MAS_DOMAIN', '')
     try:
-        values = preflight.settings(ROOT)
-        mas_mode = values.get('MAS_MODE', 'local')
-        mas_domain = values.get('MAS_DOMAIN', '')
         preflight.dns_check(
             metadata['domain'],
             metadata['public_ip'],
@@ -1124,6 +1125,8 @@ def stop():
 
 
 def status():
+    from server_management import host_statistics
+
     metadata = state()
     pending = {
         name: bool(metadata.get(name))
@@ -1218,6 +1221,7 @@ def status():
         )
     emit(
         'installation_status',
+        resources=host_statistics(ROOT),
         applied_release=metadata.get('applied_release_version'),
         operation_running=state_store.operation_running(ROOT),
         installation_complete=bool(metadata.get('applied_release_version')),

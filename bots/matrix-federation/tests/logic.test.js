@@ -568,13 +568,13 @@ test("operation presentation separates acceptance, execution and completion", ()
         };
         const before = structuredClone(result);
         const body = resultText(result);
-        assert.ok(body.startsWith(`Операция: ${meaning} (${state}).\n`));
+        assert.ok(body.startsWith(`Операция: ${meaning}.\n`));
         assert.match(body, /FO-fictional/);
         assert.match(body, /misbot federation operations/);
         assert.deepEqual(result, before);
         assert.equal(resultText(result), body);
     }
-    assert.equal(stateText("connected"), "политика применена на обоих серверах (connected)");
+    assert.equal(stateText("connected"), "политика применена на обоих серверах");
     assert.equal(stateText("future_state"), "future_state");
 });
 
@@ -590,10 +590,7 @@ test("plain results keep special characters and suppress private recovery detail
     assert.ok(body.includes("1. example.org"));
     assert.ok(body.includes(result.note));
     assert.doesNotMatch(body, /FICTIONAL_SECRET/);
-    assert.equal(
-        resultText({ status: "unchanged" }),
-        "Операция: изменения не требуются (unchanged)."
-    );
+    assert.equal(resultText({ status: "unchanged" }), "Операция: изменения не требуются.");
 });
 
 test("invalid formatter parameters fail without including their values", () => {
@@ -632,12 +629,12 @@ test("notifications keep commands, distinct states and deduplication after resta
         request.action === "authorize" ? { authorized: true } : snapshot;
     await x.bot.notifications();
     assert.equal(x.sent.length, 2);
-    assert.match(x.sent[0], /ожидает решения \(pending\)/);
+    assert.match(x.sent[0], /ожидает решения/);
     assert.ok(x.sent[0].includes("подтвердить 1"));
     assert.ok(x.sent[0].includes("отклонить 1"));
     assert.match(payloads[0].formatted_body, /<code>подтвердить 1<\/code>/);
     assert.match(payloads[0].formatted_body, /<code>отклонить 1<\/code>/);
-    assert.match(x.sent[1], /прервано \(interrupted\)/);
+    assert.match(x.sent[1], /прервано/);
     assert.match(x.sent[1], /sudo misbot federation recover/);
     assert.doesNotMatch(x.sent[1], /FICTIONAL_SECRET/);
     const restart = new FederationBot(x.client, x.bot.control, x.bot.store, x.cfg);
@@ -646,7 +643,7 @@ test("notifications keep commands, distinct states and deduplication after resta
     snapshot.requests[0].state = "connected";
     await restart.notifications();
     assert.equal(x.sent.length, 3);
-    assert.match(x.sent[2], /политика применена на обоих серверах \(connected\)/);
+    assert.match(x.sent[2], /политика применена на обоих серверах/);
     assert.doesNotMatch(x.sent[2], /комнаты проверены/);
     assert.doesNotMatch(x.sent[2], /подтвердить |отклонить /);
     assert.match(payloads[2].formatted_body, /<code>статус 1<\/code>/);
@@ -1033,11 +1030,11 @@ test("a lost persistent number mapping is never silently rebuilt", () => {
 test("actual backend cleanup and API changes keep their human result and federation check scope", () => {
     assert.equal(
         resultText({ status: "cleared", count: 12 }),
-        "Операция: завершённые заявки убраны (cleared).\nУбрано заявок: 12"
+        "Операция: завершённые заявки убраны.\nУбрано заявок: 12"
     );
     assert.match(
         resultText({ status: "changed", enabled: false }),
-        /изменения сохранены \(changed\)[\s\S]*API Misbot: выключен/
+        /изменения сохранены[\s\S]*API Misbot: выключен/
     );
     const checked = resultText({
         server: "peer.example.org",
@@ -1161,4 +1158,597 @@ test("security guidance names the actual separate SSH sections", async () => {
     });
     assert.match(x.sent[0], /Администраторы и пароль matrix-admin: «Администраторы и доступ»/);
     assert.match(x.sent[0], /Пароли остальных пользователей: «Пользователи и приглашения»/);
+});
+
+test("completed or duplicate requests are refused before offering or executing an operation", async () => {
+    for (const code of ["invalid_transition", "pending_request_exists", "request_in_progress"]) {
+        const x = setup();
+        const control = x.bot.control;
+        x.bot.control = async (request) => {
+            if (request.action === "validate") {
+                assert.deepEqual(request.argument, { action: "invite", argument: "peer.example" });
+                throw Object.assign(new Error("private detail"), { code });
+            }
+            return control(request);
+        };
+        await x.bot.message("!room", {
+            ...x.event,
+            content: { msgtype: "m.text", body: "пригласить сервер peer.example" }
+        });
+        assert.equal(x.bot.store.getValue("draft:!room"), undefined);
+        assert.match(x.sent.at(-1), /недоступно|актуальная заявка|уже принято/);
+        assert.doesNotMatch(x.sent.at(-1), /private detail|выполнить подтверждаю/);
+        assert.equal(
+            x.calls.some((r) => r.action === "invite"),
+            false
+        );
+    }
+});
+
+test("a request decided by another admin between proposal and confirmation never starts", async () => {
+    const x = setup(),
+        id = "MB-" + "c".repeat(32);
+    const control = x.bot.control;
+    let terminal = false;
+    x.bot.control = async (request) => {
+        if (request.action === "validate" && terminal)
+            throw Object.assign(new Error("stale"), { code: "invalid_transition" });
+        return control(request);
+    };
+    const send = (body, event_id) =>
+        x.bot.message("!room", {
+            ...x.event,
+            event_id,
+            content: { msgtype: "m.text", body }
+        });
+    await send("подтвердить " + id, "$proposal");
+    assert.match(x.sent.at(-1), /заявка №1/);
+    terminal = true;
+    await send("выполнить подтверждаю", "$confirm");
+    assert.match(x.sent.at(-1), /действие уже недоступно/);
+    assert.equal(
+        x.calls.some((r) => r.action === "approve"),
+        false
+    );
+    assert.equal(x.bot.store.getValue("draft:!room"), null);
+});
+
+test("repeated proposals keep one event and distinct cancellation targets are explicit", async () => {
+    const x = setup(),
+        first = "MB-" + "1".repeat(32),
+        second = "MB-" + "2".repeat(32);
+    x.bot.requestNumber(first);
+    x.bot.requestNumber(second);
+    const send = (body, event_id) =>
+        x.bot.message("!room", {
+            ...x.event,
+            event_id,
+            content: { msgtype: "m.text", body }
+        });
+    await send("отменить 1", "$first");
+    await send("отменить 1", "$duplicate");
+    assert.match(x.sent.at(-1), /Уже ожидает подтверждения:[\s\S]*заявка №1/);
+    assert.equal(x.bot.store.getValue("draft:!room").id, "$first");
+    await send("отменить 2", "$second");
+    assert.match(x.sent.at(-1), /Предыдущее предложение заменено[\s\S]*заявка №2/);
+    assert.doesNotMatch(x.sent.at(-1), /5 минут/);
+    await send("выполнить подтверждаю", "$confirm");
+    await send("выполнить подтверждаю", "$again");
+    const mutations = x.calls.filter((r) => r.action === "cancel");
+    assert.equal(mutations.length, 1);
+    assert.equal(mutations[0].argument, second);
+    assert.equal(mutations[0].event_id, "$second");
+});
+
+test("queued federation replies describe the target and only persisted results confirm delivery", async () => {
+    const x = setup(),
+        id = "MB-" + "e".repeat(32);
+    const control = x.bot.control;
+    let completed = false;
+    x.client.getJoinedRooms = async () => ["!room"];
+    x.bot.control = async (request) => {
+        if (request.action === "invite")
+            return {
+                status: "queued",
+                operation_id: "FO-example",
+                next_action: "technical details"
+            };
+        if (request.action === "notifications")
+            return {
+                operations: completed
+                    ? [
+                          {
+                              id: "FO-example",
+                              state: "complete",
+                              action: "invite",
+                              argument: "peer.example",
+                              actor: x.event.sender,
+                              result: {
+                                  id,
+                                  server: "peer.example",
+                                  state: "pending",
+                                  delivery_confirmed: true
+                              }
+                          }
+                      ]
+                    : []
+            };
+        return control(request);
+    };
+    const send = (body, event_id) =>
+        x.bot.message("!room", {
+            ...x.event,
+            event_id,
+            content: { msgtype: "m.text", body }
+        });
+    await send("пригласить сервер peer.example", "$invite");
+    await send("выполнить подтверждаю", "$confirm");
+    assert.match(x.sent.at(-1), /peer.example[\s\S]*Ожидает выполнения/);
+    assert.doesNotMatch(x.sent.at(-1), /queued|FO-|technical details|Выполнено|получение/i);
+    const sent = x.sent.length;
+    await x.bot.notifications();
+    assert.equal(x.sent.length, sent);
+    completed = true;
+    await x.bot.notifications();
+    assert.match(x.sent.at(-1), /заявка №1[\s\S]*Получение заявки другим сервером подтверждено/);
+    assert.doesNotMatch(x.sent.at(-1), /FO-|MB-|queued/);
+    const unknownDelivery = x.bot.operationText(
+        { action: "invite", argument: "peer.example" },
+        {
+            id,
+            status: "complete",
+            state: "pending",
+            delivery_pending: true
+        }
+    );
+    assert.match(unknownDelivery, /Доставка приглашения пока не подтверждена/);
+    assert.doesNotMatch(unknownDelivery, /Выполнено|Получение заявки/);
+});
+
+test("all administrators receive actionable requests and decisions despite a failed private room", async () => {
+    const x = setup(),
+        first = "MB-" + "1".repeat(32),
+        second = "MB-" + "2".repeat(32);
+    x.cfg.administrator_mxids.push("@second:example.org");
+    const originalState = x.client.getRoomState;
+    x.client.getRoomState = async (room) =>
+        (await originalState()).map((item) =>
+            room === "!second" && item.state_key === x.event.sender
+                ? { ...item, state_key: "@second:example.org" }
+                : item
+        );
+    x.client.getJoinedRooms = async () => ["!first", "!second"];
+    let failing = true;
+    const sent = [];
+    x.client.sendMessage = async (room, content) => {
+        if (room === "!first" && failing) throw new Error("room unavailable");
+        sent.push({ room, body: content.body });
+    };
+    let requests = [{ id: first, server: "peer.example", direction: "incoming", state: "pending" }];
+    x.bot.control = async (request) =>
+        request.action === "authorize" ? { authorized: true } : { requests };
+    await x.bot.notifications();
+    assert.deepEqual(
+        sent.map((x) => x.room),
+        ["!second"]
+    );
+    assert.match(sent[0].body, /подтвердить 1[\s\S]*отклонить 1/);
+    failing = false;
+    await x.bot.notifications();
+    assert.deepEqual(
+        sent.map((x) => x.room),
+        ["!second", "!first"]
+    );
+    requests[0].state = "rejected";
+    await x.bot.notifications();
+    assert.deepEqual(
+        sent.slice(-2).map((x) => x.room),
+        ["!first", "!second"]
+    );
+    assert.ok(sent.slice(-2).every((x) => x.body.includes("отклонено")));
+    requests.push({ ...requests[0], id: second, state: "pending" });
+    await x.bot.notifications();
+    assert.ok(sent.slice(-2).every((x) => x.body.includes("подтвердить 2")));
+    requests[1].state = "connected";
+    await x.bot.notifications();
+    assert.ok(sent.slice(-2).every((x) => x.body.includes("политика применена на обоих серверах")));
+    const count = sent.length;
+    const restart = new FederationBot(x.client, x.bot.control, x.bot.store, x.cfg);
+    await restart.notifications();
+    assert.equal(sent.length, count);
+    requests = [{ ...requests[1], id: "MB-" + "3".repeat(32) }];
+    await restart.notifications();
+    assert.ok(sent.slice(-2).every((x) => /Получена заявка №3[\s\S]*одобрено/.test(x.body)));
+    assert.ok(sent.slice(-2).every((x) => !/подтвердить |отклонить /.test(x.body)));
+});
+
+test("request dates use Moscow and removed cleanup commands never dispatch", () => {
+    const body = requestsText({
+        requests: [
+            {
+                id: "MB-" + "1".repeat(32),
+                server: "peer.example",
+                state: "pending",
+                direction: "incoming",
+                expires_at: Date.parse("2026-10-13T22:30:00Z") / 1000
+            }
+        ]
+    });
+    assert.match(body, /14 октября 2026[\s\S]*01:30 МСК/);
+    assert.doesNotMatch(body, /UTC/);
+    for (const command of [
+        "очистить отклонённые",
+        "очистить отклоненные",
+        "очистить MB-" + "1".repeat(32)
+    ])
+        assert.equal(parse(command), null);
+});
+
+test("server status presents measured CPU RAM disk swap and does not invent unavailable values", () => {
+    const body = serverText({
+        ok: true,
+        resources: {
+            cpu_used_percent: 12.3,
+            cpu_count: 2,
+            cpu_load: 0.4,
+            memory_total_bytes: 2048 * 1048576,
+            memory_used_bytes: 512 * 1048576,
+            disk_total_bytes: 20 * 1073741824,
+            disk_used_bytes: 5 * 1073741824,
+            disk_free_bytes: 15 * 1073741824,
+            swap_total_bytes: 1024 * 1048576,
+            swap_used_bytes: 0,
+            uptime_seconds: 7200
+        }
+    });
+    assert.match(body, /CPU: 12.3%/);
+    assert.match(body, /RAM: 512 \/ 2048 МиБ/);
+    assert.match(body, /Диск: 5.0 \/ 20.0 ГиБ/);
+    assert.match(body, /Swap: 0 \/ 1024 МиБ/);
+    assert.match(body, /Свободное место: 15.0 ГиБ/);
+    assert.doesNotMatch(
+        serverText({ ok: true, resources: {} }),
+        /CPU:|RAM:|Диск:|Swap:|NaN|undefined/
+    );
+});
+
+test("notification pages preserve their cursor across restart and retry failed RPC without skipping", async () => {
+    const x = setup();
+    const first = "MB-" + "1".repeat(32),
+        second = "MB-" + "2".repeat(32);
+    x.client.getJoinedRooms = async () => ["!room"];
+    let fail = false;
+    const cursors = [];
+    x.bot.control = async (request) => {
+        if (request.action === "authorize") return { authorized: true };
+        const cursor = request.argument?.cursor;
+        cursors.push(cursor || null);
+        if (fail) throw new Error("RPC unavailable");
+        return {
+            requests: [
+                {
+                    id: cursor ? second : first,
+                    server: "peer.example",
+                    state: "pending",
+                    direction: "incoming"
+                }
+            ],
+            next_cursor: cursor ? null : "request:" + first
+        };
+    };
+    assert.equal(await x.bot.notifications(), true);
+    assert.match(x.sent.at(-1), /подтвердить 1/);
+    const restart = new FederationBot(x.client, x.bot.control, x.bot.store, x.cfg);
+    fail = true;
+    await assert.rejects(restart.notifications());
+    fail = false;
+    assert.equal(await restart.notifications(), false);
+    assert.match(x.sent.at(-1), /подтвердить 2/);
+    assert.deepEqual(cursors, [null, "request:" + first, "request:" + first]);
+    await restart.notifications();
+    assert.equal(x.sent.length, 2);
+});
+
+test("a failed notification delivery is retried on the next scan without blocking later pages", async () => {
+    const x = setup();
+    const first = "MB-" + "1".repeat(32),
+        second = "MB-" + "2".repeat(32);
+    let fail = true;
+    x.client.getJoinedRooms = async () => ["!room"];
+    const send = x.client.sendMessage;
+    x.client.sendMessage = async (room, content) => {
+        if (fail && content.body.includes("first.example"))
+            throw new Error("temporary send failure");
+        return send(room, content);
+    };
+    x.bot.control = async (request) => {
+        if (request.action === "authorize") return { authorized: true };
+        const cursor = request.argument?.cursor;
+        return {
+            requests: [
+                {
+                    id: cursor ? second : first,
+                    server: cursor ? "second.example" : "first.example",
+                    state: "pending",
+                    direction: "incoming"
+                }
+            ],
+            next_cursor: cursor ? null : "request:" + first
+        };
+    };
+    assert.equal(await x.bot.notifications(), true);
+    assert.equal(await x.bot.notifications(), false);
+    assert.equal(x.sent.length, 1);
+    assert.match(x.sent[0], /second.example/);
+    fail = false;
+    await x.bot.notifications();
+    await x.bot.notifications();
+    assert.equal(x.sent.length, 2);
+    assert.match(x.sent[1], /first.example/);
+});
+
+test("a late signed receipt notifies after an initial timeout and survives restart without duplicates", async () => {
+    const x = setup(),
+        id = "MB-" + "a".repeat(32);
+    const request = {
+        id,
+        server: "peer.example",
+        direction: "outgoing",
+        state: "pending",
+        delivery_pending: true
+    };
+    const operation = {
+        id: "FO-late",
+        action: "invite",
+        argument: "peer.example",
+        actor: x.event.sender,
+        state: "complete",
+        result: { ...request }
+    };
+    x.client.getJoinedRooms = async () => ["!room"];
+    x.bot.control = async (r) =>
+        r.action === "authorize"
+            ? { authorized: true }
+            : { requests: [request], operations: [operation] };
+    await x.bot.notifications();
+    assert.equal(x.sent.length, 1);
+    assert.match(x.sent[0], /Доставка приглашения пока не подтверждена/);
+    request.delivery_pending = false;
+    request.delivery_confirmed = true;
+    await x.bot.notifications();
+    assert.equal(x.sent.length, 2);
+    assert.match(
+        x.sent[1],
+        /Заявка №1: peer.example[\s\S]*Получение заявки другим сервером подтверждено/
+    );
+    assert.match(x.sent[1], /статус 1[\s\S]*отменить 1/);
+    const restart = new FederationBot(x.client, x.bot.control, x.bot.store, x.cfg);
+    await restart.notifications();
+    assert.equal(x.sent.length, 2);
+});
+
+test("request receipts and successful invite jobs share a recipient receipt across notification pages", async () => {
+    for (const first of ["request", "operation"]) {
+        const x = setup(),
+            id = "MB-" + "b".repeat(32);
+        const request = {
+            id,
+            server: "peer.example",
+            direction: "outgoing",
+            state: "pending",
+            delivery_confirmed: true
+        };
+        const operation = {
+            id: "FO-ack",
+            action: "invite",
+            argument: "peer.example",
+            actor: x.event.sender,
+            state: "complete",
+            result: { ...request }
+        };
+        x.client.getJoinedRooms = async () => ["!room"];
+        let page = first;
+        x.bot.control = async (r) =>
+            r.action === "authorize"
+                ? { authorized: true }
+                : {
+                      requests: page === "request" ? [request] : [],
+                      operations: page === "operation" ? [operation] : []
+                  };
+        await x.bot.notifications();
+        page = first === "request" ? "operation" : "request";
+        await x.bot.notifications();
+        assert.equal(x.sent.length, 1, first);
+        assert.match(x.sent[0], /Получение заявки другим сервером подтверждено/);
+    }
+});
+
+test("recipient-less legacy markers replay once to each admin regardless of room order", async () => {
+    const x = setup(),
+        id = "MB-" + "d".repeat(32);
+    x.cfg.administrator_mxids.push("@second:example.org");
+    const originalState = x.client.getRoomState;
+    x.client.getRoomState = async (room) =>
+        (await originalState()).map((item) =>
+            room === "!second" && item.state_key === x.event.sender
+                ? { ...item, state_key: "@second:example.org" }
+                : item
+        );
+    x.client.getJoinedRooms = async () => ["!second", "!first"];
+    x.bot.store.setValue("notified:" + id + ":rejected", true);
+    x.bot.store.setValue("operation-notified:FO-legacy:complete", true);
+    const sent = [];
+    x.client.sendMessage = async (room, content) => sent.push({ room, body: content.body });
+    x.bot.control = async (request) =>
+        request.action === "authorize"
+            ? { authorized: true }
+            : {
+                  requests: [
+                      { id, server: "peer.example", direction: "incoming", state: "rejected" }
+                  ],
+                  operations: [
+                      {
+                          id: "FO-legacy",
+                          state: "complete",
+                          result: { status: "changed", enabled: true }
+                      }
+                  ]
+              };
+    await x.bot.notifications();
+    assert.deepEqual(
+        sent.map((item) => item.room),
+        ["!second", "!second", "!first", "!first"]
+    );
+    assert.equal(sent.filter((item) => item.body.includes("отклонено")).length, 2);
+    assert.equal(sent.filter((item) => item.body.includes("API Misbot: включён")).length, 2);
+    x.client.getJoinedRooms = async () => ["!first", "!second"];
+    const restart = new FederationBot(x.client, x.bot.control, x.bot.store, x.cfg);
+    await restart.notifications();
+    assert.equal(sent.length, 4);
+});
+
+test("a recovered delivery receipt supersedes only the old delivery failure across pages and restart", async () => {
+    for (const order of ["same-page", "receipt-first", "operation-first"]) {
+        const x = setup(),
+            id = "MB-" + "e".repeat(32);
+        const request = {
+            id,
+            server: "peer.example",
+            direction: "outgoing",
+            state: "pending",
+            delivery_confirmed: true
+        };
+        const operation = {
+            id: "FO-timeout",
+            action: "invite",
+            argument: "peer.example",
+            actor: x.event.sender,
+            state: "failed",
+            result: {
+                ...request,
+                delivery_confirmed: false,
+                delivery_pending: true,
+                code: "timeout",
+                safe_error: "timeout"
+            }
+        };
+        x.client.getJoinedRooms = async () => ["!room"];
+        let page = order;
+        x.bot.control = async (r) =>
+            r.action === "authorize"
+                ? { authorized: true }
+                : {
+                      requests: page !== "operation-first" ? [request] : [],
+                      operations: page !== "receipt-first" ? [operation] : []
+                  };
+        await x.bot.notifications();
+        if (order !== "same-page") {
+            page = order === "receipt-first" ? "operation-first" : "receipt-first";
+            await x.bot.notifications();
+        }
+        assert.equal(x.sent.length, order === "operation-first" ? 2 : 1, order);
+        assert.match(x.sent.at(-1), /Получение заявки другим сервером подтверждено/, order);
+        if (order === "operation-first") assert.match(x.sent[0], /завершение не подтверждено/);
+        else assert.doesNotMatch(x.sent.join("\n"), /завершение не подтверждено/);
+        const count = x.sent.length;
+        page = "same-page";
+        const restart = new FederationBot(x.client, x.bot.control, x.bot.store, x.cfg);
+        await restart.notifications();
+        assert.equal(x.sent.length, count, order);
+    }
+});
+
+test("a receipt never suppresses a later policy or confirmed-delivery operation failure", async () => {
+    for (const result of [
+        { state: "applying", delivery_confirmed: false, delivery_pending: true },
+        { state: "partially_applied", delivery_confirmed: false, delivery_pending: true },
+        { state: "pending", delivery_confirmed: true, delivery_pending: true },
+        { state: "pending", delivery_pending: true }
+    ]) {
+        const x = setup(),
+            id = "MB-" + "f".repeat(32);
+        x.client.getJoinedRooms = async () => ["!room"];
+        x.bot.store.setValue("notified:" + id + ":receipt:" + x.event.sender, true);
+        x.bot.control = async (r) =>
+            r.action === "authorize"
+                ? { authorized: true }
+                : {
+                      operations: [
+                          {
+                              id: "FO-policy-failure",
+                              action: "invite",
+                              argument: "peer.example",
+                              actor: x.event.sender,
+                              state: "failed",
+                              result: {
+                                  id,
+                                  server: "peer.example",
+                                  direction: "outgoing",
+                                  code: "operation_unconfirmed",
+                                  ...result
+                              }
+                          }
+                      ]
+                  };
+        await x.bot.notifications();
+        assert.equal(x.sent.length, 1);
+        assert.match(x.sent[0], /завершение не подтверждено/);
+    }
+});
+
+test("remote decisions supersede a saved initial delivery timeout, but local terminal states do not", async () => {
+    for (const state of ["connected", "rejected", "cancelled", "expired"]) {
+        for (const samePage of [true, false]) {
+            const x = setup(),
+                id = "MB-" + "c".repeat(32);
+            const request = {
+                id,
+                server: "peer.example",
+                direction: "outgoing",
+                state,
+                local_applied: state === "connected",
+                remote_applied: state === "connected"
+            };
+            const operation = {
+                id: "FO-old-timeout",
+                action: "invite",
+                argument: "peer.example",
+                actor: x.event.sender,
+                state: "failed",
+                result: {
+                    ...request,
+                    state: "pending",
+                    delivery_confirmed: false,
+                    delivery_pending: true,
+                    code: "timeout",
+                    safe_error: "timeout"
+                }
+            };
+            x.client.getJoinedRooms = async () => ["!room"];
+            let showOperation = samePage;
+            x.bot.control = async (r) =>
+                r.action === "authorize"
+                    ? { authorized: true }
+                    : {
+                          requests: [request],
+                          operations: showOperation ? [operation] : []
+                      };
+            await x.bot.notifications();
+            showOperation = true;
+            await x.bot.notifications();
+            const remoteProof = ["connected", "rejected"].includes(state);
+            assert.equal(x.sent.length, remoteProof ? 1 : 2);
+            if (remoteProof) {
+                assert.match(
+                    x.sent[0],
+                    state === "connected" ? /политика применена на обоих серверах/ : /отклонено/
+                );
+                assert.doesNotMatch(x.sent[0], /завершение не подтверждено/);
+            } else assert.match(x.sent[1], /завершение не подтверждено/);
+            const count = x.sent.length;
+            const restart = new FederationBot(x.client, x.bot.control, x.bot.store, x.cfg);
+            await restart.notifications();
+            assert.equal(x.sent.length, count);
+        }
+    }
 });

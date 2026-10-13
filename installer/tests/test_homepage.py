@@ -149,6 +149,20 @@ class HomepageTests(unittest.TestCase):
             self.assertEqual(caught.exception.status, status)
             self.assertNotIn('PRIVATE_MARKER', str(caught.exception))
 
+    def test_default_landing_explains_invitation_before_actions_without_promotion(self):
+        page = homepage.render(
+            {'DOMAIN': 'fictional.example.org', 'REGISTRATION_TOKEN_REQUIRED': 'true'}
+        )
+        self.assertLess(
+            page.index('нужен код приглашения'), page.index('aria-label="Вход и регистрация"')
+        )
+        self.assertIn('поле регистрационного кода', page)
+        self.assertIn('Открыть чат', page)
+        self.assertIn('После регистрации', page)
+        self.assertIn('Сделано через Misbot</span>', page)
+        self.assertNotIn('Подключить свой сервер', page)
+        self.assertNotIn('Ваше пространство', page)
+
     def test_setup_link_follows_release_metadata_and_escapes_query(self):
         source = self.root / 'source'
         (source / 'site').mkdir(parents=True)
@@ -162,7 +176,11 @@ class HomepageTests(unittest.TestCase):
         ):
             with self.subTest(url=url):
                 (source / 'release.json').write_text(json.dumps({'homepage_setup_url': url}))
-                page = homepage.render(model, source=source)
+                page = homepage.render(
+                    model,
+                    source=source,
+                    template='<a href="@@SETUPURL@@">Подключить свой сервер</a> @@NOTE@@ @@LOGIN@@ @@REGISTER@@',
+                )
                 self.assertIn('href="' + url.replace('&', '&amp;') + '"', page)
                 self.assertIn('Подключить свой сервер', page)
                 self.assertIn('код приглашения', page)
