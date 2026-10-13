@@ -63,6 +63,7 @@ names = [
     'configuration.py',
     'configuration_schema.py',
     'terminal_ui.py',
+    'terminal_input.py',
     'terminal_views.py',
     'terminal_diagnostics.py',
     'terminal_process.py',

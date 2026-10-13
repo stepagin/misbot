@@ -122,7 +122,10 @@ class UI:
         )
 
     def ask(self, label, default='', secret=False):
-        return question(label, default, secret, self.reader)
+        reader = self.reader
+        if reader is None and self.view.fullscreen and sys.stdin.isatty():
+            reader = self.view.read_input
+        return question(label, default, secret, reader)
 
     def pause(self, label='Enter — продолжить'):
         if self.view.fullscreen:

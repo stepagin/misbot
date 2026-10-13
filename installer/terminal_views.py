@@ -7,6 +7,7 @@ from contextlib import contextmanager
 
 try:
     from rich import box
+    from rich.cells import get_character_cell_size
     from rich.console import Console, Group
     from rich.live import Live
     from rich.panel import Panel
@@ -73,6 +74,8 @@ class TerminalView:
         self.screen_used = False
         self.page = []
         self.used_lines = 0
+        self.input_pending = ''
+        self.terminal_attributes = None
         if console is None and Console is not None and not plain:
             if sys.stdout.isatty() and os.environ.get('TERM', '') != 'dumb':
                 self.console = Console(markup=False, highlight=False, emoji=False)
@@ -91,9 +94,41 @@ class TerminalView:
             self.fullscreen = self.console.is_alt_screen
             self.screen_used = self.fullscreen
             try:
+                if sys.stdin.isatty():
+                    import termios
+
+                    # Typeahead between prompts must not echo a secret before
+                    # the next line editor has started.
+                    self.terminal_attributes = termios.tcgetattr(sys.stdin.fileno())
+                    private = termios.tcgetattr(sys.stdin.fileno())
+                    private[3] &= ~termios.ECHO
+                    termios.tcsetattr(sys.stdin.fileno(), termios.TCSANOW, private)
                 yield
             finally:
+                if self.terminal_attributes is not None:
+                    import termios
+
+                    termios.tcsetattr(
+                        sys.stdin.fileno(), termios.TCSADRAIN, self.terminal_attributes
+                    )
+                    self.terminal_attributes = None
                 self.fullscreen = False
+
+    @contextmanager
+    def external_terminal(self):
+        """Give a foreground CLI child its usual input mode, then restore the UI."""
+        if self.terminal_attributes is None:
+            yield
+            return
+        import termios
+
+        descriptor = sys.stdin.fileno()
+        current = termios.tcgetattr(descriptor)
+        termios.tcsetattr(descriptor, termios.TCSANOW, self.terminal_attributes)
+        try:
+            yield
+        finally:
+            termios.tcsetattr(descriptor, termios.TCSADRAIN, current)
 
     @property
     def compact(self):
@@ -121,6 +156,64 @@ class TerminalView:
             if isinstance(renderable, Panel):
                 renderable.width = self.console.width
             self.print(renderable)
+
+    def read_input(self, prompt, secret=False):
+        from terminal_input import read_line
+
+        return read_line(self, prompt, secret)
+
+    def draw_input(self, prompt, value, cursor, secret=False):
+        """Reflow the saved page and editor without scrolling the alternate screen."""
+        width, height = max(1, self.console.width), max(1, self.console.height)
+        shown = literal(prompt) + ('' if secret else literal(value))
+        before_cursor = literal(prompt) + ('' if secret else literal(value[:cursor]))
+        input_rows = ['']
+        column = 0
+        cursor_row, cursor_column = 0, 0
+        for index, char in enumerate(shown + ' '):
+            size = get_character_cell_size(char)
+            if char == '\n' or column + size > width:
+                input_rows.append('')
+                column = 0
+            if index == len(before_cursor):
+                cursor_row, cursor_column = len(input_rows) - 1, column
+            if char != '\n' and index < len(shown):
+                input_rows[-1] += char
+                column += size
+        # A long input gets a viewport around its cursor. Its complete value stays
+        # editable even when it exceeds the terminal's height.
+        input_budget = min(len(input_rows), max(1, height // 2))
+        input_start = max(0, cursor_row - input_budget + 1)
+        visible_input = input_rows[input_start : input_start + input_budget]
+        page_budget = height - len(visible_input)
+        for renderable in self.page:
+            if isinstance(renderable, Panel):
+                renderable.width = width
+        rendered = self.console.render_lines(Group(*self.page), pad=False)
+        page_rows = [
+            Text.assemble(*[(segment.text, segment.style) for segment in line])
+            for line in rendered[:page_budget]
+        ]
+        if len(rendered) > page_budget and page_rows:
+            page_rows[-1] = Text('… Увеличьте окно для просмотра страницы', style='dim')
+            page_rows[-1].truncate(width)
+        rows = page_rows + [Text(line, no_wrap=True) for line in visible_input]
+        self.console.file.write('\x1b[H\x1b[2J')
+        self.console.print(Text('\n').join(rows), end='', soft_wrap=True)
+        self.console.file.write(
+            '\x1b['
+            + str(len(page_rows) + cursor_row - input_start + 1)
+            + ';'
+            + str(cursor_column + 1)
+            + 'H'
+        )
+        self.console.file.flush()
+
+    def finish_input(self, prompt, value):
+        self.page.append(Text(literal(prompt) + literal(value)))
+        self.used_lines = sum(self.lines(item) for item in self.page)
+        self.console.file.write('\n')
+        self.console.file.flush()
 
     @contextmanager
     def busy(self, label):
