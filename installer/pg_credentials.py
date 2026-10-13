@@ -11,6 +11,7 @@ import stat
 import uuid
 
 import credentials
+import configuration
 import lifecycle
 import postgres_setup
 import preflight
@@ -188,11 +189,15 @@ def finish(root, saved):
     )
 
 
-def rotate(root):
-    if lifecycle.state().get('mas_mode') == 'external':
+def require_local_mas(root):
+    if configuration.installation_metadata(root).get('mas_mode') == 'external':
         raise RuntimeError(
             'Автоматическая смена паролей PostgreSQL для внешнего MAS пока не поддерживается. Пароли и базы не изменены.'
         )
+
+
+def rotate(root):
+    require_local_mas(root)
     if (root / JOURNAL).exists() or (root / JOURNAL).is_symlink():
         raise RuntimeError(
             'Database password change is pending; run install.sh database-password-recover'
@@ -228,10 +233,7 @@ def rotate(root):
 
 
 def recover(root):
-    if lifecycle.state().get('mas_mode') == 'external':
-        raise RuntimeError(
-            'Автоматическая смена паролей PostgreSQL для внешнего MAS пока не поддерживается. Пароли и базы не изменены.'
-        )
+    require_local_mas(root)
     if not (root / JOURNAL).exists() and not (root / JOURNAL).is_symlink():
         lifecycle.emit('database_password_recovery', pending=False, changed=False)
         return
@@ -267,10 +269,7 @@ def main():
     state_store.require_root()
     root = args.directory.resolve(strict=True)
     lifecycle.configure(root, 'database-password-' + args.action)
-    if lifecycle.state().get('mas_mode') == 'external':
-        raise RuntimeError(
-            'Автоматическая смена паролей PostgreSQL для внешнего MAS пока не поддерживается. Пароли и базы не изменены.'
-        )
+    require_local_mas(root)
 
     def interrupted(signum, frame):
         raise state_store.OperationInterrupted('Database password change interrupted')

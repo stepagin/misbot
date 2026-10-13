@@ -364,8 +364,10 @@ class ExternalMASTests(unittest.TestCase):
         dc.assert_not_called()
 
     def test_unsupported_database_migration_and_password_changes_fail_before_mutation(self):
+        self.root.mkdir(mode=0o700)
+        self.write_state({'domain': 'example.org', 'mas_mode': 'external'})
         with (
-            patch.object(lifecycle, 'state', return_value={'mas_mode': 'external'}),
+            patch.object(lifecycle, 'state', side_effect=AssertionError('Unrelated runtime state')),
             patch.object(lifecycle, 'postgres') as sql,
             patch.object(lifecycle, 'backup') as backup,
         ):

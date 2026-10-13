@@ -243,6 +243,76 @@ class DatabaseTests(unittest.TestCase):
                     database.abort(root)
                 dc.assert_not_called()
 
+    def test_foreign_runtime_does_not_replace_selected_orphan_or_activation_guards(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            record = self.fixture(root)
+            foreign = root / 'other-installation'
+            foreign.mkdir()
+            state_store.write_json(
+                foreign / 'installation.json',
+                {'domain': 'other.invalid', 'mas_mode': 'external'},
+            )
+            record['active_client'] = 'matrix-dbcopy-' + 'a' * 32
+            database.save(root, record)
+            checkpoint = root / 'database-transition.json'
+            before = checkpoint.read_bytes()
+            with (
+                patch.object(lifecycle, 'ROOT', foreign, create=True),
+                patch.object(
+                    database.subprocess, 'run', return_value=Mock(returncode=0, stdout='true\n')
+                ),
+                patch.object(database, 'claim') as claim,
+                patch.object(lifecycle, 'dc') as dc,
+            ):
+                for action in (database.abort, database.recover):
+                    with (
+                        self.subTest(action=action.__name__),
+                        self.assertRaisesRegex(RuntimeError, 'still running'),
+                    ):
+                        action(root)
+                claim.assert_not_called()
+                dc.assert_not_called()
+            self.assertEqual(checkpoint.read_bytes(), before)
+            record.pop('active_client')
+            record.update(activated=True, phase='activating')
+            database.save(root, record)
+            before = checkpoint.read_bytes()
+            with (
+                patch.object(lifecycle, 'ROOT', foreign, create=True),
+                patch.object(database, 'claim') as claim,
+                patch.object(lifecycle, 'dc') as dc,
+                self.assertRaisesRegex(RuntimeError, 'lose them'),
+            ):
+                database.abort(root)
+            claim.assert_not_called()
+            dc.assert_not_called()
+            self.assertEqual(checkpoint.read_bytes(), before)
+
+    def test_missing_selected_installation_keeps_journal_free_recovery_behavior(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            foreign = root / 'other-installation'
+            foreign.mkdir()
+            state_store.write_json(foreign / 'installation.json', {'mas_mode': 'external'})
+            with (
+                patch.object(lifecycle, 'ROOT', foreign, create=True),
+                patch.object(lifecycle, 'emit') as emit,
+                patch.object(lifecycle, 'dc') as dc,
+                patch.object(database, 'claim') as claim,
+            ):
+                database.recover(root)
+                emit.assert_called_once()
+                self.assertFalse(emit.call_args.kwargs['pending'])
+                with self.assertRaisesRegex(RuntimeError, 'No database transition'):
+                    database.abort(root)
+                with self.assertRaisesRegex(RuntimeError, 'existing committed local installation'):
+                    database.external(root, root / 'unused.env')
+                dc.assert_not_called()
+                claim.assert_not_called()
+            self.assertFalse((root / 'installation.json').exists())
+            self.assertFalse((root / 'database-transition.json').exists())
+
     def test_nonempty_target_and_incompatible_major_refused(self):
         client = Mock()
         client.sql.return_value = '1\n'

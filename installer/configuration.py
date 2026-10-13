@@ -43,6 +43,17 @@ def read_private_json(path):
     return json.loads(read_private(path))
 
 
+def installation_metadata(root):
+    """Read the selected root; missing metadata leaves recovery checks in charge."""
+    path = Path(root) / 'installation.json'
+    if not path.exists() and not path.is_symlink():
+        return {}
+    metadata = read_private_json(path)
+    if not isinstance(metadata, dict):
+        raise RuntimeError('Invalid installation metadata; retain configuration and checkpoints')
+    return metadata
+
+
 def parse(text, path, allowed):
     result = {}
     for number, line in enumerate(text.splitlines(), 1):
