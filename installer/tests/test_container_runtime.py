@@ -1,5 +1,6 @@
 import copy
 import hashlib
+import json
 from pathlib import Path
 import stat
 import sys
@@ -315,6 +316,17 @@ class RuntimeTests(unittest.TestCase):
             installation.control = installation.root / '.misbot'
             installation.require_no_pending = Mock()
             installation.backup = Mock()
+            source = Path(folder) / 'candidate'
+            source.mkdir()
+            (source / 'release.json').write_text(
+                json.dumps(
+                    {
+                        'family': existing_update.update.FAMILY,
+                        'version': '1.2.0',
+                        'update_scope': 'source-and-configuration',
+                    }
+                )
+            )
             for entries in (
                 {},
                 {'existing_proxy.py': Path('/fictional/source.py')},
@@ -325,7 +337,7 @@ class RuntimeTests(unittest.TestCase):
             ):
                 with patch.object(existing_update, 'sources', return_value=(entries, 'fixture')):
                     with self.assertRaises(Error):
-                        existing_update.apply(installation, Path('/fictional/source'))
+                        existing_update.apply(installation, source)
             installation.backup.assert_not_called()
             self.assertFalse(installation.control.exists())
 
