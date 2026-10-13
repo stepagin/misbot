@@ -12,7 +12,8 @@ const {
     stateText,
     requestsText,
     serverText,
-    errorText
+    errorText,
+    noticeContent
 } = require("../logic");
 function setup() {
     const cfg = {
@@ -34,7 +35,10 @@ function setup() {
             },
             { type: "m.room.encryption", content: { algorithm: "m.megolm.v1.aes-sha2" } }
         ],
-        sendNotice: async (r, b) => sent.push(b),
+        sendMessage: async (r, content) => {
+            assert.equal(content.format, "org.matrix.custom.html");
+            sent.push(content.body);
+        },
         joinRoom: async (r) => sent.push("join " + r),
         getRoomStateEvent: async () => ({ membership: "invite" })
     };
@@ -228,7 +232,7 @@ test("an unavailable invitation invalidates an earlier update while read command
 test("Russian grammar and opaque IDs", () => {
     assert.equal(parse("подтвердить MB-" + "a".repeat(32)).action, "approve");
     assert.equal(parse("подтвердить 1"), null);
-    assert.match(FEDERATION, /взаимное подключение/);
+    assert.match(FEDERATION, /пригласить сервер/);
     assert.doesNotMatch(HELP, /создать копию|обновить подтверждаю|перезапустить сервер/i);
     assert.match(MAINTENANCE, /перезапустить сервер/);
 });
@@ -583,11 +587,8 @@ test("plain results keep special characters and suppress private recovery detail
     };
     const body = resultText(result);
     assert.ok(body.startsWith("Результат запроса:\n"));
-    assert.deepEqual(JSON.parse(body.slice(body.indexOf("\n") + 1)), {
-        servers: result.servers,
-        note: result.note,
-        nested: { code: "busy" }
-    });
+    assert.ok(body.includes("1. example.org"));
+    assert.ok(body.includes(result.note));
     assert.doesNotMatch(body, /FICTIONAL_SECRET/);
     assert.equal(
         resultText({ status: "unchanged" }),
@@ -627,8 +628,8 @@ test("notifications keep commands, distinct states and deduplication after resta
     await x.bot.notifications();
     assert.equal(x.sent.length, 2);
     assert.match(x.sent[0], /ожидает решения \(pending\)/);
-    assert.ok(x.sent[0].includes("подтвердить " + id));
-    assert.ok(x.sent[0].includes("отклонить " + id));
+    assert.ok(x.sent[0].includes("подтвердить 1"));
+    assert.ok(x.sent[0].includes("отклонить 1"));
     assert.match(x.sent[1], /прервано \(interrupted\)/);
     assert.match(x.sent[1], /sudo misbot federation recover/);
     assert.doesNotMatch(x.sent[1], /FICTIONAL_SECRET/);
@@ -657,7 +658,7 @@ test("grouped menus keep destructive actions inside maintenance and invitations 
         });
         assert.equal(x.sent.at(-1), expected);
     }
-    assert.match(HELP, /статистика[\s\S]*состояние[\s\S]*проверить[\s\S]*федерация/);
+    assert.match(HELP, /статистика[\s\S]*состояние[\s\S]*федерация/);
     assert.doesNotMatch(HELP, /приглашения —|создать копию|остановить службы/);
     x.bot.control = async (request) => {
         x.calls.push(request);
@@ -750,25 +751,25 @@ test("server reads and federation request categories remain separate", async () 
               ? {
                     requests: [
                         {
-                            id: "MB-in",
+                            id: "MB-" + "1".repeat(32),
                             server: "incoming.example",
                             direction: "incoming",
                             state: "pending"
                         },
                         {
-                            id: "MB-out",
+                            id: "MB-" + "2".repeat(32),
                             server: "outgoing.example",
                             direction: "outgoing",
                             state: "pending"
                         },
                         {
-                            id: "MB-no",
+                            id: "MB-" + "3".repeat(32),
                             server: "rejected.example",
                             direction: "outgoing",
                             state: "rejected"
                         },
                         {
-                            id: "MB-hidden",
+                            id: "MB-" + "4".repeat(32),
                             server: "hidden.example",
                             direction: "incoming",
                             state: "rejected",
@@ -799,7 +800,7 @@ test("server reads and federation request categories remain separate", async () 
     assert.deepEqual(x.calls.find((c) => c.action === "panel-server-read").argument, {
         operation: "check"
     });
-    assert.match(x.sent.at(-1), /matrix_https: проверено/);
+    assert.match(x.sent.at(-1), /matrix_https: доступно/);
     assert.equal(requestsText({ requests: [] }, "rejected"), "Отклонённые заявки: 0.");
     assert.match(serverText({ ok: false, recovery_required: true }), /через SSH/);
 });
@@ -841,7 +842,7 @@ test("expected federation refusals are actionable and arbitrary remote error tex
     assert.match(errorText("FICTIONAL_SECRET"), /задача ID/);
 });
 
-test("statistics keep unavailable activity unknown while rendering actual host resources", () => {
+test("statistics keep unavailable counters unknown and show a compact activity report", () => {
     const body = serverText({
         operation: "statistics",
         ok: false,
@@ -857,10 +858,8 @@ test("statistics keep unavailable activity unknown while rendering actual host r
     });
     assert.match(body, /Сообщений: недоступно/);
     assert.match(body, /Регистраций: недоступно/);
-    assert.match(body, /Память: 512 \/ 1024 МиБ/);
-    assert.match(body, /Свободное место: 3.0 ГиБ/);
-    assert.match(body, /Средняя нагрузка за минуту: 0.12/);
-    assert.match(body, /Сервер работает: 2 ч/);
+    assert.doesNotMatch(body, /Память|Свободное место|нагрузка|Число звонков|Средняя длительность/);
+    assert.match(body, /Повторите запрос позже/);
     assert.doesNotMatch(body, /undefined|NaN|Сообщений: 0/);
 });
 
@@ -892,4 +891,158 @@ test("a request preview cannot consume the mutation event and always identifies 
         write = x.calls.find((c) => c.action === "approve");
     assert.notEqual(read.event_id, write.event_id);
     assert.equal(write.event_id, "$proposal");
+});
+
+test("numbered requests keep their actual identity across filters, new requests and restart", async () => {
+    const x = setup();
+    const first = "MB-" + "1".repeat(32),
+        second = "MB-" + "2".repeat(32),
+        third = "MB-" + "3".repeat(32);
+    let requests = [
+        { id: first, server: "first.example", direction: "incoming", state: "pending" },
+        { id: second, server: "second.example", direction: "outgoing", state: "pending" }
+    ];
+    x.bot.control = async (request) => {
+        x.calls.push(request);
+        if (request.action === "authorize") return { authorized: true };
+        if (request.action === "requests") return { requests };
+        if (request.action === "request-status")
+            return { server: "first.example", state: "pending" };
+        return { status: "queued" };
+    };
+    let event = 0;
+    const send = (body) =>
+        x.bot.message("!room", {
+            ...x.event,
+            event_id: "$numbered" + ++event,
+            content: { msgtype: "m.text", body }
+        });
+    await send("заявки");
+    assert.match(x.sent.at(-2), /1\. first.example[\s\S]*2\. second.example/);
+    assert.ok(!x.sent.some((body) => body.includes(first) || body.includes(second)));
+    requests = [
+        requests[1],
+        { id: third, server: "third.example", direction: "incoming", state: "pending" }
+    ];
+    await send("заявки исходящие");
+    assert.match(x.sent.at(-1), /2\. second.example/);
+    await send("заявки входящие");
+    assert.match(x.sent.at(-1), /3\. third.example/);
+    x.bot = new FederationBot(x.client, x.bot.control, x.bot.store, x.cfg);
+    await send("подтвердить 1");
+    assert.match(x.sent.at(-1), /заявка №1/);
+    await send("выполнить подтверждаю");
+    assert.equal(x.calls.find((request) => request.action === "approve").argument, first);
+    await send("подтвердить 999");
+    assert.match(x.sent.at(-1), /Номер заявки не найден/);
+    assert.equal(x.calls.filter((request) => request.action === "approve").length, 1);
+});
+
+test("several configured admins use separate private rooms; unrelated or revoked accounts cannot command", async () => {
+    const x = setup();
+    const other = "@personal:example.org";
+    x.cfg.administrator_mxids.push(other);
+    x.client.getRoomState = async (room) =>
+        [x.cfg.user_id, room === "!personal" ? other : "@admin:example.org"]
+            .map((state_key) => ({
+                type: "m.room.member",
+                state_key,
+                content: { membership: "join" }
+            }))
+            .concat({ type: "m.room.encryption", content: { algorithm: "m.megolm.v1.aes-sha2" } });
+    const send = (room, sender, id) =>
+        x.bot.message(room, {
+            ...x.event,
+            sender,
+            event_id: id,
+            content: { msgtype: "m.text", body: "меню" }
+        });
+    await send("!personal", other, "$personal");
+    await send("!room", "@admin:example.org", "$primary");
+    assert.equal(x.sent.length, 2);
+    await send("!room", other, "$wrong-room");
+    await send("!personal", "@unlisted:example.org", "$unlisted");
+    x.revoke();
+    await send("!personal", other, "$revoked");
+    assert.equal(x.sent.length, 2);
+});
+
+test("notice HTML escapes inserted text and preserves all plain text commands and line breaks", () => {
+    const body =
+        "Результат <&>\"'\n\n1. команда example.org — описание\nhttps://example.org/?a=1&b=2";
+    const content = noticeContent(body);
+    assert.equal(content.body, body);
+    assert.equal(content.format, "org.matrix.custom.html");
+    assert.ok(content.formatted_body.includes("<code>1. команда example.org</code>"));
+    const restored = content.formatted_body
+        .replace(/<br>/g, "\n")
+        .replace(/<[^>]+>/g, "")
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/&amp;/g, "&");
+    assert.equal(restored, body);
+});
+
+test("state and old check aliases show the same service and availability checks", async () => {
+    const x = setup();
+    x.bot.control = async (request) => {
+        x.calls.push(request);
+        if (request.action === "authorize") return { authorized: true };
+        return request.argument.operation === "check"
+            ? { ok: false, checks: [{ name: "matrix_https", passed: false }] }
+            : { ok: true, containers: [{ name: "synapse", running: false, healthy: true }] };
+    };
+    for (const [index, body] of [
+        "состояние",
+        "проверить",
+        "статус сервера",
+        "проверить сервер"
+    ].entries()) {
+        await x.bot.message("!room", {
+            ...x.event,
+            event_id: "$alias" + index,
+            content: { msgtype: "m.text", body }
+        });
+        assert.match(x.sent.at(-1), /✗ synapse: остановлено/);
+        assert.match(x.sent.at(-1), /✗ matrix_https: недоступно/);
+    }
+    assert.equal(x.calls.filter((request) => request.action === "panel-server-read").length, 8);
+});
+
+test("a lost persistent number mapping is never silently rebuilt", () => {
+    const x = setup();
+    const id = "MB-" + "f".repeat(32);
+    assert.equal(x.bot.requestNumber(id), 1);
+    x.bot.store.setValue("request-index", null);
+    assert.throws(() => x.bot.requestNumber(id), /index missing/);
+});
+
+test("actual backend cleanup and API changes keep their human result and federation check scope", () => {
+    assert.equal(
+        resultText({ status: "cleared", count: 12 }),
+        "Операция: завершённые заявки убраны (cleared).\nУбрано заявок: 12"
+    );
+    assert.match(
+        resultText({ status: "changed", enabled: false }),
+        /изменения сохранены \(changed\)[\s\S]*API Misbot: выключен/
+    );
+    const checked = resultText({
+        server: "peer.example.org",
+        policy: true,
+        matrix_discovery: "available",
+        https: "available",
+        invitation: { ready: true },
+        federation_exchange: "not_verified"
+    });
+    assert.match(checked, /Местная политика: сервер разрешён/);
+    assert.match(checked, /Работа федеративных комнат не проверялась/);
+    assert.match(checked, /Можно отправить приглашение/);
+    assert.doesNotMatch(
+        resultText({
+            peers: [{ server: "peer.example", approved: true, state: "partially_applied" }]
+        }),
+        /подключён/
+    );
 });

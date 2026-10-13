@@ -1,4 +1,5 @@
 "use strict";
+const { noticeContent } = require("./logic");
 
 function deliveryError(code) {
     const error = new Error(code);
@@ -48,7 +49,7 @@ async function sendOnce(client, store, room, item) {
     let saved = store.getValue(key);
     const retry = !!saved;
     if (!saved) {
-        const content = { msgtype: "m.notice", body: item.body };
+        const content = noticeContent(item.body);
         const encrypted = await client.crypto.encryptRoomEvent(room, "m.room.message", content);
         saved = { room, type: "m.room.encrypted", content: encrypted };
         store.setValue(key, saved);
@@ -163,24 +164,34 @@ class DeliveryQueue {
             try {
                 if (item.via === "welcome") await this.welcome.deliver(item);
                 else {
-                    await this.adminBot.authorize(actor);
-                    let room = this.store.getValue("admin-room");
+                    const recipient = item.recipient;
+                    await this.adminBot.authorize(recipient);
+                    let room =
+                        this.store.getValue("admin-room:" + recipient) ||
+                        (recipient === actor ? this.store.getValue("admin-room") : null);
                     if (
                         !room ||
-                        !(await privateRoom(this.admin, room, this.config.user_id, actor))
+                        !(await privateRoom(this.admin, room, this.config.user_id, recipient))
                     ) {
                         room = null;
                         for (const candidate of await this.admin.getJoinedRooms()) {
                             if (
-                                await privateRoom(this.admin, candidate, this.config.user_id, actor)
+                                await privateRoom(
+                                    this.admin,
+                                    candidate,
+                                    this.config.user_id,
+                                    recipient
+                                )
                             ) {
                                 room = candidate;
                                 break;
                             }
                         }
                     }
-                    if (!room || item.recipient !== actor) throw new Error("admin_room_required");
-                    if (!(await privateRoom(this.admin, room, this.config.user_id, actor, true)))
+                    if (!room) throw new Error("admin_room_required");
+                    if (
+                        !(await privateRoom(this.admin, room, this.config.user_id, recipient, true))
+                    )
                         throw deliveryError("recipient_not_joined");
                     await sendOnce(this.admin, this.store, room, item);
                 }

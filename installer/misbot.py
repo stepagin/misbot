@@ -211,6 +211,7 @@ def operation_help(command, existing=False):
         'object': 'backup/example/object.enc',
         'output': '/root/verified-backup.tar.gz',
         'tag': 'admin-panel',
+        'mxid': '@personal:example.org',
         'server': 'example.org',
         'request': 'MB-0123456789abcdef0123456789abcdef',
     }

@@ -98,12 +98,26 @@ async function ensureCrossSigning(client, path = "/data/cross-signing.json") {
         remote.master_keys[user].keys?.["ed25519:" + keys.master.public] !== keys.master.public
     )
         throw new Error("Existing cross-signing identity differs; refusing replacement");
+    for (const [kind, key] of [
+        ["self_signing_keys", keys.self],
+        ["user_signing_keys", keys.users]
+    ]) {
+        if (
+            remote[kind]?.[user] &&
+            remote[kind][user].keys?.["ed25519:" + key.public] !== key.public
+        )
+            throw new Error("Existing cross-signing child identity differs; refusing replacement");
+    }
     const master = crossKey(keys.master, "master", user);
     // Bot SDK signs JSON.stringify directly; supply canonical key ordering.
     master.signatures = await client.crypto.sign(JSON.parse(canonical(master)));
     const self = signed(crossKey(keys.self, "self_signing", user), keys.master, user);
     const users = signed(crossKey(keys.users, "user_signing", user), keys.master, user);
-    if (!remote.master_keys?.[user]) {
+    if (
+        !remote.master_keys?.[user] ||
+        !remote.self_signing_keys?.[user] ||
+        !remote.user_signing_keys?.[user]
+    ) {
         await client.doRequest("POST", "/_matrix/client/v3/keys/device_signing/upload", null, {
             master_key: master,
             self_signing_key: self,
@@ -131,6 +145,7 @@ async function ensureCrossSigning(client, path = "/data/cross-signing.json") {
             "ed25519:" + device
         ) ||
         !validSignature(remote.self_signing_keys?.[user] || {}, user, keys.master.public) ||
+        !validSignature(remote.user_signing_keys?.[user] || {}, user, keys.master.public) ||
         !validSignature(remote.device_keys?.[user]?.[device] || {}, user, keys.self.public)
     )
         throw new Error("Cross-signing verification failed");

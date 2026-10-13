@@ -11,7 +11,7 @@ const {
     LogService
 } = require("matrix-bot-sdk");
 const { StoreType } = require("@matrix-org/matrix-sdk-crypto-nodejs");
-const { FederationBot, errorText } = require("./logic"),
+const { FederationBot, errorText, sendNotice } = require("./logic"),
     { ensureCrossSigning } = require("./signing");
 const { WelcomeBot, DeliveryQueue, privateRoom } = require("./welcome");
 const { SerialQueue, controlTimeout, DecryptionRetry } = require("./runtime");
@@ -66,12 +66,18 @@ async function main() {
     const administrators = config.administrator_mxids || ["@matrix-admin:" + config.server_name];
     if (
         !Array.isArray(administrators) ||
-        administrators.length !== 1 ||
+        administrators.length < 1 ||
+        administrators.length > 20 ||
+        new Set(administrators).size !== administrators.length ||
         administrators.some(
             (mxid) =>
                 typeof mxid !== "string" ||
+                !mxid.endsWith(":" + config.server_name) ||
+                !/^[a-z0-9][a-z0-9._=-]{0,254}$/.test(
+                    mxid.slice(1, -(config.server_name.length + 1))
+                ) ||
                 !mxid.startsWith("@") ||
-                !mxid.endsWith(":" + config.server_name)
+                mxid === config.user_id
         )
     )
         throw new Error("administrators");
@@ -96,7 +102,12 @@ async function main() {
         return result;
     };
     const queue = new SerialQueue((code) => console.log("Federation bot: " + code));
+    let signingReady;
+    const signedIdentity = new Promise((resolve) => {
+        signingReady = resolve;
+    });
     const message = async (room, event) => {
+        await signedIdentity;
         try {
             await bot.message(room, event);
         } catch (error) {
@@ -107,9 +118,9 @@ async function main() {
                     () => true,
                     () => false
                 )) &&
-                (await bot.privateRoom(room).catch(() => false))
+                (await bot.privateRoom(room, event.sender).catch(() => false))
             )
-                await client.sendNotice(room, errorText(error?.code)).catch(() => {});
+                await sendNotice(client, room, errorText(error?.code)).catch(() => {});
             throw new Error("command_unconfirmed");
         }
     };
@@ -144,48 +155,39 @@ async function main() {
     await client.start();
     stage = "cross-signing";
     await ensureCrossSigning(client);
+    signingReady();
     stage = "admin-room";
-    if (
-        !store.readValue("admin-room") ||
-        !(await privateRoom(
-            client,
-            store.readValue("admin-room"),
-            config.user_id,
-            administrators[0]
-        ).catch(() => false))
-    ) {
-        // Recover a lost createRoom response by finding our existing private room.
+    for (const administrator of administrators) {
+        const key = "admin-room:" + administrator;
+        const saved =
+            store.readValue(key) ||
+            (administrator === administrators[0] ? store.readValue("admin-room") : null);
+        if (
+            saved &&
+            (await privateRoom(client, saved, config.user_id, administrator).catch(() => false))
+        ) {
+            store.storeValue(key, saved);
+            continue;
+        }
         let found = null;
         for (const room of await client.getJoinedRooms()) {
-            const state = await client.getRoomState(room);
-            const members = state
-                .filter(
-                    (e) =>
-                        e.type === "m.room.member" &&
-                        ["join", "invite"].includes(e.content?.membership)
-                )
-                .map((e) => e.state_key);
-            if (
-                members.length === administrators.length + 1 &&
-                members.includes(config.user_id) &&
-                administrators.every((mxid) => members.includes(mxid)) &&
-                state.some(
-                    (e) =>
-                        e.type === "m.room.encryption" &&
-                        e.content?.algorithm === "m.megolm.v1.aes-sha2"
-                )
-            ) {
+            if (await privateRoom(client, room, config.user_id, administrator).catch(() => false)) {
                 found = room;
                 break;
             }
         }
-        const room =
+        // Persist intent before creating; a lost response is discovered on retry,
+        // never followed by a second invitation for the same administrator.
+        const pending = "admin-room-creating:" + administrator;
+        if (!found && store.readValue(pending)) throw new Error("admin_room_creation_unconfirmed");
+        if (!found) store.storeValue(pending, true);
+        const created =
             found ||
             (await client.createRoom({
                 preset: "private_chat",
                 visibility: "private",
                 is_direct: true,
-                invite: administrators,
+                invite: [administrator],
                 name: "Misbot — панель администратора",
                 initial_state: [
                     {
@@ -195,7 +197,10 @@ async function main() {
                     }
                 ]
             }));
-        store.storeValue("admin-room", typeof room === "string" ? room : room.room_id);
+        const room = typeof created === "string" ? created : created.room_id;
+        store.storeValue(key, room);
+        if (administrator === administrators[0]) store.storeValue("admin-room", room);
+        store.storeValue(pending, false);
     }
     stage = "welcome";
     const welcomeConfig = JSON.parse(fs.readFileSync("/config/welcome.json", "utf8"));

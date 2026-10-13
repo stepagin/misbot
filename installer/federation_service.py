@@ -73,7 +73,7 @@ def bot_call(backend, request, uid):
             if action in ('panel-update', 'panel-broadcast', 'panel-server-operation'):
                 backend.ready()
             return admin_panel.Panel(backend.root).handle(
-                action, request.get('argument'), request.get('event_id')
+                action, request.get('argument'), request.get('event_id'), actor=request.get('actor')
             )
     if action in ('notifications', 'auto-invitation', 'authorize'):
         with backend.guard():

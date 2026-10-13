@@ -21,7 +21,8 @@ DEVICE = 'MATRIX-FEDERATION-01'
 def identity(root, metadata):
     root = Path(root)
     path = root / 'config/admin-panel-identity.json'
-    if path.exists():
+    create = not path.exists()
+    if not create:
         saved = configuration.read_private_json(path)
     else:
         cfg = root / 'config/federation-bot.json'
@@ -33,16 +34,44 @@ def identity(root, metadata):
             or existing.get('administrator_mxids')
             or ['@matrix-admin:' + metadata['domain']]
         )
+        if (
+            not isinstance(admins, list)
+            or not admins
+            or len(admins) > 20
+            or any(not isinstance(mxid, str) for mxid in admins)
+        ):
+            raise RuntimeError('Invalid administrator access list')
         saved = {
             'user_id': existing.get('user_id', '@admin-panel:' + metadata['domain']),
             'administrator_mxid': admins[0],
+            'administrator_mxids': list(dict.fromkeys(admins)),
         }
-        state_store.write_json(path, saved)
+    admins = saved.get('administrator_mxids', [saved['administrator_mxid']])
+    if (
+        not isinstance(admins, list)
+        or not admins
+        or len(admins) > 20
+        or any(not isinstance(mxid, str) for mxid in admins)
+        or not isinstance(saved.get('administrator_mxid'), str)
+    ):
+        raise RuntimeError('Invalid administrator access list')
+    saved['administrator_mxids'] = list(dict.fromkeys([saved['administrator_mxid'], *admins]))
+    if len(saved['administrator_mxids']) > 20:
+        raise RuntimeError('Invalid administrator access list')
     for name in ('user_id', 'administrator_mxid'):
-        if not re.fullmatch(
+        if not isinstance(saved.get(name), str) or not re.fullmatch(
             r'@[a-z0-9][a-z0-9._=-]{0,63}:' + re.escape(metadata['domain']), saved[name]
         ):
             raise RuntimeError('Invalid local admin panel identity')
+    if any(
+        not isinstance(mxid, str)
+        or not re.fullmatch(r'@[a-z0-9][a-z0-9._=-]{0,254}:' + re.escape(metadata['domain']), mxid)
+        or mxid == saved['user_id']
+        for mxid in saved['administrator_mxids']
+    ):
+        raise RuntimeError('Invalid administrator access list')
+    if create:
+        state_store.write_json(path, saved)
     return saved
 
 
@@ -138,7 +167,7 @@ def provision(root, dc, metadata):
     if metadata.get('federation_provisioned'):
         validate(root, metadata)
         cfg = json.loads((root / 'config/federation-bot.json').read_text())
-        cfg['administrator_mxids'] = [saved['administrator_mxid']]
+        cfg['administrator_mxids'] = saved['administrator_mxids']
         state_store.write_json(root / 'config/federation-bot.json', cfg)
     else:
         result = json.loads(
@@ -156,7 +185,7 @@ def provision(root, dc, metadata):
         cfg = result['config']
         if cfg['user_id'] != saved['user_id'] or cfg['device_id'] != DEVICE:
             raise RuntimeError('Federation bot identity mismatch; keep saved session')
-        cfg['administrator_mxids'] = [saved['administrator_mxid']]
+        cfg['administrator_mxids'] = saved['administrator_mxids']
         state_store.write_json(root / 'config/federation-bot.json', cfg)
         os.chown(root / 'config/federation-bot.json', 10003, 10003)
         state_store.write_json(root / 'secrets/federation-session.json', result['metadata'])

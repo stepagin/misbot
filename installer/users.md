@@ -25,6 +25,16 @@ MAS обслуживает пароли и вход. Смена пароля ч�
 заменяет операцию MAS; [документация Synapse](https://element-hq.github.io/synapse/latest/admin_api/user_admin_api.html)
 описывает ограничения при делегированной авторизации.
 
+## Добавить личного администратора
+
+Зарегистрируйте местный аккаунт с выбранным именем, затем выполните
+`sudo misbot admin access add --mxid @personal:example.org`, заменив адрес своим.
+Аккаунт получает права MAS admin и личный доступ к панели; первоначальный
+`@matrix-admin` сохраняется. Список: `sudo misbot admin access list`.
+Отзыв добавленных прав: `sudo misbot admin access remove --mxid @personal:example.org`.
+При прерывании: `sudo misbot admin access recover`.
+Проверки и ограничения описаны в [панели администратора](admin-panel.md#личный-аккаунт-администратора).
+
 ## Временно запретить новый вход
 
 ```bash

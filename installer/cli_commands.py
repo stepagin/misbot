@@ -34,6 +34,14 @@ class Route:
     source_argument: bool = False
 
 
+ADMIN_ACCESS = Route(
+    'admin_identity.py',
+    'admin-access-',
+    ActionPosition.BEFORE_DIRECTORY,
+    argument_style=ArgumentStyle.OMITTED,
+    optional_values=('mxid',),
+    installation_script=True,
+)
 ADMIN = Route(
     'admin_identity.py',
     'admin-bot-',
@@ -117,7 +125,7 @@ COMMANDS = [
     Command(
         'admin bot show',
         'admin-bot-show',
-        purpose='Показать сохранённые теги панели и её единственного администратора.',
+        purpose='Показать сохранённые теги панели и её администраторов.',
         execution=ADMIN,
         existing=ADMIN,
     ),
@@ -129,6 +137,36 @@ COMMANDS = [
         execution=ADMIN,
         existing=ADMIN,
         optional_arguments=('administrator',),
+    ),
+    Command(
+        'admin access list',
+        'admin-access-list',
+        purpose='Показать аккаунты с доступом к панели администратора.',
+        execution=ADMIN_ACCESS,
+    ),
+    Command(
+        'admin access add',
+        'admin-access-add',
+        ('mxid',),
+        'Дать существующему местному аккаунту права администратора сервера и доступ к панели.',
+        execution=ADMIN_ACCESS,
+        stops='Панель администратора кратко перезапустится.',
+        data='Аккаунт получает полные права администратора сервера; данные и ключи сохраняются.',
+    ),
+    Command(
+        'admin access remove',
+        'admin-access-remove',
+        ('mxid',),
+        'Отозвать права выбранного аккаунта; первоначальный администратор сохраняется.',
+        execution=ADMIN_ACCESS,
+        stops='Панель администратора кратко перезапустится.',
+        data='Права выбранного аккаунта отзываются; аккаунт, данные и ключи сохраняются.',
+    ),
+    Command(
+        'admin access recover',
+        'admin-access-recover',
+        purpose='Завершить прерванное изменение доступа того же аккаунта.',
+        execution=ADMIN_ACCESS,
     ),
     Command(
         'update check',

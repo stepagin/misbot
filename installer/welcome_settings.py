@@ -23,6 +23,28 @@ def owner(root: Path) -> str:
     return '@matrix-admin:' + domain
 
 
+def administrators(root: Path) -> list[str]:
+    """Current access list; the primary contact remains the welcome recipient."""
+    root = Path(root)
+    identity = root / 'config/admin-panel-identity.json'
+    config = root / 'config/federation-bot.json'
+    if identity.exists():
+        saved = configuration.read_private_json(identity)
+        values = saved.get('administrator_mxids', [saved['administrator_mxid']])
+    elif config.exists():
+        values = json.loads(config.read_text()).get('administrator_mxids', [owner(root)])
+    else:
+        values = [owner(root)]
+    if (
+        not isinstance(values, list)
+        or not values
+        or len(values) > 20
+        or any(not isinstance(value, str) for value in values)
+    ):
+        raise RuntimeError('Invalid administrator access list')
+    return list(dict.fromkeys(values))
+
+
 def welcome_context(root: Path, domain: str, template: str = DEFAULT_WELCOME) -> WelcomeContext:
     root = Path(root)
     server_name = domain
