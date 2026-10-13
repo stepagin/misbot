@@ -863,6 +863,7 @@ def status():
         ('federation_recovery_pending', 'federation-transition.json'),
         ('homepage_recovery_pending', 'homepage-transition.json'),
         ('user_password_recovery_pending', 'secrets/user-password-pending.json'),
+        ('admin_access_recovery_pending', 'secrets/admin-access-pending.json'),
     ):
         marker = ROOT / relative
         pending[name] = marker.exists() or marker.is_symlink()
@@ -887,6 +888,10 @@ def status():
             import cli_commands
 
             actions.extend([cli_commands.recovery_command(operation, ROOT), command + operation])
+    if pending['admin_access_recovery_pending']:
+        actions.append(
+            'sudo misbot --directory ' + shlex.quote(str(ROOT)) + ' admin access recover'
+        )
     if pending['update_recovery_pending']:
         import cli_commands
 
@@ -933,11 +938,33 @@ def status():
     emit(
         'installation_status',
         applied_release=metadata.get('applied_release_version'),
+        operation_running=state_store.operation_running(ROOT),
+        installation_complete=bool(metadata.get('applied_release_version')),
+        decommissioned=bool(metadata.get('decommissioned')),
         **pending,
         next_actions=actions,
         message='Status does not resume operations or start writers. Wait for any active installer operation before using recovery commands; do not delete checkpoints. Stopped containers are included below',
     )
-    print(dc('ps', '--all'))
+    if os.environ.get('MISBOT_TERMINAL_UI') == '1':
+        rows = service_rows()
+        configured = json.loads(dc('config', '--format', 'json'))
+        expected = {
+            name for name, entry in configured['services'].items() if not entry.get('profiles')
+        }
+        rows.extend(
+            {'Service': name, 'State': 'missing'}
+            for name in sorted(expected - {row.get('Service') for row in rows})
+        )
+        for row in rows:
+            emit(
+                'service',
+                name=row.get('Service'),
+                state=row.get('State'),
+                health=row.get('Health', ''),
+                exit_code=row.get('ExitCode'),
+            )
+    else:
+        print(dc('ps', '--all'))
 
 
 def wait_writers(writers):
