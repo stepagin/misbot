@@ -369,7 +369,9 @@ class ReleaseDataMigrationTests(unittest.TestCase):
                 ):
                     update.perform_update(self.source, self.root, 'apply')
                     update.perform_update(self.source, self.root, 'apply')
-                self.assertEqual(update.release(self.root)['version'], '1.2.0')
+                self.assertEqual(
+                    update.release(self.root)['version'], update.release(self.source)['version']
+                )
                 self.assertEqual(migrations.check(self.root), 1)
                 for name in added:
                     self.assertEqual((self.root / name).read_bytes(), entries[name].read_bytes())

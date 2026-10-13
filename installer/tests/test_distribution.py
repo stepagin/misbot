@@ -1,6 +1,7 @@
 """The compact entry point launches the same runtime and keeps update compatibility."""
 
 import hashlib
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -25,7 +26,8 @@ class DistributionTests(unittest.TestCase):
                 check=True,
                 capture_output=True,
             )
-            compact = base / 'misbot-setup-1.2.0.tar.gz'
+            version = json.loads((ROOT / 'installer/release.json').read_text())['version']
+            compact = base / ('misbot-setup-' + version + '.tar.gz')
             checksum = compact.with_name(compact.name + '.sha256').read_text().split()[0]
             self.assertEqual(hashlib.sha256(compact.read_bytes()).hexdigest(), checksum)
             with tarfile.open(compact) as archive:
@@ -45,7 +47,7 @@ class DistributionTests(unittest.TestCase):
                         hashlib.sha256((manifest.parent / name).read_bytes()).hexdigest(), expected
                     )
             for args, expected in (
-                (['version'], 'Misbot 1.2.0'),
+                (['version'], 'Misbot ' + version),
                 (['help'], 'команды управления Matrix'),
             ):
                 result = subprocess.run(

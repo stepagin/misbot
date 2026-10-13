@@ -15,6 +15,35 @@ import update
 
 
 class UpdateTests(unittest.TestCase):
+    def test_build_updates_and_stable_promotion_preserve_downgrade_gate(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for installed, candidate, allowed in (
+                ('1.1.9', '1.2.0-build.1', True),
+                ('1.2.0-build.9', '1.2.0-build.123', True),
+                ('1.2.0-build.123', '1.2.0-build.9', False),
+                ('1.2.0-build.123', '1.2.0', True),
+                ('1.2.0', '1.2.0-build.124', False),
+            ):
+                with self.subTest(installed=installed, candidate=candidate):
+                    info = {
+                        'family': update.FAMILY,
+                        'version': installed,
+                        'update_scope': 'source-and-configuration',
+                        'data_schema_version': 1,
+                    }
+                    (root / 'release.json').write_text(json.dumps(info))
+                    self.assertEqual(update.release(root)['version'], installed)
+                    proposed = dict(info, version=candidate)
+                    metadata = {'applied_release_version': installed}
+                    if allowed:
+                        update.admit_release(root, metadata, proposed)
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, 'Downgrade'):
+                            update.admit_release(root, metadata, proposed)
+            with self.assertRaisesRegex(RuntimeError, 'Expected'):
+                update.version('1.2.0-build.invalid')
+
     def test_shared_admission_checks_versions_and_actual_schema_without_mutation(self):
         import sqlite3
 

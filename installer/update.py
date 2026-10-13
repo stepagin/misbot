@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import re
+import releases
 import signal
 import shutil
 import subprocess
@@ -273,9 +274,10 @@ def fail(message):
 
 
 def version(value):
-    if not isinstance(value, str) or not re.fullmatch(r'\d+\.\d+\.\d+', value):
-        fail('Release version must have major.minor.patch format')
-    return tuple(map(int, value.split('.')))
+    try:
+        return releases.product_version(value)
+    except ValueError as error:
+        fail(str(error))
 
 
 def validate_manifest(source):

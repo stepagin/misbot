@@ -10,12 +10,15 @@ import os
 from pathlib import Path
 import re
 import sys
+import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 VERSION = r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)'
+BUILD_VERSION = VERSION + r'(?:-build\.(0|[1-9][0-9]*))?'
+VERSION_FILES = ('installer/release.json', 'installer/SHA256SUMS')
 
 
 class Error(RuntimeError):
@@ -76,12 +79,13 @@ class GitHub:
 
 def release_version(branch='', root=ROOT):
     number = json.loads((root / 'installer/release.json').read_text())['version']
-    if not isinstance(number, str) or not re.fullmatch(VERSION, number):
-        raise Error('release.json must contain a stable major.minor.patch version')
-    if branch.startswith('release/') and branch != 'release/' + number:
-        raise Error('Release branch must be release/' + number + ' to match release.json')
+    if not isinstance(number, str) or not re.fullmatch(BUILD_VERSION, number):
+        raise Error('release.json must contain major.minor.patch or major.minor.patch-build.N')
+    base = number.split('-build.', 1)[0]
+    if branch.startswith('release/') and branch != 'release/' + base:
+        raise Error('Release branch must be release/' + base + ' to match release.json')
     notes = (root / 'installer/release-notes.md').read_text()
-    if not notes.splitlines() or notes.splitlines()[0] != '# Misbot ' + number:
+    if not notes.splitlines() or notes.splitlines()[0] != '# Misbot ' + base:
         raise Error('Release notes must describe the version in release.json')
     return number
 
@@ -111,8 +115,9 @@ def open_pr(api, branch, sha, number):
             'and deterministic release archive.\n\n'
             'Data migrations run automatically after a verified backup. '
             'Review compatibility and recovery before merging.\n\n'
-            'Merging this PR creates tag `' + number + '` on the merge commit. '
-            'GitHub Actions then publishes the verified installer and checksum.'
+            'Build versions use `' + number + '-build.N`. After merging, GitHub Actions '
+            'commits the stable version `' + number + '`, tags that commit, '
+            'and publishes its verified installer and checksum.'
         )
         try:
             result = api.call(
@@ -147,7 +152,7 @@ def tag_target(api, number):
     raise Error('Existing release tag does not resolve to a commit')
 
 
-def publish_tag(api, branch, sha, number):
+def merged_release(api, branch, sha, number):
     base = api.call('')['default_branch']
     if branch != base:
         raise Error('Release tags can only be created from the GitHub default branch')
@@ -164,13 +169,26 @@ def publish_tag(api, branch, sha, number):
         and (pr['head'].get('repo') or {}).get('full_name', '').lower() == api.repository.lower()
     ]
     if not matching:
-        print('No merged release PR at this commit; no tag created')
-        return None
+        print('No merged release PR at this commit; no release changes')
+        return False
     # A queued job may run after another commit lands: allow ancestors,
     # but refuse a foreign/detached commit or rewritten default-branch history.
     comparison = api.call('/compare/' + sha + '...' + urllib.parse.quote(base, safe=''))
     if comparison['status'] not in ('identical', 'ahead'):
         raise Error('CI commit is no longer on the GitHub default branch')
+    return True
+
+
+def publish_tag(api, branch, sha, number, original_sha=None):
+    if not re.fullmatch(VERSION, number):
+        raise Error('Only stable versions can be tagged')
+    if not merged_release(api, branch, original_sha or sha, number):
+        return None
+    if original_sha and original_sha != sha:
+        base = api.call('')['default_branch']
+        comparison = api.call('/compare/' + sha + '...' + urllib.parse.quote(base, safe=''))
+        if comparison['status'] not in ('identical', 'ahead'):
+            raise Error('Prepared release commit is no longer on the GitHub default branch')
     current = tag_target(api, number)
     if current is not None:
         if current != sha:
@@ -189,21 +207,166 @@ def publish_tag(api, branch, sha, number):
     return number
 
 
+def git(root, *args, env=None):
+    result = subprocess.run(
+        ['git', *args], cwd=root, env=env, text=True, capture_output=True, check=False
+    )
+    if result.returncode:
+        raise Error('Git operation failed (' + args[0] + '); check branch permissions and history')
+    return result.stdout.strip()
+
+
+def clean_checkout(root):
+    if git(root, 'status', '--porcelain', '--untracked-files=no'):
+        raise Error('Release automation requires a clean tracked checkout')
+
+
+def prepare_version(root, sha, number):
+    """Create the same local commit on every retry of the original event."""
+    clean_checkout(root)
+    if git(root, 'rev-parse', 'HEAD') != sha:
+        raise Error('Checkout must match the original event commit')
+    subprocess.run([sys.executable, 'installer/build.py', '--check'], cwd=root, check=True)
+    path = root / VERSION_FILES[0]
+    metadata = json.loads(path.read_text())
+    if metadata['version'] == number:
+        return sha
+    metadata['version'] = number
+    path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + '\n')
+    subprocess.run([sys.executable, 'installer/build.py'], cwd=root, check=True)
+    changed = set(git(root, 'diff', '--name-only').splitlines())
+    if not changed <= set(VERSION_FILES):
+        raise Error('Version preparation changed unexpected tracked files')
+    git(root, 'add', '--', *VERSION_FILES)
+    staged = set(git(root, 'diff', '--cached', '--name-only').splitlines())
+    if not staged or not staged <= set(VERSION_FILES):
+        raise Error('Version commit contains unexpected files')
+    git(root, 'diff', '--cached', '--check')
+    date = git(root, 'show', '-s', '--format=%cI', sha)
+    environment = dict(os.environ)
+    environment.update(
+        GIT_AUTHOR_NAME='github-actions[bot]',
+        GIT_COMMITTER_NAME='github-actions[bot]',
+        GIT_AUTHOR_EMAIL='41898282+github-actions[bot]@users.noreply.github.com',
+        GIT_COMMITTER_EMAIL='41898282+github-actions[bot]@users.noreply.github.com',
+        GIT_AUTHOR_DATE=date,
+        GIT_COMMITTER_DATE=date,
+    )
+    git(
+        root,
+        '-c',
+        'commit.gpgsign=false',
+        'commit',
+        '-m',
+        'chore: version ' + number,
+        env=environment,
+    )
+    clean_checkout(root)
+    return git(root, 'rev-parse', 'HEAD')
+
+
+def prepare(api, branch, sha, run_number, event, ref_type, root=ROOT):
+    number = release_version(branch if ref_type == 'branch' else '', root)
+    base = number.split('-build.', 1)[0]
+    state = dict(kind='check', branch=branch, original=sha, prepared=sha, version=number)
+    clean_checkout(root)
+    if git(root, 'rev-parse', 'HEAD') != sha:
+        raise Error('Checkout must match the original event commit')
+    if ref_type == 'tag':
+        if number != base or branch.removeprefix('v') != number:
+            raise Error('Release tag must match a stable version in release.json')
+        state['kind'] = 'tag'
+    elif event == 'push' and branch.startswith('release/'):
+        if not re.fullmatch(r'[1-9][0-9]*', run_number):
+            raise Error('GITHUB_RUN_NUMBER must be a positive integer')
+        previous = int(number.split('-build.')[1]) if '-build.' in number else 0
+        number = base + '-build.' + str(max(previous + 1, int(run_number)))
+        state['kind'] = 'build'
+    elif event == 'push' and branch == api.call('')['default_branch']:
+        if merged_release(api, branch, sha, base):
+            number = base
+            state['kind'] = 'stable'
+    if state['kind'] in ('build', 'stable'):
+        state['prepared'] = prepare_version(root, sha, number)
+        state['version'] = number
+    return state
+
+
+def push_prepared(root, branch, original, prepared, allow_descendant=False):
+    ref = 'refs/heads/' + branch
+    remote = git(root, 'ls-remote', '--refs', 'origin', ref).split()
+    if not remote:
+        raise Error('Release branch no longer exists')
+    if remote[0] == prepared:
+        return
+    if remote[0] != original:
+        if allow_descendant:
+            # A stable retry may finish tagging an already-pushed commit after
+            # newer work landed. Fetch and prove ancestry without changing the ref.
+            git(root, 'fetch', '--no-tags', 'origin', ref)
+            current = git(root, 'rev-parse', 'FETCH_HEAD')
+            if git(root, 'merge-base', prepared, current) == prepared:
+                return
+        raise Error('Release branch advanced; refusing to overwrite newer commits')
+    # A normal push also rejects a concurrent change after ls-remote.
+    git(root, 'push', 'origin', prepared + ':' + ref)
+
+
+def finalize(api, state, root=ROOT):
+    clean_checkout(root)
+    if git(root, 'rev-parse', 'HEAD') != state['prepared']:
+        raise Error('Validated checkout differs from the prepared release commit')
+    if release_version(root=root) != state['version']:
+        raise Error('Validated release metadata differs from the prepared version')
+    kind = state['kind']
+    if kind == 'tag':
+        return state['branch']
+    if kind not in ('build', 'stable'):
+        return None
+    branch, original, prepared = (state[key] for key in ('branch', 'original', 'prepared'))
+    if prepared != original and git(root, 'rev-parse', 'HEAD^') != original:
+        raise Error('Prepared commit must be a direct child of the original event')
+    base = state['version'].split('-build.', 1)[0]
+    if kind == 'stable':
+        if not merged_release(api, branch, original, base):
+            raise Error('The original commit is no longer an authorized release merge')
+        current = tag_target(api, base)
+        if current is not None and current != prepared:
+            raise Error('Release tag already points to another commit; it will not be moved')
+    push_prepared(root, branch, original, prepared, allow_descendant=kind == 'stable')
+    if kind == 'build':
+        open_pr(api, branch, prepared, base)
+        return None
+    return publish_tag(api, branch, prepared, base, original_sha=original)
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=('validate', 'open-pr', 'tag'))
+    parser.add_argument('action', choices=('validate', 'prepare', 'finalize'))
     args = parser.parse_args()
     branch = os.environ.get('GITHUB_HEAD_REF') or os.environ.get('GITHUB_REF_NAME', '')
-    number = release_version(branch)
     if args.action == 'validate':
-        print('Validated Misbot version', number)
+        print('Validated Misbot version', release_version(branch))
         return
     api = GitHub(os.environ.get('GITHUB_REPOSITORY', ''), os.environ.get('GH_TOKEN', ''))
     sha = commit_sha(os.environ.get('GITHUB_SHA', ''))
-    if args.action == 'open-pr':
-        open_pr(api, branch, sha, number)
+    state_path = ROOT / git(ROOT, 'rev-parse', '--git-path', 'misbot-release-state.json')
+    if args.action == 'prepare':
+        state = prepare(
+            api,
+            branch,
+            sha,
+            os.environ.get('GITHUB_RUN_NUMBER', ''),
+            os.environ.get('GITHUB_EVENT_NAME', ''),
+            os.environ.get('GITHUB_REF_TYPE', ''),
+        )
+        state_path.write_text(json.dumps(state))
+        print('Prepared Misbot version', state['version'])
     else:
-        tag = publish_tag(api, branch, sha, number)
+        state = json.loads(state_path.read_text())
+        if state['original'] != sha or state['branch'] != branch:
+            raise Error('Release state differs from the workflow event')
+        tag = finalize(api, state)
         if tag and os.environ.get('GITHUB_OUTPUT'):
             with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
                 output.write('release_tag=' + tag + '\n')
@@ -212,7 +375,7 @@ def main():
 if __name__ == '__main__':
     try:
         main()
-    except (Error, OSError, ValueError, KeyError) as error:
+    except (Error, OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
         message = (
             str(error)
             if isinstance(error, Error)

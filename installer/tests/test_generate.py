@@ -26,7 +26,10 @@ class GeneratorTests(unittest.TestCase):
                 ['bash', str(BUNDLE / 'install.sh'), action], capture_output=True, text=True
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(result.stdout.strip(), 'Misbot 1.2.0')
+            self.assertEqual(
+                result.stdout.strip(),
+                'Misbot ' + json.loads((BUNDLE / 'release.json').read_text())['version'],
+            )
 
     def test_known_provider_pair_code_translates_to_safe_full_path_continuation(self):
         import lifecycle
@@ -104,7 +107,7 @@ class GeneratorTests(unittest.TestCase):
             )
             self.assertEqual(
                 json.loads(archive.extractfile('matrix-installer/release.json').read())['version'],
-                '1.2.0',
+                json.loads((BUNDLE / 'release.json').read_text())['version'],
             )
             self.assertEqual(
                 archive.extractfile('matrix-installer/LICENSE').read(),

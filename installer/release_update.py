@@ -39,8 +39,8 @@ def queue(root, number, event):
         )
     current = releases.installed(root)
     if (
-        releases.version(number) <= releases.version(current)
-        or releases.version(number)[0] != releases.version(current)[0]
+        releases.product_version(number.removeprefix('v')) <= releases.product_version(current)
+        or releases.version(number)[0] != releases.product_version(current)[0]
     ):
         raise RuntimeError(
             'Обновление уже установлено или требует отдельного решения о major-версии.'
@@ -110,9 +110,9 @@ def apply(root, number=None, progress=None):
             'Последняя версия изменилась после подтверждения. Запросите «версия» и подтвердите обновление снова.'
         )
     current = releases.installed(root)
-    if releases.version(release['version']) <= releases.version(current):
+    if releases.product_version(release['version']) <= releases.product_version(current):
         return {'installed': current, 'detail': 'Последняя стабильная версия уже установлена.'}
-    if releases.version(release['version'])[0] != releases.version(current)[0]:
+    if releases.version(release['version'])[0] != releases.product_version(current)[0]:
         raise RuntimeError(
             'Major-обновление требует отдельной инструкции и локального решения администратора.'
         )

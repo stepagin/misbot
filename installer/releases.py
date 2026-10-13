@@ -25,6 +25,22 @@ def version(value):
     return tuple(map(int, value.removeprefix('v').split('.')))
 
 
+def product_version(value):
+    """Order numbered development builds before the corresponding stable release."""
+    match = (
+        re.fullmatch(
+            r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-build\.(0|[1-9][0-9]*))?',
+            value,
+        )
+        if isinstance(value, str)
+        else None
+    )
+    if match is None:
+        raise ValueError('Expected major.minor.patch or major.minor.patch-build.number')
+    major, minor, patch, build = match.groups()
+    return (int(major), int(minor), int(patch), build is None, int(build or 0))
+
+
 def https(url, limit):
     def valid(target):
         parsed = urllib.parse.urlsplit(target)
@@ -106,7 +122,10 @@ def latest(fetch=https):
 
 
 def minor_update(installed, candidate):
-    old, new = version(installed), version(candidate)
+    old, new = (
+        product_version(value.removeprefix('v') if isinstance(value, str) else value)
+        for value in (installed, candidate)
+    )
     return new[0] == old[0] and new[1] > old[1]
 
 
@@ -128,7 +147,9 @@ def comparison(root, release):
     return {
         'installed': current,
         'latest': release['version'] if release else None,
-        'update_available': bool(release and version(release['version']) > version(current)),
+        'update_available': bool(
+            release and product_version(release['version']) > product_version(current)
+        ),
         'url': release['url'] if release else None,
         'notes': release['notes'] if release else '',
         'update_supported': portable,

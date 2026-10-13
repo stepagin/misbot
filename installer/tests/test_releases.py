@@ -25,6 +25,7 @@ class ReleasesTests(unittest.TestCase):
                     item('v1.2.0'),
                     item('1.10.1'),
                     item('v1.11.0-rc1'),
+                    item('v2.0.0-build.123'),
                     {**item('9.0.0'), 'draft': True},
                     {**item('10.0.0'), 'prerelease': True},
                 ]
@@ -46,6 +47,39 @@ class ReleasesTests(unittest.TestCase):
         self.assertTrue(releases.minor_update('1.1.9', '1.2.0'))
         self.assertFalse(releases.minor_update('1.1.0', '1.1.9'))
         self.assertFalse(releases.minor_update('1.1.0', '2.0.0'))
+
+    def test_build_versions_are_ordered_numerically_below_stable(self):
+        ordered = ('1.1.9', '1.2.0-build.9', '1.2.0-build.123', '1.2.0', '1.2.1-build.1')
+        self.assertEqual(sorted(reversed(ordered), key=releases.product_version), list(ordered))
+        self.assertTrue(releases.minor_update('1.1.0-build.2', '1.2.0'))
+        self.assertTrue(releases.minor_update('v1.1.0', 'v1.2.0'))
+        self.assertFalse(releases.minor_update('1.2.0-build.2', '1.2.0'))
+        for invalid in (
+            '1.2.0-build.-1',
+            '1.2.0-build.01',
+            '1.2.0-rc.1',
+            '01.2.0',
+            'v1.2.0',
+            '1.2.0-build.1٢',
+            None,
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                releases.product_version(invalid)
+        with self.assertRaises(ValueError):
+            releases.version('1.2.0-build.123')
+
+    def test_stable_release_is_available_to_installed_build(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            metadata = {'applied_release_version': '1.2.0-build.123'}
+            (root / 'installation.json').write_text(json.dumps(metadata))
+            for candidate, available in (('1.1.9', False), ('1.2.0', True), ('1.3.0', True)):
+                with self.subTest(candidate=candidate):
+                    result = releases.comparison(
+                        root, {'version': candidate, 'url': '', 'notes': ''}
+                    )
+                    self.assertEqual(result['installed'], '1.2.0-build.123')
+                    self.assertEqual(result['update_available'], available)
 
     def archive(self, unsafe=None):
         files = {name: b'# public fixture\n' for name in update.ESSENTIAL}
