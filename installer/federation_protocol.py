@@ -10,6 +10,8 @@ import ipaddress
 import json
 from pathlib import Path
 import secrets
+import queue
+import threading
 import socket
 import ssl
 import subprocess
@@ -25,6 +27,8 @@ API = '/_misbot/v1/exchange'
 LIMIT = 32768
 REQUEST_TTL = 30 * 86400
 INVITATION_CAPABILITY = 'federation-invites'
+NETWORK_TIMEOUT = 10
+_RESOLVERS = threading.BoundedSemaphore(4)
 
 
 class ProtocolError(RuntimeError):
@@ -146,25 +150,80 @@ def validate_document(value, server):
     return value
 
 
+def resolve(server, deadline):
+    """Bound DNS latency and outstanding resolver threads, including timed out DNS."""
+    slots = _RESOLVERS
+    if not slots.acquire(blocking=False):
+        raise ProtocolError('dns_busy')
+    result = queue.Queue(maxsize=1)
+
+    def lookup():
+        try:
+            result.put((socket.getaddrinfo(server, 443, type=socket.SOCK_STREAM), None))
+        except Exception as error:
+            result.put((None, error))
+        finally:
+            slots.release()
+
+    try:
+        threading.Thread(target=lookup, daemon=True).start()
+    except RuntimeError:
+        slots.release()
+        raise ProtocolError('dns_busy') from None
+    try:
+        addresses, error = result.get(timeout=max(0, deadline - time.monotonic()))
+    except queue.Empty:
+        raise ProtocolError('timeout') from None
+    if error:
+        raise error
+    return addresses
+
+
 def https(server, path, body=None):
     server = schema.domain(server)
     if path not in (DISCOVERY, API, '/.well-known/matrix/server', '/_matrix/federation/v1/version'):
         raise ProtocolError('unsafe_path')
+    deadline = time.monotonic() + NETWORK_TIMEOUT
+    expired = threading.Event()
+    sockets = []
+
+    def remaining():
+        duration = deadline - time.monotonic()
+        if duration <= 0 or expired.is_set():
+            raise ProtocolError('timeout')
+        return duration
+
+    def abort():
+        expired.set()
+        for active in sockets:
+            try:
+                active.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    timer = threading.Timer(NETWORK_TIMEOUT, abort)
+    timer.daemon = True
+    timer.start()
     try:
-        addresses = socket.getaddrinfo(server, 443, type=socket.SOCK_STREAM)
+        addresses = resolve(server, deadline)
+        remaining()
         if not addresses or any(not ipaddress.ip_address(row[4][0]).is_global for row in addresses):
             raise ProtocolError('non_public_destination')
         # Pin this resolution; TLS still authenticates the original hostname/SNI.
         family, kind, proto, _, address = addresses[0]
         sock = socket.socket(family, kind, proto)
-        sock.settimeout(10)
+        sockets.append(sock)
+        sock.settimeout(remaining())
         try:
             sock.connect(address)
+            sock.settimeout(remaining())
             tls = ssl.create_default_context().wrap_socket(sock, server_hostname=server)
+            sockets.append(tls)
+            tls.settimeout(remaining())
         except BaseException:
             sock.close()
             raise
-        connection = http.client.HTTPSConnection(server, timeout=10)
+        connection = http.client.HTTPSConnection(server, timeout=remaining())
         connection.sock = tls
         try:
             connection.request(
@@ -173,8 +232,10 @@ def https(server, path, body=None):
                 body=canonical(body) if body is not None else None,
                 headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
             )
+            tls.settimeout(remaining())
             response = connection.getresponse()
             raw = response.read(LIMIT + 1)
+            remaining()
             if len(raw) > LIMIT:
                 raise ProtocolError('response_too_large')
             if response.status != 200:
@@ -197,11 +258,17 @@ def https(server, path, body=None):
     except socket.gaierror:
         raise ProtocolError('dns_failed') from None
     except ssl.SSLError:
-        raise ProtocolError('tls_failed') from None
+        raise ProtocolError('timeout' if expired.is_set() else 'tls_failed') from None
     except (TimeoutError, socket.timeout):
         raise ProtocolError('timeout') from None
     except (ValueError, OSError, http.client.HTTPException):
-        raise ProtocolError('connection_or_response_failed') from None
+        raise ProtocolError(
+            'timeout' if expired.is_set() else 'connection_or_response_failed'
+        ) from None
+    finally:
+        timer.cancel()
+        for active in sockets:
+            active.close()
 
 
 def discover(server, transport=https):
@@ -232,7 +299,7 @@ def envelope(doc, key, target, body):
     return {'payload': value, 'signature': sign(key, value)}
 
 
-def authenticate(request, own, remote, seen, now=None):
+def validate_envelope(request, own=None, remote=None, seen=(), now=None):
     now = int(time.time()) if now is None else now
     import re
 
@@ -240,7 +307,6 @@ def authenticate(request, own, remote, seen, now=None):
         if not isinstance(request, dict) or set(request) != {'payload', 'signature'}:
             raise ProtocolError('invalid_request')
         value = request['payload']
-        nonce = value['nonce']
         if not isinstance(value, dict) or set(value) != {
             'protocol',
             'sender',
@@ -256,23 +322,54 @@ def authenticate(request, own, remote, seen, now=None):
             raise ProtocolError('invalid_request')
         if type(value['protocol']) is not int or value['protocol'] != VERSION:
             raise ProtocolError('unsupported_version')
+        nonce = value['nonce']
         if (
-            value['sender'] != remote['server_name']
-            or value['instance_id'] != remote['instance_id']
-            or value['recipient'] != own['server_name']
-            or value['recipient_instance'] != own['instance_id']
+            not isinstance(value['sender'], str)
+            or schema.domain(value['sender']) != value['sender']
+            or not isinstance(value['recipient'], str)
+            or schema.domain(value['recipient']) != value['recipient']
+            or not isinstance(value['instance_id'], str)
+            or not re.fullmatch('[0-9a-f]{32}', value['instance_id'])
+            or not isinstance(value['recipient_instance'], str)
+            or not re.fullmatch('[0-9a-f]{32}', value['recipient_instance'])
             or value['method'] != 'POST'
             or value['path'] != API
+            or (
+                own
+                and (
+                    value['recipient'] != own['server_name']
+                    or value['recipient_instance'] != own['instance_id']
+                )
+            )
+            or (
+                remote
+                and (
+                    value['sender'] != remote['server_name']
+                    or value['instance_id'] != remote['instance_id']
+                )
+            )
         ):
             raise ProtocolError('signature_identity')
+        if not isinstance(request['signature'], str):
+            raise ProtocolError('invalid_signature')
+        try:
+            if len(base64.b64decode(request['signature'], validate=True)) != 384:
+                raise ProtocolError('invalid_signature')
+        except ValueError:
+            raise ProtocolError('invalid_signature') from None
         if type(value['timestamp']) is not int or abs(now - value['timestamp']) > 300:
             raise ProtocolError('expired_request')
-        if not re.fullmatch('[0-9a-f]{32}', nonce):
+        if not isinstance(nonce, str) or not re.fullmatch('[0-9a-f]{32}', nonce):
             raise ProtocolError('invalid_nonce')
         if nonce in seen:
             raise ProtocolError('replay')
-        if not verify(remote['public_key'], value, request['signature']):
-            raise ProtocolError('invalid_signature')
         return value
-    except (KeyError, TypeError):
+    except (KeyError, TypeError, ValueError):
         raise ProtocolError('invalid_request') from None
+
+
+def authenticate(request, own, remote, seen, now=None):
+    value = validate_envelope(request, own, remote, seen, now)
+    if not verify(remote['public_key'], value, request['signature']):
+        raise ProtocolError('invalid_signature')
+    return value

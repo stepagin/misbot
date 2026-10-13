@@ -1,5 +1,8 @@
 import copy
+from contextlib import contextmanager
 import hashlib
+import fcntl
+import threading
 import json
 import os
 from pathlib import Path
@@ -84,6 +87,132 @@ class FederationTests(unittest.TestCase):
 
     def invite(self):
         return self.a.operate('invite', 'b.example', actor='@admin:a.example')['id']
+
+    def test_receive_discovery_holds_neither_writer_lock_nor_controller_mutex(self):
+        body = {
+            'action': 'invite',
+            'request_id': 'MB-' + 'a' * 32,
+            'expires_at': int(time.time()) + 100,
+            'approved': True,
+            'applied': False,
+        }
+        message = protocol.envelope(self.a.doc(), self.a.key, self.b.doc(), body)
+        work = threading.Lock()
+        original = self.b.transport
+
+        def transport(server, path, body=None):
+            self.assertTrue(work.acquire(blocking=False))
+            work.release()
+            # Independent flock descriptor detects a held lock even when the
+            # operation_guard environment would allow reentrant child work.
+            fd = os.open(
+                state_store.operation_lock_path(self.b.root), os.O_CREAT | os.O_RDWR, 0o600
+            )
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
+            return original(server, path, body)
+
+        with patch.object(self.b, 'transport', side_effect=transport):
+            reply = federation_service.receive_call(self.b, message, work)
+        self.assertEqual(reply['payload']['body']['state'], 'pending')
+        with self.assertRaisesRegex(protocol.ProtocolError, 'replay'):
+            federation_service.receive_call(self.b, message, work)
+
+    def test_receive_revalidates_concurrent_api_identity_pin_nonce_and_admission(self):
+        original = self.b.load()
+        body = {
+            'action': 'invite',
+            'request_id': 'MB-' + 'a' * 32,
+            'expires_at': int(time.time()) + 100,
+            'approved': True,
+            'applied': False,
+        }
+        message = protocol.envelope(self.a.doc(), self.a.key, self.b.doc(), body)
+        remote = self.a.doc()
+        for change, code in (
+            ('api', 'api_disabled'),
+            ('own', 'identity_mismatch'),
+            ('peer', 'peer_identity_changed'),
+            ('nonce', 'replay'),
+        ):
+            self.b.save(original)
+
+            def discover(server, path, body=None):
+                data = self.b.load()
+                if change == 'api':
+                    data['api_enabled'] = False
+                elif change == 'own':
+                    data['instance_id'] = 'f' * 32
+                elif change == 'peer':
+                    data['peers'][server] = {'document': {**remote, 'key_id': 'f' * 64}}
+                else:
+                    data['nonces'][message['payload']['nonce']] = int(time.time())
+                self.b.save(data)
+                return remote
+
+            with (
+                self.subTest(change=change),
+                patch.object(self.b, 'transport', side_effect=discover),
+            ):
+                with self.assertRaisesRegex(protocol.ProtocolError, code):
+                    self.b.receive(message)
+                self.assertEqual(self.b.load()['requests'], {})
+        self.b.save(original)
+        with patch.object(
+            self.b, 'ready', side_effect=protocol.ProtocolError('installation_pending')
+        ):
+            with self.assertRaisesRegex(protocol.ProtocolError, 'installation_pending'):
+                self.b.receive(message)
+        self.assertEqual(self.b.load(), original)
+
+    def test_receive_rechecks_signed_timestamp_after_verification_before_commit(self):
+        body = {
+            'action': 'invite',
+            'request_id': 'MB-' + 'a' * 32,
+            'expires_at': int(time.time()) + 1000,
+            'approved': True,
+            'applied': False,
+        }
+        message = protocol.envelope(self.a.doc(), self.a.key, self.b.doc(), body)
+        before = self.b.path.read_bytes()
+
+        @contextmanager
+        def commit_guard():
+            with patch.object(
+                protocol.time, 'time', return_value=message['payload']['timestamp'] + 301
+            ):
+                yield
+
+        with self.assertRaisesRegex(protocol.ProtocolError, 'expired_request'):
+            self.b.receive(message, commit_guard=commit_guard)
+        self.assertEqual(self.b.path.read_bytes(), before)
+
+    def test_receive_malformed_input_never_discovers_or_locks(self):
+        body = {
+            'action': 'invite',
+            'request_id': 'MB-' + 'a' * 32,
+            'expires_at': int(time.time()) + 100,
+            'approved': True,
+            'applied': False,
+        }
+        valid = protocol.envelope(self.a.doc(), self.a.key, self.b.doc(), body)
+        invalid_body = copy.deepcopy(valid)
+        invalid_body['payload']['body']['approved'] = 'yes'
+        invalid_nonce = copy.deepcopy(valid)
+        invalid_nonce['payload']['nonce'] = []
+        for message in ({}, {'payload': {'sender': 'a.example'}}, invalid_body, invalid_nonce):
+            with (
+                self.subTest(message=message),
+                patch.object(self.b, 'transport') as transport,
+                patch.object(self.b, 'guard') as guard,
+            ):
+                with self.assertRaises(protocol.ProtocolError):
+                    self.b.receive(message)
+                transport.assert_not_called()
+                guard.assert_not_called()
 
     def test_handshake_requires_both_local_approvals(self):
         rid = self.invite()

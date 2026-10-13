@@ -49,6 +49,7 @@ names = [
     'federation.py',
     'federation_runtime.py',
     'federation_protocol.py',
+    'federation_store.py',
     'federation_service.py',
     'federation_admin_api.py',
     'federation_matrix_api.py',

@@ -229,11 +229,10 @@ class ServiceTests(unittest.TestCase):
                 self.assertEqual(document['server_name'], saved['server_name'])
                 self.assertNotIn('jobs', document)
                 self.assertNotIn('private_key', document)
-                # receive() must acquire the real writer guard before validating
-                # or applying even this malformed remote mutation request.
+                # Malformed input is rejected offline, without the writer guard.
                 self.assertEqual(
                     request('POST', '/_misbot/v1/exchange', b'{}'),
-                    (503, {'code': 'installation_busy_or_pending'}),
+                    (400, {'code': 'invalid_request'}),
                 )
                 time.sleep(1.1)  # At least one automatic recovery attempt fails busy.
                 self.assertEqual(backend.path.read_bytes(), before)

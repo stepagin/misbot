@@ -1,6 +1,7 @@
 """Shared federation backend. Remote exchange has no general admin dispatcher."""
 
 import argparse
+from contextlib import nullcontext
 import hashlib
 import json
 import os
@@ -15,6 +16,7 @@ import urllib.parse
 import configuration as config
 import configuration_schema as schema
 import federation_protocol as protocol
+import federation_store
 import lifecycle
 import state_store
 
@@ -57,6 +59,7 @@ def failure(code, root=None, action=None):
         'peer_upgrade_required': 'Другому серверу требуется обновление Misbot для приглашений сроком 30 дней.',
         'unsupported_version': 'Версия протокола другого сервера несовместима. Проверьте версии Misbot обеих установок.',
         'local_state_or_input': 'Не удалось прочитать сохранённые настройки или состояние федерации. Откройте «Состояние и работа сервера» → «Проверить настройки»; сохраните checkpoints перед восстановлением.',
+        'federation_state_capacity': 'Хранилище федерации достигло лимита. Прежний checkpoint сохранён; проверьте его приватную копию. Не удаляйте заявки и события: они защищают от повторного применения.',
         'invalid_operation_state': 'Сохранённое состояние операций не прошло проверку. Сохраните checkpoint федерации и проверьте его приватную копию; новая операция не запускалась.',
     }
     return {
@@ -98,7 +101,7 @@ def setup(root, metadata, preview=False):
     if not key.exists():
         state_store.create_rsa_key(key)
     if not path.exists():
-        state_store.write_json(
+        federation_store.write(
             path,
             {
                 'format': 1,
@@ -111,7 +114,7 @@ def setup(root, metadata, preview=False):
                 'api_enabled': True,
             },
         )
-    saved = config.read_private_json(path)
+    saved = federation_store.read(path)
     if saved.get('format') != 1 or saved.get('server_name') != metadata['domain']:
         raise RuntimeError('Foreign federation identity')
     metadata['federation_seeded'] = True
@@ -139,7 +142,7 @@ class Backend:
         return self.root / 'data/federation/identity.pem'
 
     def load(self):
-        data = config.read_private_json(self.path)
+        data = federation_store.read(self.path)
         if (
             not isinstance(data, dict)
             or data.get('format') != 1
@@ -153,7 +156,7 @@ class Backend:
         return data
 
     def save(self, data):
-        state_store.write_json(self.path, data)
+        federation_store.write(self.path, data)
 
     def guard(self):
         return state_store.operation_guard(self.root)
@@ -496,6 +499,11 @@ class Backend:
 
     def peer(self, data, server):
         doc = protocol.discover(server, self.transport)
+        self.check_peer(data, server, doc)
+        return doc
+
+    @staticmethod
+    def check_peer(data, server, doc):
         old = data['peers'].get(server)
         pinned = [old['document']] if old else []
         pinned.extend(
@@ -507,7 +515,6 @@ class Backend:
             saved[k] != doc[k] for saved in pinned for k in ('instance_id', 'key_id', 'bot_mxid')
         ):
             raise protocol.ProtocolError('peer_identity_changed')
-        return doc
 
     @staticmethod
     def require_invitation_support(document):
@@ -683,124 +690,140 @@ class Backend:
             }
         return self.view(item)
 
-    def receive(self, message):
-        with self.guard():
-            self.ready()
-            data = self.load()
-            self.require_api(data)
-            own = self.doc(data)
-            try:
-                sender = message['payload']['sender']
-                if not isinstance(sender, str):
-                    raise ValueError()
-                server = schema.domain(sender)
-            except (ValueError, KeyError, TypeError):
-                raise protocol.ProtocolError('invalid_request') from None
-            remote = self.peer(data, server)
-            data['nonces'] = {k: v for k, v in data['nonces'].items() if v > time.time() - 600}
-            value = protocol.authenticate(message, own, remote, data['nonces'])
-            body = value['body']
-            if not isinstance(body, dict) or set(body) - {
-                'action',
-                'request_id',
-                'expires_at',
-                'approved',
-                'applied',
-            }:
-                raise protocol.ProtocolError('invalid_request')
-            rid = body.get('request_id')
-            action = body.get('action')
-            if not isinstance(rid, str) or not REQUEST.fullmatch(rid):
-                raise protocol.ProtocolError('invalid_request_id')
-            if action not in ('invite', 'status', 'decision', 'cancelled', 'rejected'):
-                raise protocol.ProtocolError('remote_operation_denied')
-            if type(body.get('approved')) is not bool or type(body.get('applied')) is not bool:
-                raise protocol.ProtocolError('invalid_request')
-            data['nonces'][value['nonce']] = int(time.time())
-            self.save(data)
-            item = data['requests'].get(rid)
-            if action in ('invite', 'cancelled') and item is None:
-                expiration = body.get('expires_at')
-                # Retired requests can have an elapsed deadline. An unknown
-                # cancellation records a tombstone before a delayed invite.
-                if (
-                    type(expiration) is not int
-                    or not 0 < expiration <= value['timestamp'] + protocol.REQUEST_TTL
-                    or (action == 'invite' and expiration <= time.time())
-                ):
-                    raise protocol.ProtocolError('invalid_expiration')
-                if len(data['requests']) >= 1000:
-                    raise protocol.ProtocolError('request_capacity')
-                now = int(time.time())
-                received = data.setdefault('incoming_invitation_at', {})
-                if action == 'invite' and now - received.get(server, 0) < INVITATION_INTERVAL:
-                    raise protocol.ProtocolError('invitation_rate_limit')
-                old = self.active_for(data, server)
-                if action == 'invite' and old:
-                    if (
-                        old['direction'] != 'outgoing'
-                        or old['state'] != 'pending'
-                        or old.get('local_applied')
-                        or old.get('remote_applied')
-                        or old.get('remote_approval')
-                    ):
-                        raise protocol.ProtocolError('pending_request_exists')
-                    # Crossed requests converge to one ID without transferring
-                    # consent. The receiver must explicitly approve the winner.
-                    if old['id'] < rid:
-                        raise protocol.ProtocolError('pending_request_exists')
-                    old.update(state='cancelled', superseded_by=rid)
-                    self.save(data)
-                connected = server in self.servers()
-                item = {
-                    'id': rid,
-                    'server': server,
-                    'document': remote,
-                    'direction': 'incoming',
-                    'actor': None,
-                    'expires_at': expiration,
-                    'state': 'cancelled' if action == 'cancelled' or connected else 'pending',
-                    'local_approval': False,
-                    'remote_approval': body['approved'],
-                    'local_applied': False,
-                    'remote_applied': False,
-                    'entry_preexisted': connected,
-                }
-                data['requests'][rid] = item
-                if action == 'invite':
-                    received[server] = now
+    @staticmethod
+    def validate_remote_body(value):
+        body = value['body']
+        if not isinstance(body, dict) or set(body) - {
+            'action',
+            'request_id',
+            'expires_at',
+            'approved',
+            'applied',
+        }:
+            raise protocol.ProtocolError('invalid_request')
+        rid = body.get('request_id')
+        if not isinstance(rid, str) or not REQUEST.fullmatch(rid):
+            raise protocol.ProtocolError('invalid_request_id')
+        if body.get('action') not in ('invite', 'status', 'decision', 'cancelled', 'rejected'):
+            raise protocol.ProtocolError('remote_operation_denied')
+        if type(body.get('approved')) is not bool or type(body.get('applied')) is not bool:
+            raise protocol.ProtocolError('invalid_request')
+        if type(body.get('expires_at')) is not int or not 0 < body['expires_at'] <= (
+            value['timestamp'] + protocol.REQUEST_TTL
+        ):
+            raise protocol.ProtocolError('invalid_expiration')
+        return body
+
+    def receive(self, message, commit_guard=None):
+        # Reject malformed unauthenticated input before state access or discovery.
+        value = protocol.validate_envelope(message)
+        body = self.validate_remote_body(value)
+        server = value['sender']
+        snapshot = self.load()
+        self.require_api(snapshot)
+        own = self.doc(snapshot)
+        protocol.validate_envelope(message, own=own, seen=snapshot['nonces'])
+        remote = self.peer(snapshot, server)
+        protocol.authenticate(message, own, remote, snapshot['nonces'])
+        # Network and signature verification hold neither the installation guard
+        # nor the controller mutex. Recheck every mutable admission fact below.
+        with commit_guard() if commit_guard else nullcontext():
+            with self.guard():
+                self.ready()
+                data = self.load()
+                self.require_api(data)
+                if self.doc(data) != own:
+                    raise protocol.ProtocolError('identity_mismatch')
+                self.check_peer(data, server, remote)
+                data['nonces'] = {k: v for k, v in data['nonces'].items() if v > time.time() - 600}
+                value = protocol.validate_envelope(message, own, remote, data['nonces'])
+                rid = body['request_id']
+                action = body['action']
+                data['nonces'][value['nonce']] = int(time.time())
                 self.save(data)
-            item = self.request(data, rid)
-            if (
-                item['server'] != server
-                or item['document']['instance_id'] != remote['instance_id']
-                or item['document']['key_id'] != remote['key_id']
-            ):
-                raise protocol.ProtocolError('request_owner')
-            if action == 'rejected' and item['direction'] != 'outgoing':
-                raise protocol.ProtocolError('invalid_transition')
-            if action == 'invite' and item['direction'] != 'incoming':
-                raise protocol.ProtocolError('invalid_transition')
-            self.dismiss_connected(data, item)
-            if item['state'] in ACTIVE:
-                if action in ('cancelled', 'rejected'):
-                    # Removing policy is a SEPARATE local admin operation, never implicit rollback.
-                    item['state'] = action
-                else:
-                    if body['approved']:
-                        item['remote_approval'] = True
-                    item['remote_applied'] = item['remote_applied'] or body['applied']
+                item = data['requests'].get(rid)
+                if action in ('invite', 'cancelled') and item is None:
+                    expiration = body.get('expires_at')
+                    # Retired requests can have an elapsed deadline. An unknown
+                    # cancellation records a tombstone before a delayed invite.
+                    if (
+                        type(expiration) is not int
+                        or not 0 < expiration <= value['timestamp'] + protocol.REQUEST_TTL
+                        or (action == 'invite' and expiration <= time.time())
+                    ):
+                        raise protocol.ProtocolError('invalid_expiration')
+                    if len(data['requests']) >= 1000:
+                        raise protocol.ProtocolError('request_capacity')
+                    now = int(time.time())
+                    received = data.setdefault('incoming_invitation_at', {})
+                    if action == 'invite' and now - received.get(server, 0) < INVITATION_INTERVAL:
+                        raise protocol.ProtocolError('invitation_rate_limit')
+                    old = self.active_for(data, server)
+                    if action == 'invite' and old:
+                        if (
+                            old['direction'] != 'outgoing'
+                            or old['state'] != 'pending'
+                            or old.get('local_applied')
+                            or old.get('remote_applied')
+                            or old.get('remote_approval')
+                        ):
+                            raise protocol.ProtocolError('pending_request_exists')
+                        # Crossed requests converge to one ID without transferring
+                        # consent. The receiver must explicitly approve the winner.
+                        if old['id'] < rid:
+                            raise protocol.ProtocolError('pending_request_exists')
+                        old.update(state='cancelled', superseded_by=rid)
+                        self.save(data)
+                    connected = server in self.servers()
+                    item = {
+                        'id': rid,
+                        'server': server,
+                        'document': remote,
+                        'direction': 'incoming',
+                        'actor': None,
+                        'expires_at': expiration,
+                        'state': 'cancelled' if action == 'cancelled' or connected else 'pending',
+                        'local_approval': False,
+                        'remote_approval': body['approved'],
+                        'local_applied': False,
+                        'remote_applied': False,
+                        'entry_preexisted': connected,
+                    }
+                    data['requests'][rid] = item
+                    if action == 'invite':
+                        received[server] = now
                     self.save(data)
-                    self.local_apply(data, item)
-            self.save(data)
-            reply = {
-                'request_id': rid,
-                'reply_to': value['nonce'],
-                'state': item['state'],
-                'approved': bool(item.get('local_approval')),
-                'applied': item['local_applied'],
-            }
-            return protocol.envelope(own, self.key, remote, reply)
+                item = self.request(data, rid)
+                if (
+                    item['server'] != server
+                    or item['document']['instance_id'] != remote['instance_id']
+                    or item['document']['key_id'] != remote['key_id']
+                ):
+                    raise protocol.ProtocolError('request_owner')
+                if action == 'rejected' and item['direction'] != 'outgoing':
+                    raise protocol.ProtocolError('invalid_transition')
+                if action == 'invite' and item['direction'] != 'incoming':
+                    raise protocol.ProtocolError('invalid_transition')
+                self.dismiss_connected(data, item)
+                if item['state'] in ACTIVE:
+                    if action in ('cancelled', 'rejected'):
+                        # Removing policy is a SEPARATE local admin operation, never implicit rollback.
+                        item['state'] = action
+                    else:
+                        if body['approved']:
+                            item['remote_approval'] = True
+                        item['remote_applied'] = item['remote_applied'] or body['applied']
+                        self.save(data)
+                        self.local_apply(data, item)
+                self.save(data)
+                reply = {
+                    'request_id': rid,
+                    'reply_to': value['nonce'],
+                    'state': item['state'],
+                    'approved': bool(item.get('local_approval')),
+                    'applied': item['local_applied'],
+                }
+                return protocol.envelope(own, self.key, remote, reply)
 
     def operate(self, action, argument=None, actor='root', event_id=None):
         if action not in ACTIONS:
@@ -846,7 +869,14 @@ class Backend:
             )
             self.authorize(actor)
             data = self.load()
-            if event_id:
+            if event_id and action not in (
+                'servers',
+                'check',
+                'requests',
+                'request-status',
+                'peers',
+                'api-status',
+            ):
                 if not isinstance(event_id, str) or len(event_id) > 255:
                     raise protocol.ProtocolError('invalid_event')
                 digest = hashlib.sha256(event_id.encode()).hexdigest()

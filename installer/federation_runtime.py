@@ -12,6 +12,7 @@ import sys
 
 import configuration
 import federation
+import federation_store
 import state_store
 
 IMAGE = 'matrix-stack/federation-bot:1.0.0'
@@ -208,9 +209,8 @@ def provision(root, dc, metadata):
 def validate(root, metadata):
     root = Path(root)
     if metadata.get('federation_seeded'):
-        for name in ('data/federation/identity.pem', 'data/federation/state.json'):
-            configuration.read_private(root / name)
-        saved = configuration.read_private_json(root / 'data/federation/state.json')
+        configuration.read_private(root / 'data/federation/identity.pem')
+        saved = federation_store.read(root / 'data/federation/state.json')
         if saved['server_name'] != metadata['domain']:
             raise RuntimeError('Foreign federation state')
     if metadata.get('federation_provisioned'):
@@ -286,7 +286,9 @@ def verify_archive(archive):
         for name in required:
             if not tar.getmember(name).isfile():
                 raise RuntimeError('Federation backup is incomplete')
-        state = json.load(tar.extractfile('data/federation/state.json'))
+        state = federation_store.decode(
+            tar.extractfile('data/federation/state.json').read(federation_store.MAX_BYTES + 1)
+        )
         if state['server_name'] != metadata['domain']:
             raise RuntimeError('Foreign federation backup')
         if metadata.get('federation_provisioned'):

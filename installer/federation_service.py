@@ -5,6 +5,7 @@ revalidated against MAS. HTTP has no local administrative dispatcher.
 """
 
 import argparse
+from contextlib import contextmanager
 from collections import deque
 import http.server
 import json
@@ -239,6 +240,19 @@ def recover_running_jobs(backend):
             backend.save(data)
 
 
+def receive_call(backend, message, work):
+    @contextmanager
+    def commit_guard():
+        if not work.acquire(blocking=False):
+            raise RuntimeError('busy')
+        try:
+            yield
+        finally:
+            work.release()
+
+    return backend.receive(message, commit_guard=commit_guard)
+
+
 def serve(root):
     root = Path(root)
     backend = federation.backend(root)
@@ -362,12 +376,9 @@ def serve(root):
                 if len(raw) != length:
                     raise protocol.ProtocolError('incomplete_request')
                 message = json.loads(raw)
-                if not work.acquire(blocking=False):
-                    raise RuntimeError('busy')
-                try:
-                    result = backend.receive(message)
-                finally:
-                    work.release()
+                if not backend.api_enabled():
+                    raise protocol.ProtocolError('api_disabled')
+                result = receive_call(backend, message, work)
                 self.reply(200, result)
             except protocol.ProtocolError as error:
                 self.reply(503 if error.code == 'api_disabled' else 400, {'code': error.code})
