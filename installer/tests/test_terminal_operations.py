@@ -346,6 +346,41 @@ class OperationTests(unittest.TestCase):
 
 
 class RemovalScopeTests(unittest.TestCase):
+    def test_external_mas_removal_confirms_only_owned_synapse_database(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            state_store.write_json(root / 'installation.json', {'domain': 'example.org'})
+            prompts, rows = [], []
+
+            def decide(label):
+                prompts.append(label)
+                return True
+
+            def ask(label):
+                if 'УДАЛИТЬ БАЗЫ' in label:
+                    return 'УДАЛИТЬ БАЗЫ synapse'
+                return 'УДАЛИТЬ СЕРВЕР example.org'
+
+            selected = remove_server.plan(
+                root,
+                [],
+                {'MAS_MODE': 'external', 'POSTGRES_MODE': 'external'},
+                ask=ask,
+                say=lambda *_: None,
+                decide=decide,
+                summary=lambda values: rows.extend(values),
+            )
+            self.assertTrue(selected['external_database'])
+            self.assertIn('базы synapse и их роли', '\n'.join(prompts))
+            self.assertNotIn('synapse/mas', '\n'.join(prompts))
+            self.assertIn(
+                (
+                    'Внешний MAS: аккаунты, устройства, ключи и копии',
+                    'Сохранить на внешнем сервере',
+                ),
+                rows,
+            )
+
     def test_removal_ui_completion_keeps_draft_commands_and_waits(self):
         import argparse
 

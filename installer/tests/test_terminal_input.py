@@ -53,7 +53,7 @@ class EditorTests(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform.startswith('linux') and terminal_views.Console, 'PTY and Rich')
 class InputTerminalTests(unittest.TestCase):
-    def start(self, secret=False, typeahead=False):
+    def start(self, secret=False, typeahead=False, unicode_typeahead=False):
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 24, 42, 0, 0))
         script = """
@@ -68,7 +68,7 @@ settings = termios.tcgetattr(0)
 try:
     with view.screen():
         view.heading('Page preserved', 'Useful instructions')
-        if sys.argv[2] == 'typeahead':
+        if sys.argv[2] in ('typeahead', 'unicode-typeahead'):
             view.read_input('First: ')
             print('BETWEEN', flush=True)
             time.sleep(0.25)
@@ -79,7 +79,8 @@ try:
             print('UI_NO_ECHO:' + str(not termios.tcgetattr(0)[3] & termios.ECHO))
         else:
             result = view.read_input('Input: ', sys.argv[2] == 'secret')
-    print('RESULT:' + str(result == ('fictional-password' if sys.argv[2] in ('secret', 'typeahead') else 'a' * 8)))
+    expected = 'пfictional-password' if sys.argv[2] == 'unicode-typeahead' else 'fictional-password' if sys.argv[2] in ('secret', 'typeahead') else 'a' * 8
+    print('RESULT:' + str(result == expected))
 except KeyboardInterrupt:
     print('INTERRUPTED')
 print('RESTORED:' + str(settings == termios.tcgetattr(0) and previous == signal.getsignal(signal.SIGWINCH)))
@@ -91,7 +92,13 @@ print('RESTORED:' + str(settings == termios.tcgetattr(0) and previous == signal.
                 '-c',
                 script,
                 str(Path(__file__).resolve().parents[1]),
-                'typeahead' if typeahead else 'secret' if secret else 'normal',
+                'unicode-typeahead'
+                if unicode_typeahead
+                else 'typeahead'
+                if typeahead
+                else 'secret'
+                if secret
+                else 'normal',
             ],
             stdin=slave,
             stdout=slave,
@@ -172,6 +179,16 @@ print('RESTORED:' + str(settings == termios.tcgetattr(0) and previous == signal.
             b'UI_NO_ECHO:True',
         ):
             self.assertIn(result, output)
+        self.assertNotIn(b'fictional-password', output)
+
+    def test_utf8_character_split_between_two_prompts_survives(self):
+        master, process = self.start(unicode_typeahead=True)
+        output = self.receive(master, b'First:', process)
+        os.write(master, b'first\n\xd0')
+        output = self.receive(master, b'BETWEEN', process, output)
+        os.write(master, b'\xbffictional-password\n')
+        output = self.receive(master, b'RESTORED:True', process, output)
+        self.assertIn(b'RESULT:True', output)
         self.assertNotIn(b'fictional-password', output)
 
     def test_idle_input_does_not_redraw_and_interrupt_restores_settings(self):

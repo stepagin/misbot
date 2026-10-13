@@ -12,6 +12,7 @@ import subprocess
 import sys
 
 import configuration
+import configuration_schema as schema
 import lifecycle
 import s3_config
 import state_store
@@ -185,10 +186,14 @@ def plan(root, targets, model, ask=input, say=print, decide=None, summary=None):
             remote.append(target['identity'])
     external_db = False
     if model.get('POSTGRES_MODE') == 'external':
+        databases = schema.owned_databases(model)
         external_db = confirm(
-            'Удалить во внешней PostgreSQL только базы synapse/mas и их роли, созданные Misbot?'
+            'Удалить во внешней PostgreSQL только базы '
+            + '/'.join(databases)
+            + ' и их роли, созданные Misbot?'
         )
-        if external_db and ask('Введите: УДАЛИТЬ БАЗЫ synapse mas\n') != 'УДАЛИТЬ БАЗЫ synapse mas':
+        phrase = 'УДАЛИТЬ БАЗЫ ' + ' '.join(databases)
+        if external_db and ask('Введите: ' + phrase + '\n') != phrase:
             raise RuntimeError('Подтверждение БД не совпало; удаление отменено.')
     vault = False
     if (root / 'config/vault-state.json').exists():
@@ -220,6 +225,10 @@ def plan(root, targets, model, ask=input, say=print, decide=None, summary=None):
         rows.append(('Внешние базы Misbot', 'Удалить' if external_db else 'Сохранить'))
     if (root / 'config/vault-state.json').exists():
         rows.append(('Снимок секретов в Vault', 'Удалить' if vault else 'Сохранить'))
+    if model.get('MAS_MODE') == 'external':
+        rows.append(
+            ('Внешний MAS: аккаунты, устройства, ключи и копии', 'Сохранить на внешнем сервере')
+        )
     rows.append(('Утилита misbot, бакеты S3 и чужие каталоги', 'Сохранить'))
     if summary:
         summary(rows)
@@ -327,9 +336,7 @@ def delete_external_database(root):
     ):
         raise RuntimeError('External database ownership is unconfirmed; credentials preserved')
     marker = 'matrix-installer:' + saved['owner']
-    scope = ','.join(
-        "'" + name + "'" for name in __import__('configuration_schema').owned_databases(model)
-    )
+    scope = ','.join("'" + name + "'" for name in schema.owned_databases(model))
     query = f"SELECT json_build_object('roles',(SELECT coalesce(json_agg(json_build_object('name',rolname,'marker',shobj_description(oid,'pg_authid'))),'[]') FROM pg_roles WHERE rolname IN ({scope})),'databases',(SELECT coalesce(json_agg(json_build_object('name',datname,'owner',pg_get_userbyid(datdba))),'[]') FROM pg_database WHERE datname IN ({scope})));"
     observed = json.loads(lifecycle.postgres('psql', '-d', 'postgres', '-X', '-At', '-c', query))
     roles = {row['name']: row for row in observed['roles']}

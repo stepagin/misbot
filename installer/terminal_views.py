@@ -94,7 +94,7 @@ class TerminalView:
             self.fullscreen = self.console.is_alt_screen
             self.screen_used = self.fullscreen
             try:
-                if sys.stdin.isatty():
+                if sys.stdin.isatty() and os.isatty(sys.stdin.fileno()):
                     import termios
 
                     # Typeahead between prompts must not echo a secret before

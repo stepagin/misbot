@@ -129,7 +129,12 @@ class UI:
 
     def ask(self, label, default='', secret=False):
         reader = self.reader
-        if reader is None and self.view.fullscreen and sys.stdin.isatty():
+        if (
+            reader is None
+            and self.view.fullscreen
+            and sys.stdin.isatty()
+            and os.isatty(sys.stdin.fileno())
+        ):
             reader = self.view.read_input
         return question(label, default, secret, reader)
 

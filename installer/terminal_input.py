@@ -91,7 +91,10 @@ def read_line(view, prompt, secret=False):
     resize_read, resize_write = os.pipe2(os.O_NONBLOCK | os.O_CLOEXEC)
     previous = signal.getsignal(signal.SIGWINCH)
     editor = LineEditor()
-    decoder = codecs.getincrementaldecoder('utf-8')('replace')
+    decoder = getattr(view, 'input_decoder', None)
+    if decoder is None:
+        decoder = codecs.getincrementaldecoder('utf-8')('replace')
+        view.input_decoder = decoder
 
     def resized(signum, frame):
         try:
