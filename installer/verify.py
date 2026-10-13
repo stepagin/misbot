@@ -71,6 +71,8 @@ def main(argv=None):
         ('synapse_admin_protected', 'https://matrix.' + domain + '/_synapse/admin/v2/users', 401),
         ('mas_admin_protected', mas + '/api/admin/v1/users', 401),
     ]
+    if model.get('MAS_MODE') == 'external':
+        tests = [test for test in tests if test[0] != 'mas_health']
     failed = 0
     try:
         result = homepage.probe(configuration.load(root, True))

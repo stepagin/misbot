@@ -41,10 +41,10 @@ backup-key KEY_FILE      Create a private recovery key; keep an independent copy
 backup-external PRIVATE_S3_ENV KEY_FILE [DIRECTORY]  Encrypt a full backup, upload and verify download.
 backup-cleanup PRIVATE_S3_ENV PRIVATE_CATALOG [DIRECTORY]  Retry deletion of this installation's unique unverified upload.
 backup-fetch PRIVATE_S3_ENV KEY_FILE OBJECT_KEY SHA256 OUTPUT_ARCHIVE  Download and authenticate a backup into a new private file.
-restore-check [DIRECTORY] Verify latest backup by restoring two temporary databases.
+restore-check [DIRECTORY] Verify latest backup by restoring owned application databases.
 restore ARCHIVE DIRECTORY SHA256 PUBLIC_IP  Restore local databases into an empty staged target.
 restore-local ARCHIVE DIRECTORY SHA256 PUBLIC_IP  Restore either database source into new local PostgreSQL; writers stay staged.
-restore-activate source-stopped [DIRECTORY]  Start restored writers after stopping the source and switching DNS.
+restore-activate source-stopped [DIRECTORY] [preserved-state]  Activate a restore; external MAS also requires preserved-state.
 move-export [DIRECTORY]  Freeze source writers and create the final consistent archive.
 move-abort target-stopped [DIRECTORY]  Resume the source after stopping the target and returning DNS.
 media-local [DIRECTORY]  Use local media before the first successful installation.
@@ -105,6 +105,10 @@ elif [[ "$task_action" == restore-activate || "$task_action" == move-abort ]]; t
   [[ "$task_action" != move-abort ]] || task_confirmation=target-stopped
   [[ "${2:-}" == "$task_confirmation" ]] || die "First stop the other writer and point DNS to this machine; use $task_action $task_confirmation [DIRECTORY]."
   task_root="${3:-$task_default_root}"
+  task_external_mas_confirm="${4:-}"
+  if [[ -n "$task_external_mas_confirm" ]]; then
+    [[ "$task_action" == restore-activate && "$task_external_mas_confirm" == preserved-state ]] || die 'External MAS activation requires preserved-state; no data changed.'
+  fi
 elif [[ "$task_action" == media-s3 || "$task_action" == s3-credentials ]]; then
   [[ $# == 2 || $# == 3 ]] || die "Use: install.sh $task_action PRIVATE_S3_ENV [DIRECTORY]"
   task_s3_file="${2:-}"
@@ -328,6 +332,9 @@ case "$task_action" in
     [[ -f "$task_root/installation.json" ]] || die 'Restore into an empty target first.'
     task_command_args=()
     [[ "$task_action" != restore-activate ]] || task_command_args=(--register-command)
+    if [[ "$task_action" == restore-activate && -n "$task_external_mas_confirm" ]]; then
+      task_command_args+=(--external-mas-confirm "$task_external_mas_confirm")
+    fi
     exec python3 "$task_root/lifecycle.py" --directory "$task_root" "$task_action" "${task_command_args[@]}"
     ;;
   init)

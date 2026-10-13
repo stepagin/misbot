@@ -186,6 +186,49 @@ sudo misbot check
 Меню настроек разрешает только обычные изменяемые параметры; отмена сохраняет
 действующую конфигурацию. При неудаче его применения возвращается checkpoint.
 
+## Внешний MAS
+
+По умолчанию `MAS_MODE=local`: Misbot устанавливает MAS на этот же VPS, а адрес
+входа — `mas.<DOMAIN>`. `MAS_DOMAIN` задаёт другой домен для этой локальной службы.
+
+`MAS_MODE=external` подключает уже работающий MAS, заранее настроенный именно
+для этого Matrix-сервера. В мастере выберите «Подключить уже работающий внешний
+MAS» и введите его домен, общий ключ и реквизиты управляющего приложения.
+Пароли и ключи вводятся скрыто. Запуск сначала проверяет HTTPS и управляющее
+приложение MAS, затем поднимает публичный HTTPS Matrix для связи в обе стороны.
+Уже существующий администратор `matrix-admin` сохраняет прежний пароль; Misbot
+его не заменяет и не выдаёт новый пароль за действующий. Адрес входа и общий
+ключ после первого запуска менять нельзя. Для настройки через приватный `settings/server.env`:
+
+- `MAS_DOMAIN` — отдельный HTTPS-домен внешнего MAS без схемы и пути;
+- `MAS_PUBLIC_IP` — необязательный ожидаемый IPv4 его A-записи;
+- `MAS_SHARED_SECRET` — значение `matrix.secret` внешнего MAS;
+- `MAS_CLIENT_ID` и `MAS_CLIENT_SECRET` — приложение внешнего MAS с доступом
+  к `urn:mas:admin`, разрешённое в его `policy.data.admin_clients`.
+
+На внешнем MAS должны совпадать `matrix.homeserver` и `DOMAIN`; адрес Synapse
+задаётся как `https://matrix.<DOMAIN>` и должен быть доступен серверу MAS.
+Совпадающий общий ключ требуется для связи MAS и Synapse. Регистрация должна
+требовать приглашение: `account.password_registration_token_required=true`;
+для OAuth-провайдеров также задайте `registration_token_required=true`.
+Для первой установки имена `referral-bot`, `server-guide` и выбранное имя
+административного бота должны быть свободны. Перенос прежней установки Misbot
+выполняйте восстановлением копии с её сохранёнными сессиями и ключами ботов.
+Google, Telegram и другие способы входа настраиваются на внешнем MAS; локальные
+`GOOGLE_*`, `TELEGRAM_*` и `SOCKS5_CONFIG` в этом режиме не используются и
+должны оставаться пустыми. Подключение проверяется
+до первого запуска; уже действующий сервер на другой адрес MAS не переводится.
+[Официальная настройка связи MAS и Synapse](https://element-hq.github.io/matrix-authentication-service/setup/homeserver.html).
+
+DNS внешнего MAS сохраняет адрес его собственного сервера; этот адрес может
+отличаться от IPv4 VPS Matrix. Сертификаты и данные внешнего MAS управляются
+отдельно. Misbot не устанавливает его, не меняет его OAuth-провайдеров и не
+удаляет его базы или ключи. Локальные копии Misbot не заменяют отдельную
+резервную копию внешнего MAS. Перед восстановлением нужен тот же доступный MAS
+с сохранёнными пользователями, сессиями устройств и ключами; активация требует
+отдельного подтверждения `--external-mas-confirm preserved-state`. Подробнее —
+[копии при внешнем MAS](backup.md#копии-при-внешнем-mas).
+
 ## Миграция и восстановление
 
 Старый `settings.env` поддерживается без автоматической ротации. Сначала
@@ -269,39 +312,44 @@ POST. Прерванную явную замену продолжайте чер
 
 | Файл / поле | Назначение | Обязательность | Формат / default | Вымышленный пример | Влияние |
 |---|---|---|---|---|---|
-| settings/server.env / `DOMAIN` | Основной домен, без https:// и пути | всегда | hostname без схемы/порта; пусто | example.org | Matrix identity: после init изменять нельзя. |
-| settings/server.env / `MAS_DOMAIN` | Домен MAS; пусто — mas.<DOMAIN> | необязательно | hostname без схемы/порта; пусто | auth.example.net | OAuth issuer: после запуска баз изменять нельзя. |
-| settings/server.env / `PUBLIC_IP` | Публичный IPv4 из панели VPS; пусто — единственный A домена | необязательно | публичный IPv4; пусто | 203.0.113.20 | Применяется при generate/start; работающий сервер требует копии. |
-| settings/server.env / `ACME_EMAIL` | Email оператора для сертификатов | необязательно | email; пусто | operator@example.org | Применяется при generate/start; работающий сервер требует копии. |
-| settings/server.env / `MEDIA_MODE` | Медиа: local или s3 | необязательно | local/s3; local | local | Действующее хранилище меняется только storage operation. |
-| settings/server.env / `POSTGRES_MODE` | PostgreSQL: local или external | необязательно | local/external; local | local | Действующее хранилище меняется только storage operation. |
+| settings/server.env / `DOMAIN` | Основной домен, без https:// и пути | всегда | hostname без схемы/порта; пусто | example.org | После создания сервера домен менять нельзя. |
+| settings/server.env / `MAS_MODE` | Сервер авторизации | необязательно | local/external; local | local | После первого запуска сервер авторизации менять нельзя. |
+| settings/server.env / `MAS_PUBLIC_IP` | IPv4 внешнего MAS | необязательно | публичный IPv4; пусто | 203.0.113.21 | Необязательно: проверяет A-запись внешнего MAS; его адрес не обязан совпадать с IPv4 этого VPS. |
+| settings/server.env / `MAS_SHARED_SECRET` | Общий ключ Synapse и внешнего MAS | external MAS | приватная буквальная строка; пусто | FICTIONAL_MAS_SHARED_SECRET | Должен совпадать с matrix.secret уже настроенного MAS. |
+| settings/server.env / `MAS_CLIENT_ID` | Client ID управляющего приложения MAS | external MAS | приватная буквальная строка; пусто | 01K5WZ00000000000000000004 | Приложение должно быть разрешено в admin_clients внешнего MAS. |
+| settings/server.env / `MAS_CLIENT_SECRET` | Client secret управляющего приложения MAS | external MAS | приватная буквальная строка; пусто | FICTIONAL_MAS_CLIENT_SECRET | Для управления приглашениями, пользователями и ботами через API MAS. |
+| settings/server.env / `MAS_DOMAIN` | Домен сервера авторизации MAS | необязательно | hostname без схемы/порта; пусто | auth.example.net | После первого запуска адрес входа менять нельзя. |
+| settings/server.env / `PUBLIC_IP` | Публичный IPv4 этого VPS | необязательно | публичный IPv4; пусто | 203.0.113.20 | До установки можно изменить здесь. Для работающего сервера сначала нужна резервная копия. |
+| settings/server.env / `ACME_EMAIL` | Email оператора для сертификатов | необязательно | email; пусто | operator@example.org | До установки можно изменить здесь. Для работающего сервера сначала нужна резервная копия. |
+| settings/server.env / `MEDIA_MODE` | Медиа: local или s3 | необязательно | local/s3; local | local | После установки перенос хранилища выполняется через меню «Медиа и базы данных». Мастер настройки данные не переносит. |
+| settings/server.env / `POSTGRES_MODE` | PostgreSQL: local или external | необязательно | local/external; local | local | После установки перенос хранилища выполняется через меню «Медиа и базы данных». Мастер настройки данные не переносит. |
 | settings/policy.env / `DOCKER_SUBNET` | Приватная свободная IPv4 сеть /24 | необязательно | приватная IPv4 /24; 172.30.50.0/24 | 172.30.50.0/24 | После первого запуска не изменять. |
-| settings/policy.env / `FEDERATION_SERVERS` | Разрешённые Matrix server_name через запятую | необязательно | непустые hostname через запятую; misbot.ru | matrix.org,example.net | Применяется при generate/start; работающий сервер требует копии. |
-| settings/policy.env / `OPEN_REGISTRATION` | Разрешить новые парольные регистрации | необязательно | true/false; true | true | Применяется при generate/start; работающий сервер требует копии. |
-| settings/policy.env / `REGISTRATION_TOKEN_REQUIRED` | Требовать приглашение при парольной регистрации | необязательно | true/false; true | true | Применяется при generate/start; работающий сервер требует копии. |
+| settings/policy.env / `FEDERATION_SERVERS` | Разрешённые Matrix server_name через запятую | необязательно | непустые hostname через запятую; misbot.ru | matrix.org,example.net | До установки можно изменить здесь. Для работающего сервера сначала нужна резервная копия. |
+| settings/policy.env / `OPEN_REGISTRATION` | Разрешить новые парольные регистрации | необязательно | true/false; true | true | До установки можно изменить здесь. Для работающего сервера сначала нужна резервная копия. |
+| settings/policy.env / `REGISTRATION_TOKEN_REQUIRED` | Требовать приглашение при парольной регистрации | необязательно | true/false; true | true | До установки можно изменить здесь. Для работающего сервера сначала нужна резервная копия. |
 | settings/policy.env / `INVITATION_LIFETIME_SECONDS` | Срок приглашений и первого токена, секунды (7 дней) | необязательно | целое 1..315360000; 604800 | 604800 | Новые приглашения; сохранённый токен не продлевается. |
-| settings/policy.env / `INVITATION_USAGE_LIMIT` | Лимит приглашений бота; первый токен всегда на одного | необязательно | целое 1..2147483647; 1 | 1 | Применяется при generate/start; работающий сервер требует копии. |
-| settings/policy.env / `MAX_UPLOAD_SIZE_MIB` | Максимальный размер одного вложения, МиБ | необязательно; отсутствие поля — default | целое 1..65536; 256 | 512 | Новые загрузки; применение с копией и возможным перезапуском. |
-| settings/auth.env / `GOOGLE_CLIENT_ID` | Client ID из Google Cloud | вместе с secret | буквальная строка без control characters; пусто | FICTIONAL_GOOGLE_ID | Применяется при generate/start; работающий сервер требует копии. |
-| settings/auth.env / `GOOGLE_CLIENT_SECRET` | Client secret из Google Cloud | вместе с ID | буквальная строка без control characters; пусто | FICTIONAL_GOOGLE_SECRET | В активной установке форма не ротирует OAuth credentials. |
-| settings/auth.env / `TELEGRAM_CLIENT_ID` | Client ID приложения Telegram OIDC | вместе с secret | буквальная строка без control characters; пусто | FICTIONAL_TELEGRAM_ID | Применяется при generate/start; работающий сервер требует копии. |
-| settings/auth.env / `TELEGRAM_CLIENT_SECRET` | Client secret Telegram OIDC | вместе с ID | буквальная строка без control characters; пусто | FICTIONAL_TELEGRAM_SECRET | В активной установке форма не ротирует OAuth credentials. |
-| settings/auth.env / `SOCKS5_CONFIG` | Необязательный HTTPS-egress Telegram через SOCKS5 | необязательно | socks5://[user:password@]host:port; пусто | socks5://fictional:password@proxy.example.org:1080 | Применяется при generate/start; работающий сервер требует копии. |
-| settings/database.env / `POSTGRES_HOST` | Хост выделенной PostgreSQL | external | hostname или IP без схемы/порта; пусто | db.example.org | Применяется при generate/start; работающий сервер требует копии. |
-| settings/database.env / `POSTGRES_PORT` | Порт PostgreSQL | необязательно | целое 1..65535; 5432 | 5432 | Применяется при generate/start; работающий сервер требует копии. |
-| settings/database.env / `POSTGRES_SSL_MODE` | TLS PostgreSQL | необязательно | require/verify-full; require | verify-full | Применяется при generate/start; работающий сервер требует копии. |
-| settings/database.env / `POSTGRES_SSL_ROOT_CERT` | Путь CA PEM; пусто — системный CA | необязательно | абсолютный путь без symlink/..; пусто | /root/db-ca.pem | Применяется при generate/start; работающий сервер требует копии. |
-| settings/database.env / `POSTGRES_ADMIN_USER` | Административная роль выделенного кластера | необязательно | PostgreSQL identifier; postgres | postgres | Применяется при generate/start; работающий сервер требует копии. |
+| settings/policy.env / `INVITATION_USAGE_LIMIT` | Лимит приглашений бота; первый токен всегда на одного | необязательно | целое 1..2147483647; 1 | 1 | До установки можно изменить здесь. Для работающего сервера сначала нужна резервная копия. |
+| settings/policy.env / `MAX_UPLOAD_SIZE_MIB` | Максимальный размер вложения, МиБ (1–65536) | необязательно | целое 1..65536; 256 | 512 | Для новых загрузок файлов, фото и видео; сохранённые вложения не изменяются. |
+| settings/auth.env / `GOOGLE_CLIENT_ID` | Client ID из Google Cloud | вместе с secret | буквальная строка без control characters; пусто | FICTIONAL_GOOGLE_ID | До установки можно изменить здесь. Для работающего сервера сначала нужна резервная копия. |
+| settings/auth.env / `GOOGLE_CLIENT_SECRET` | Client secret из Google Cloud | вместе с ID | буквальная строка без control characters; пусто | FICTIONAL_GOOGLE_SECRET | Действующие ключи входа меняются отдельно с резервной копией. |
+| settings/auth.env / `TELEGRAM_CLIENT_ID` | Client ID приложения Telegram OIDC | вместе с secret | буквальная строка без control characters; пусто | FICTIONAL_TELEGRAM_ID | До установки можно изменить здесь. Для работающего сервера сначала нужна резервная копия. |
+| settings/auth.env / `TELEGRAM_CLIENT_SECRET` | Client secret Telegram OIDC | вместе с ID | буквальная строка без control characters; пусто | FICTIONAL_TELEGRAM_SECRET | Действующие ключи входа меняются отдельно с резервной копией. |
+| settings/auth.env / `SOCKS5_CONFIG` | Прокси SOCKS5 для входа через Telegram | необязательно | socks5://[user:password@]host:port; пусто | socks5://fictional:password@proxy.example.org:1080 | До установки можно изменить здесь. Для работающего сервера сначала нужна резервная копия. |
+| settings/database.env / `POSTGRES_HOST` | Хост выделенной PostgreSQL | external | hostname или IP без схемы/порта; пусто | db.example.org | До установки можно изменить здесь. Для работающего сервера сначала нужна резервная копия. |
+| settings/database.env / `POSTGRES_PORT` | Порт PostgreSQL | необязательно | целое 1..65535; 5432 | 5432 | До установки можно изменить здесь. Для работающего сервера сначала нужна резервная копия. |
+| settings/database.env / `POSTGRES_SSL_MODE` | TLS PostgreSQL | необязательно | require/verify-full; require | verify-full | До установки можно изменить здесь. Для работающего сервера сначала нужна резервная копия. |
+| settings/database.env / `POSTGRES_SSL_ROOT_CERT` | Путь CA PEM; пусто — системный CA | необязательно | абсолютный путь без symlink/..; пусто | /root/db-ca.pem | До установки можно изменить здесь. Для работающего сервера сначала нужна резервная копия. |
+| settings/database.env / `POSTGRES_ADMIN_USER` | Административная роль выделенного кластера | необязательно | PostgreSQL identifier; postgres | postgres | До установки можно изменить здесь. Для работающего сервера сначала нужна резервная копия. |
 | settings/database.env / `POSTGRES_ADMIN_PASSWORD` | Пароль роли провайдера PostgreSQL | external | буквальная строка без control characters; пусто | FICTIONAL_DATABASE_PASSWORD | Через поддерживаемый backend; не менять обычной формой. |
 | settings/media-s3.env / `S3_BUCKET` | Имя существующего bucket | s3, кроме необязательного endpoint | буквальная строка без control characters; пусто | fictional-private-bucket | Назначение/credentials меняются отдельными storage/credentials операциями. |
 | settings/media-s3.env / `S3_REGION` | Region подписи SigV4 из документации провайдера | s3, кроме необязательного endpoint | буквальная строка без control characters; пусто | us-east-1 | Назначение/credentials меняются отдельными storage/credentials операциями. |
-| settings/media-s3.env / `S3_ENDPOINT_URL` | HTTPS origin провайдера; пусто — AWS | s3, кроме необязательного endpoint | буквальная строка без control characters; пусто | https://s3.example.org | Назначение/credentials меняются отдельными storage/credentials операциями. |
+| settings/media-s3.env / `S3_ENDPOINT_URL` | HTTPS-адрес S3; для AWS оставьте пустым | s3, кроме необязательного endpoint | буквальная строка без control characters; пусто | https://s3.example.org | Назначение/credentials меняются отдельными storage/credentials операциями. |
 | settings/media-s3.env / `S3_PREFIX` | Отдельный prefix с / в конце | s3, кроме необязательного endpoint | буквальная строка без control characters; пусто | matrix/example/media/ | Назначение/credentials меняются отдельными storage/credentials операциями. |
 | settings/media-s3.env / `S3_ACCESS_KEY_ID` | Access key ID провайдера | s3, кроме необязательного endpoint | буквальная строка без control characters; пусто | FICTIONAL_ACCESS | Назначение/credentials меняются отдельными storage/credentials операциями. |
 | settings/media-s3.env / `S3_SECRET_ACCESS_KEY` | Secret access key провайдера | s3, кроме необязательного endpoint | буквальная строка без control characters; пусто | FICTIONAL_SECRET | Назначение/credentials меняются отдельными storage/credentials операциями. |
 | settings/backup.env / `S3_BUCKET` | Имя существующего bucket | s3, кроме необязательного endpoint | буквальная строка без control characters; пусто | fictional-private-bucket | Назначение/credentials меняются отдельными storage/credentials операциями. |
 | settings/backup.env / `S3_REGION` | Region подписи SigV4 из документации провайдера | s3, кроме необязательного endpoint | буквальная строка без control characters; пусто | us-east-1 | Назначение/credentials меняются отдельными storage/credentials операциями. |
-| settings/backup.env / `S3_ENDPOINT_URL` | HTTPS origin провайдера; пусто — AWS | s3, кроме необязательного endpoint | буквальная строка без control characters; пусто | https://s3.example.org | Назначение/credentials меняются отдельными storage/credentials операциями. |
+| settings/backup.env / `S3_ENDPOINT_URL` | HTTPS-адрес S3; для AWS оставьте пустым | s3, кроме необязательного endpoint | буквальная строка без control characters; пусто | https://s3.example.org | Назначение/credentials меняются отдельными storage/credentials операциями. |
 | settings/backup.env / `S3_PREFIX` | Отдельный prefix с / в конце | s3, кроме необязательного endpoint | буквальная строка без control characters; пусто | matrix/example/media/ | Назначение/credentials меняются отдельными storage/credentials операциями. |
 | settings/backup.env / `S3_ACCESS_KEY_ID` | Access key ID провайдера | s3, кроме необязательного endpoint | буквальная строка без control characters; пусто | FICTIONAL_ACCESS | Назначение/credentials меняются отдельными storage/credentials операциями. |
 | settings/backup.env / `S3_SECRET_ACCESS_KEY` | Secret access key провайдера | s3, кроме необязательного endpoint | буквальная строка без control characters; пусто | FICTIONAL_SECRET | Назначение/credentials меняются отдельными storage/credentials операциями. |

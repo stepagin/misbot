@@ -24,6 +24,14 @@ active_child = None
 interruption_requested = False
 
 
+def application_databases(root):
+    import configuration_schema
+
+    path = Path(root) / 'installation.json'
+    metadata = json.loads(path.read_text()) if path.exists() else {}
+    return configuration_schema.owned_databases(metadata)
+
+
 def install_signals():
     def interrupted(signum, frame):
         global interruption_requested
@@ -202,7 +210,13 @@ def component_rollback_guard(root, folder, plan):
     import lifecycle
 
     lifecycle.configure(root, 'component-rollback')
-    writers = ('referral-bot', 'referral-control', 'synapse', 'mas', 'jwt')
+    writers = (
+        'referral-bot',
+        'referral-control',
+        'synapse',
+        *(['mas'] if 'mas' in application_databases(root) else []),
+        'jwt',
+    )
     if any(row['Service'] == 'federation-bot' for row in lifecycle.service_rows()):
         writers = ('federation-bot', *writers)
     lifecycle.dc('stop', '-t', '30', *writers)
@@ -492,7 +506,11 @@ def update_resource_check(root, entries):
                 '-v',
                 'ON_ERROR_STOP=1',
                 '-c',
-                "SELECT pg_database_size('synapse') + pg_database_size('mas');",
+                'SELECT '
+                + ' + '.join(
+                    "pg_database_size('" + name + "')" for name in application_databases(root)
+                )
+                + ';',
             ).strip()
         )
         if database_bytes <= 0:

@@ -306,6 +306,10 @@ def temporary_postgres(client):
 
 
 def external(root, settings_path):
+    if lifecycle.state().get('mas_mode') == 'external':
+        raise RuntimeError(
+            'Перенос PostgreSQL для установки с внешним MAS пока не поддерживается. Данные не изменены; используйте текущую базу или восстановление Synapse в новую локальную PostgreSQL.'
+        )
     metadata = lifecycle.state()
     if (
         not metadata.get('databases_initialized')
@@ -560,6 +564,10 @@ def resume(root, record):
 
 
 def recover(root):
+    if lifecycle.state().get('mas_mode') == 'external':
+        raise RuntimeError(
+            'Перенос PostgreSQL для установки с внешним MAS пока не поддерживается. Данные не изменены; используйте текущую базу или восстановление Synapse в новую локальную PostgreSQL.'
+        )
     record = state_store.database_transition_record(root)
     if record is None:
         lifecycle.emit(
@@ -577,6 +585,10 @@ def recover(root):
 
 
 def abort(root):
+    if lifecycle.state().get('mas_mode') == 'external':
+        raise RuntimeError(
+            'Перенос PostgreSQL для установки с внешним MAS пока не поддерживается. Данные не изменены; используйте текущую базу или восстановление Synapse в новую локальную PostgreSQL.'
+        )
     record = state_store.database_transition_record(root)
     if record is None:
         raise RuntimeError('No database transition is pending; run install.sh check')

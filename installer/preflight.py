@@ -116,10 +116,10 @@ def resolve(host, family, timeout=10, strict=False):
     return result[0]
 
 
-def dns_check(domain, public_ip, mas_domain=''):
+def dns_check(domain, public_ip, mas_domain='', mas_mode='local', mas_public_ip=''):
     from configuration_schema import public_hosts
 
-    for host in public_hosts({'DOMAIN': domain, 'MAS_DOMAIN': mas_domain}):
+    for host in public_hosts({'DOMAIN': domain, 'MAS_DOMAIN': mas_domain, 'MAS_MODE': mas_mode}):
         actual = resolve(host, socket.AF_INET)
         if actual != {public_ip}:
             raise RuntimeError(
@@ -137,6 +137,23 @@ def dns_check(domain, public_ip, mas_domain=''):
                 'DNS for ' + host + ': unexpected AAAA. This deployment uses IPv4; '
                 'remove AAAA for managed hosts, wait for DNS caches, then retry install.sh preflight.'
             )
+
+    if mas_mode == 'external':
+        external_mas_dns_check(mas_domain, mas_public_ip)
+
+
+def external_mas_dns_check(host, public_ip=''):
+    """An external MAS owns its addresses and certificates independently."""
+    addresses = resolve(host, socket.AF_INET, strict=True)
+    ipv6 = resolve(host, socket.AF_INET6, strict=True)
+    if not addresses and not ipv6:
+        raise RuntimeError(
+            'Внешний MAS: настройте A или AAAA для ' + host + ' на адрес его сервера.'
+        )
+    if public_ip and addresses != {public_ip}:
+        raise RuntimeError(
+            'Внешний MAS: A-запись ' + host + ' должна указывать на ' + public_ip + '.'
+        )
 
 
 def caa_query(host):
@@ -184,13 +201,13 @@ def caa_query(host):
     return records
 
 
-def caa_check(domain, mas_domain=''):
+def caa_check(domain, mas_domain='', mas_mode='local'):
     # RFC 8659: chase aliases in each query, then climb the original name tree
     # until the first nonempty CAA RRset, excluding the DNS root.
     cache = {}
     from configuration_schema import public_hosts
 
-    for host in public_hosts({'DOMAIN': domain, 'MAS_DOMAIN': mas_domain}):
+    for host in public_hosts({'DOMAIN': domain, 'MAS_DOMAIN': mas_domain, 'MAS_MODE': mas_mode}):
         current = host
         records = []
         while current:
@@ -496,8 +513,14 @@ def check(root):
     if not address.is_global or address.version != 4:
         raise RuntimeError('PUBLIC_IP must be a public IPv4 address')
     system_check(root)
-    dns_check(domain, public_ip, values.get('MAS_DOMAIN', ''))
-    caa_check(domain, values.get('MAS_DOMAIN', ''))
+    dns_check(
+        domain,
+        public_ip,
+        values.get('MAS_DOMAIN', ''),
+        values.get('MAS_MODE', 'local'),
+        values.get('MAS_PUBLIC_IP', ''),
+    )
+    caa_check(domain, values.get('MAS_DOMAIN', ''), values.get('MAS_MODE', 'local'))
     network_check(root, values.get('DOCKER_SUBNET', '172.30.50.0/24'))
     proxy_check(values)
     return {

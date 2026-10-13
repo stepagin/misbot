@@ -17,12 +17,26 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 def main():
     payload = json.load(sys.stdin)
     client = payload['client']
-    opener = urllib.request.build_opener(NoRedirect())
+    base = client.get('mas_url', 'http://mas:8080')
+    parsed = urllib.parse.urlsplit(base)
+    if base != 'http://mas:8080' and (
+        parsed.scheme != 'https'
+        or not parsed.hostname
+        or parsed.port not in (None, 443)
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in ('', '/')
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise RuntimeError('Unsafe MAS API address')
+    base = base.rstrip('/')
+    opener = urllib.request.build_opener(NoRedirect(), urllib.request.ProxyHandler({}))
     basic = base64.b64encode(
         (client['client_id'] + ':' + client['client_secret']).encode()
     ).decode()
     request = urllib.request.Request(
-        'http://mas:8080/oauth2/token',
+        base + '/oauth2/token',
         data=urllib.parse.urlencode(
             {'grant_type': 'client_credentials', 'scope': 'urn:mas:admin'}
         ).encode(),
@@ -38,7 +52,7 @@ def main():
         raise ValueError('Unsafe MAS resource path')
     body = payload.get('body')
     request = urllib.request.Request(
-        'http://mas:8080' + path,
+        base + path,
         method=payload.get('method', 'GET'),
         data=json.dumps(body).encode() if body is not None else None,
         headers={'Authorization': 'Bearer ' + bearer, 'Content-Type': 'application/json'},

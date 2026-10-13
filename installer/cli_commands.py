@@ -561,7 +561,7 @@ COMMANDS = [
     Command(
         'backup verify',
         'restore-check',
-        purpose='Проверить копию восстановлением двух временных БД.',
+        purpose='Проверить копию восстановлением временных БД.',
         existing=ADOPTED,
     ),
     Command(
@@ -604,7 +604,7 @@ COMMANDS = [
         'backup restore-local',
         'restore-local',
         ('archive', 'sha256', 'public-ip'),
-        'Восстановить обе БД в новую локальную PostgreSQL.',
+        'Восстановить данные сервера в новую локальную PostgreSQL.',
         stops='Писатели остаются выключены.',
         installed=False,
     ),
@@ -613,6 +613,7 @@ COMMANDS = [
         'restore-activate',
         ('confirm',),
         'Активировать восстановленную установку после остановки источника и DNS.',
+        optional_arguments=('external_mas_confirm',),
     ),
     Command(
         'backup move export',
@@ -798,6 +799,8 @@ def execution_argv(
     if route is None:
         if existing:
             raise ValueError('Unsupported existing Compose command')
+        if command.backend == 'restore-activate' and values.get('external_mas_confirm'):
+            required['external_mas_confirm'] = cast(str, values['external_mas_confirm'])
         return ['/bin/bash', str(backend / 'install.sh'), *backend_argv(command, required, root)]
     script_root = root if route.installation_script else backend
     args = ['/usr/bin/python3', str(script_root / route.script)]
@@ -838,6 +841,8 @@ def backend_argv(command: Command, values: Mapping[str, str], root: Path) -> lis
         return [action, *args]
     if action in ('restore', 'restore-local'):
         return [action, args[0], str(root), *args[1:]]
+    if action == 'restore-activate' and values.get('external_mas_confirm'):
+        return [action, *args, str(root), values['external_mas_confirm']]
     return [action, *args, str(root)]
 
 

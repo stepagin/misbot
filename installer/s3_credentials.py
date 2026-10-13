@@ -232,7 +232,7 @@ def finish(root, saved):
     lifecycle.run(lifecycle.COMPOSE + ['-f', str(override), 'up', '-d'])
     writers = [
         'synapse',
-        'mas',
+        *(['mas'] if lifecycle.state().get('mas_mode', 'local') == 'local' else []),
         'jwt',
         'referral-bot',
         'referral-control',
