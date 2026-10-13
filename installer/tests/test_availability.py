@@ -226,7 +226,7 @@ class PresentationTests(unittest.TestCase):
         self.assertNotIn('PRIVATE_MARKER', repr(results))
 
     @unittest.skipIf(views.Console is None, 'Rich is optional')
-    def test_result_and_details_fit_fullscreen_without_repeating_backend(self):
+    def test_direct_results_fit_fullscreen_without_repeating_backend(self):
         import os
 
         for width in (80, 40):
@@ -237,10 +237,12 @@ class PresentationTests(unittest.TestCase):
                         file=output, force_terminal=True, no_color=False, width=width, height=24
                     )
                 view = views.TerminalView(console=console)
-                answers = iter(['1', '>', '<', '0', '0'])
+                answers = iter(['>', '<', ''])
+                pages = []
 
                 def reader(*args):
                     self.assertLessEqual(view.used_lines, 22)
+                    pages.append(output.getvalue())
                     return next(answers)
 
                 interface = ui.UI(folder, draft=Path(folder) / 'draft', view=view, reader=reader)
@@ -267,8 +269,13 @@ class PresentationTests(unittest.TestCase):
                 ):
                     interface.check_result(1)
                     run.assert_not_called()
-                self.assertIn('DNS: проверка пройдена', output.getvalue())
+                self.assertIn('DNS', pages[0])
+                self.assertIn('✓', pages[0])
+                self.assertIn('×', output.getvalue())
                 self.assertIn('Страница', output.getvalue())
+                self.assertIn('TCP 443', output.getvalue())
+                self.assertEqual(len(pages), 3)
+                self.assertNotIn('Показать подробности', output.getvalue())
                 self.assertNotIn('sudo misbot', output.getvalue())
 
     def test_check_capture_keeps_exit_codes_drops_raw_output_and_does_not_replay(self):
@@ -291,10 +298,10 @@ class PresentationTests(unittest.TestCase):
     def test_interrupted_captured_check_drains_child_before_returning(self):
         class Child:
             returncode = None
-            stdout = None
 
             def __init__(self):
                 self.calls, self.signals = 0, []
+                self.stdout = io.BytesIO()
 
             def communicate(self, timeout=None):
                 self.calls += 1
@@ -306,6 +313,9 @@ class PresentationTests(unittest.TestCase):
                 return '{"check":"dns","passed":true}', None
 
             def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
                 return self.returncode
 
             def send_signal(self, number):
@@ -323,10 +333,13 @@ class PresentationTests(unittest.TestCase):
             with (
                 patch.object(ui.subprocess, 'Popen', return_value=child),
                 patch('terminal_process.read_output', side_effect=drain),
+                patch('terminal_process.read_interrupted_output', side_effect=drain),
                 redirect_stdout(io.StringIO()),
             ):
                 self.assertEqual(interface.run('check'), 130)
             self.assertEqual(child.returncode, 143)
+            self.assertEqual(child.calls, 3)
+            self.assertTrue(child.stdout.closed)
             self.assertEqual(child.signals, [signal.SIGTERM])
             self.assertEqual(len(interface.check_results), 1)
             self.assertIn('прервана', diagnostics.check_summary(interface.check_results, 130))

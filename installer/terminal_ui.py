@@ -69,6 +69,8 @@ class UI:
         self.check_results = []
         self.result_lines = []
         self.result_total = 0
+        self.result_messages = []
+        self.result_notices = []
         self.explicit_draft = draft is not None
         self.draft = Path(draft) if self.explicit_draft else self.draft_path(self.root)
         self.model = {}
@@ -357,6 +359,9 @@ class UI:
             return
 
     def run(self, path, **values):
+        self.result_messages = []
+        self.result_notices = []
+        self.operation_records = []
         title = next(
             (
                 item.title
@@ -407,6 +412,57 @@ class UI:
             records.append(line[:8192])
             del records[:-256]
 
+        def remember_output(record, messages):
+            if not isinstance(record, dict):
+                return
+            if path == 'storage s3 check' and record.get('schema') == 1:
+                self.operation_records.append(record)
+                del self.operation_records[:-100]
+            if path != 'users invitation list':
+                self.result_messages = messages[:100]
+            failed = (
+                record.get('passed') is False
+                or record.get('status') in ('failed', 'error')
+                or record.get('check') == 'failed'
+            )
+            if failed:
+                self.result_notices.extend(messages[:100])
+            else:
+                self.result_notices.extend(
+                    message
+                    for message in messages
+                    if message.startswith(
+                        (
+                            'Внимание:',
+                            'Следующий шаг:',
+                            'Архив копии:',
+                            'SHA256:',
+                            'Операция требует продолжения.',
+                            'Сохраните или восстановите',
+                        )
+                    )
+                )
+            self.result_notices = list(dict.fromkeys(self.result_notices))[-100:]
+
+        def remember_plain_output(line):
+            # These helpers deliberately print human guidance on failure. Other
+            # unstructured child output may be a provider dump or traceback.
+            if not path.startswith(('admin bot ', 'admin access ')):
+                return
+            text = line.strip()
+            if (
+                not text
+                or len(text) > 2048
+                or text.startswith(('{', '[', 'Traceback', 'File ', 'botocore.', 'urllib.'))
+                or any(ord(char) < 32 or ord(char) == 127 for char in text)
+                or re.search(
+                    r'(?i)(authorization|access[_ -]?key|secret[_ -]?key|password|bearer|token)\s*[:=]',
+                    text,
+                )
+            ):
+                return
+            self.result_messages = [*self.result_messages, text][-20:]
+
         # Only the UI writes the terminal while animation is active. Secret display
         # and interactive backend confirmations keep their foreground terminal.
         input_mode = self.view.external_terminal() if interactive else nullcontext()
@@ -427,7 +483,19 @@ class UI:
         try:
             if interactive:
                 self.view.message(label)
-                return child.wait()
+                code = child.wait()
+                if (
+                    path in ('credentials admin show', 'users invitation show')
+                    and self.view.fullscreen
+                ):
+                    # A UI line editor redraw would erase the foreground secret.
+                    # Read acknowledgement directly without capturing its output.
+                    if self.reader:
+                        self.reader('Enter — вернуться в Misbot: ', True)
+                    else:
+                        getpass.getpass('Enter — вернуться в Misbot: ', stream=sys.stdout)
+                    self._result_waited = True
+                return code
             with self.view.busy(label) as progress:
 
                 def emit(line):
@@ -440,11 +508,9 @@ class UI:
                         messages = present_output(path, line)
                         try:
                             record = json.loads(line)
-                            if isinstance(record, dict):
-                                self.operation_records.append(record)
-                                del self.operation_records[:-100]
+                            remember_output(record, messages)
                         except ValueError:
-                            pass
+                            remember_plain_output(line)
                         try:
                             invitation_record = path == 'users invitation list' and isinstance(
                                 json.loads(line).get('invitations'), list
@@ -494,11 +560,9 @@ class UI:
                     collect_check(line)
                 try:
                     record = json.loads(line)
-                    if isinstance(record, dict):
-                        self.operation_records.append(record)
-                        del self.operation_records[:-100]
+                    remember_output(record, present_output(path, line))
                 except ValueError:
-                    pass
+                    remember_plain_output(line)
 
             with nullcontext() if interactive else self.view.busy('Завершаем прерванную операцию'):
                 while child.poll() is None or (not interactive and process_group_running(child)):
@@ -1277,11 +1341,13 @@ class UI:
             return 'Меню: «Продолжить прерванную операцию» → «Сайт после прерывания».'
         return 'Меню: «Состояние и работа сервера» → «Показать состояние».'
 
-    def report(self, title, rows, messages=()):
+    def report(self, title, rows, messages=(), result_code=None, continuation=''):
         """Show every result, with simple page navigation for short terminals."""
         page = 0
         while True:
             self.view.heading(title)
+            if result_code is not None:
+                self.view.result(title, result_code, continuation)
             for message in messages:
                 self.view.message(message)
             pages = [rows]
@@ -1319,6 +1385,12 @@ class UI:
             outcome = 'Доступность не подтверждена.'
         messages = [outcome, check_summary(self.check_results, code)]
         if code:
+            if (
+                not self.check_results
+                or not any(not row.passed for row in self.check_results)
+                or any('не уточнена' in row.message for row in self.check_results)
+            ):
+                messages.append('Меню: «Состояние и работа сервера» → «Показать состояние».')
             messages.append(
                 'Для остановленного сервера выберите «Запустить сервер» и повторите проверку.'
             )
@@ -1569,8 +1641,33 @@ class UI:
         if command.path == 'status':
             self.status_result(code)
             return code
-        self.view.heading(item.title)
-        self.view.result(item.title, code, self.operation_continuation(item.path))
+        completion = []
+        if command.backend in ('restore', 'restore-local') and code == 0:
+            from configuration import read_private_json
+
+            restored = read_private_json(execution_root / 'installation.json')
+            continuation = (
+                'Продолжение: sudo misbot --directory '
+                + shlex.quote(str(execution_root))
+                + ' backup activate --confirm source-stopped'
+            )
+            if restored.get('mas_mode') == 'external':
+                continuation += ' --external-mas-confirm preserved-state'
+            completion.extend(
+                [
+                    'Копия восстановлена. Перед активацией остановите источник и переключите DNS.',
+                    continuation,
+                ]
+            )
+        if command.backend in ('update', 'release-update') and code == 0:
+            completion.append(
+                'Обновление применено. Откройте sudo misbot ui заново, чтобы использовать новый интерфейс.'
+            )
+        self.result_notices.extend(completion)
+        self.show_operation_result(item, code)
+        if not self.view.fullscreen:
+            for message in completion:
+                self.view.message(message)
         if command.path == 'remove' and code == 0 and not self.installation():
             self.draft.unlink(missing_ok=True)
             self.model, self.backup = {}, {}
@@ -1578,24 +1675,28 @@ class UI:
         if command.path == 'users invitation list' and code == 0:
             self.show_result_lines(item.title)
         if command.backend in ('update', 'release-update') and code == 0:
-            self.view.message(
-                'Обновление применено. Откройте sudo misbot ui заново, чтобы использовать новый интерфейс.'
-            )
-            try:
-                self.pause('Enter — закрыть мастер')
-            except (Back, Cancel, SaveExit):
-                pass
+            if not getattr(self, '_result_waited', False):
+                try:
+                    self.pause('Enter — закрыть мастер')
+                except (Back, Cancel, SaveExit):
+                    pass
             raise SaveExit()
-        if command.backend in ('restore', 'restore-local') and code == 0:
-            self.view.message(
-                'Копия восстановлена. Перед активацией остановите источник и переключите DNS.'
-            )
-            self.view.message(
-                'Продолжение: sudo misbot --directory '
-                + shlex.quote(str(execution_root))
-                + ' backup activate --confirm source-stopped'
-            )
         return code
+
+    def show_operation_result(self, item, code, messages=None):
+        if messages is None:
+            messages = list(dict.fromkeys([*self.result_notices, *self.result_messages]))
+        if self.view.fullscreen and messages:
+            self.report(
+                item.title,
+                [('', message) for message in messages],
+                result_code=code,
+                continuation=self.operation_continuation(item.path),
+            )
+        else:
+            # Plain terminals already printed the complete sequential output.
+            self.view.heading(item.title)
+            self.view.result(item.title, code, self.operation_continuation(item.path))
 
     def execute_s3(self, item):
         import tempfile
@@ -1678,16 +1779,30 @@ class UI:
                         recovery_lines.append(
                             action.replace(shlex.quote(str(profile)), shlex.quote(str(recovery)))
                         )
-        self.view.heading(item.title)
-        self.view.result(item.title, code, self.operation_continuation(item.path))
-        for message in recovery_lines:
-            self.view.message(message, 'yellow')
+                pending['next_actions'] = [
+                    action.replace(shlex.quote(str(profile)), shlex.quote(str(recovery)))
+                    for action in pending.get('next_actions', [])
+                    if isinstance(action, str)
+                ]
+        messages = list(recovery_lines)
         for record in records:
             if item.path == 'storage s3 check':
                 from terminal_process import present_output
 
-                for message in present_output(item.path, json.dumps(record)):
-                    self.view.message(message)
+                shown = present_output(item.path, json.dumps(record))
+                # Temporary input profiles have been removed. Retry through the
+                # form, retaining only a real cleanup continuation when needed.
+                messages.extend(
+                    message
+                    for message in shown
+                    if not message.startswith('Следующий шаг:') or ' storage s3 cleanup ' in message
+                )
+        if item.path != 'storage s3 check':
+            messages.extend([*self.result_notices, *self.result_messages])
+        self.show_operation_result(item, code, list(dict.fromkeys(messages)))
+        if not self.view.fullscreen:
+            for message in recovery_lines:
+                self.view.message(message, 'yellow')
         return code
 
     def show_result_lines(self, title):

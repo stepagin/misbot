@@ -4,6 +4,7 @@ import codecs
 import json
 import os
 from pathlib import Path
+import re
 import selectors
 import time
 
@@ -19,6 +20,13 @@ def present_output(path, line):
     if not isinstance(record, dict):
         return messages
     authentication = record.get('authentication')
+    if record.get('check') == 'consistent_backup':
+        archive = record.get('archive')
+        digest = record.get('sha256')
+        if isinstance(archive, str) and Path(archive).is_absolute():
+            messages.append('Архив копии: ' + archive)
+        if isinstance(digest, str) and re.fullmatch(r'[0-9a-fA-F]{64}', digest):
+            messages.append('SHA256: ' + digest)
     if authentication in ('external-MAS-not-included', 'external-MAS-not-restored'):
         messages.append(
             'Внимание: пользователи, устройства, ключи и данные внешнего MAS '
