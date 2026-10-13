@@ -3,6 +3,8 @@ from pathlib import Path
 import sys
 import sqlite3
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor
 import time
 import unittest
 from unittest.mock import patch
@@ -137,6 +139,77 @@ class ControlTests(unittest.TestCase):
         with patch.object(self.api, 'device_user', return_value=self.api.active_user(user_id)):
             self.bridge.poll_auths()
 
+    def test_slow_mas_does_not_block_readiness_or_logout_and_revalidates(self):
+        self.authorize()
+        started, release = threading.Event(), threading.Event()
+        original = self.api.active_user
+
+        def slow(user_id):
+            started.set()
+            if not release.wait(3):
+                raise TimeoutError()
+            return original(user_id)
+
+        with patch.object(self.api, 'active_user', side_effect=slow), ThreadPoolExecutor(2) as pool:
+            result = pool.submit(self.call, 'identity')
+            try:
+                self.assertTrue(started.wait(1))
+                ready = pool.submit(self.bridge.handle, {'action': 'servers'})
+                self.assertIn('misbot.ru', ready.result(timeout=1))
+                logout = pool.submit(self.call, 'logout')
+                self.assertTrue(logout.result(timeout=1))
+            finally:
+                release.set()
+            self.assertFalse(result.result(timeout=1)['authenticated'])
+
+    def test_inflight_oauth_result_cannot_restore_logged_out_authorization(self):
+        self.call('auth_start')
+        self.bridge.db.execute('UPDATE auth_requests SET next_poll=0')
+        self.bridge.db.commit()
+        started, release = threading.Event(), threading.Event()
+
+        def token(code):
+            started.set()
+            if not release.wait(3):
+                raise TimeoutError()
+            return 200, {'scope': 'openid'}
+
+        with (
+            patch.object(self.api, 'device_token', side_effect=token),
+            ThreadPoolExecutor(2) as pool,
+        ):
+            result = pool.submit(self.bridge.poll_auths)
+            try:
+                self.assertTrue(started.wait(1))
+                self.assertTrue(pool.submit(self.call, 'logout').result(timeout=1))
+                self.assertIn('misbot.ru', self.bridge.handle({'action': 'servers'}))
+            finally:
+                release.set()
+            result.result(timeout=1)
+        self.assertFalse(self.call('identity')['authenticated'])
+
+    def test_matrix_history_http_releases_state_lock(self):
+        request = {'server': 'misbot.ru', 'mxid': '@member:misbot.ru'}
+        self.bridge.handle({'action': 'matrix_invite', 'request_id': 'matrix-history', **request})
+        self.authorize()
+        started, release = threading.Event(), threading.Event()
+        original = self.api.api
+
+        def slow(path, **kwargs):
+            started.set()
+            if not release.wait(3):
+                raise TimeoutError()
+            return original(path, **kwargs)
+
+        with patch.object(self.api, 'api', side_effect=slow), ThreadPoolExecutor(2) as pool:
+            result = pool.submit(self.bridge.handle, {'action': 'matrix_tokens', **request})
+            try:
+                self.assertTrue(started.wait(1))
+                self.assertTrue(pool.submit(self.call, 'logout').result(timeout=1))
+            finally:
+                release.set()
+            self.assertEqual(len(result.result(timeout=1)['tokens']), 1)
+
     def test_control_configuration_binds_exactly_one_server_before_database_changes(self):
         original = json.loads((self.root / 'bot-config.json').read_text())
         for servers in ({}, {'misbot.ru': {}, 'other.example': {}}, []):
@@ -225,6 +298,7 @@ class ControlTests(unittest.TestCase):
         self.authorize()
         self.authorize(11, user_id='MAS-USER')
         self.bridge.db.execute('UPDATE authorizations SET expires=expires+100 WHERE uid=11')
+        self.bridge.db.commit()
         invitation = self.call('invite', request_id='legacy-owner')
         self.bridge.db.close()
         self.bridge = Bridge(self.root / 'bot-config.json', lambda _: self.api)

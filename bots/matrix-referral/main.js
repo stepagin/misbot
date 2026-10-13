@@ -22,33 +22,37 @@ function control(request, timeout = 90000) {
     return new Promise((resolve, reject) => {
         let body = "";
         const socket = net.createConnection("/run/control/control.sock");
-        socket.setTimeout(timeout);
+        let settled = false;
+        const deadline = setTimeout(() => finish(new Error("Control timeout")), timeout);
+        function finish(error, result) {
+            if (settled) return;
+            settled = true;
+            clearTimeout(deadline);
+            socket.destroy();
+            if (error) reject(error);
+            else resolve(result);
+        }
         socket.on("connect", () => socket.write(JSON.stringify(request) + "\n"));
         socket.on("data", (chunk) => {
+            if (settled) return;
             body += chunk.toString();
-            if (body.length > 32768) {
-                socket.destroy();
-                return reject(new Error("Invalid control response"));
-            }
+            if (body.length > 32768) return finish(new Error("Invalid control response"));
             if (!body.includes("\n")) return;
-            socket.end();
             try {
                 const result = JSON.parse(body.split("\n")[0]);
-                if (!result.ok) {
+                if (!result || !result.ok) {
                     const error = new Error("Control operation denied");
-                    error.userMessage = result.error;
-                    return reject(error);
+                    error.userMessage = result?.error;
+                    return finish(error);
                 }
-                resolve(result.result);
-            } catch (error) {
-                reject(error);
+                finish(null, result.result);
+            } catch {
+                finish(new Error("Invalid control response"));
             }
         });
-        socket.on("timeout", () => {
-            socket.destroy();
-            reject(new Error("Control timeout"));
-        });
-        socket.on("error", () => reject(new Error("Control unavailable")));
+        socket.on("end", () => finish(new Error("Incomplete control response")));
+        socket.on("close", () => finish(new Error("Incomplete control response")));
+        socket.on("error", () => finish(new Error("Control unavailable")));
     });
 }
 

@@ -10,6 +10,8 @@ import unittest
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import requests
+
 from common import BotError
 from worker import Bot, Health, TelegramError
 
@@ -550,8 +552,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(self.bot.state('navigation:123')['message_id'], 2)
         self.bot.telegram.reset_mock()
         self.bot.telegram.side_effect = TelegramError(429, 'Too Many Requests')
-        with self.assertRaises(BotError):
-            self.bot.screen(123, 'Третий экран')
+        self.bot.screen(123, 'Третий экран')
         self.assertEqual(self.bot.telegram.call_count, 1)
         self.assertEqual(self.bot.state('navigation:123')['payload']['text'], 'Второй экран')
 
@@ -821,12 +822,141 @@ class WorkerTests(unittest.TestCase):
             return {'ok': True}
 
         with patch('worker.bridge_call', side_effect=control):
-            with self.assertRaises(BotError):
-                self.bot.notifications()
+            self.bot.notifications()
             self.bot.notifications()
         self.assertEqual(self.bot.telegram.call_count, 1)
         self.assertEqual(len(attempts), 2)
         self.assertEqual(attempts[0]['id'], 'event-1')
+
+    def test_blocked_chat_does_not_poison_polling_or_repeat_mutation(self):
+        first = self.message()
+        first['message']['text'] = '/logout'
+        second = self.message(chat=456, sender=456)
+        second['update_id'] = first['update_id'] + 1
+        self.bot.config['client_id'] = '1'
+        self.bot.state('offset', first['update_id'])
+        fetched = []
+
+        def telegram(method, payload=None, **kwargs):
+            if method == 'getMe':
+                return {'username': 'test', 'id': 1}
+            if method == 'getWebhookInfo':
+                return {}
+            if method == 'getUpdates':
+                fetched.append(payload['offset'])
+                if len(fetched) > 1:
+                    raise KeyboardInterrupt()
+                return [first, second]
+            if payload.get('chat_id') == 123:
+                raise TelegramError(403, 'bot blocked')
+            return {'message_id': 1}
+
+        self.bot.telegram = Mock(side_effect=telegram)
+        self.bot.notifications = Mock()
+
+        def control(request):
+            return True if request['action'] == 'logout' else self.control(request)
+
+        with patch('worker.bridge_call', side_effect=control) as bridge:
+            with self.assertRaises(KeyboardInterrupt):
+                self.bot.polling()
+        self.assertEqual(fetched, [first['update_id'], second['update_id'] + 1])
+        self.assertEqual(
+            sum(call.args[0]['action'] == 'logout' for call in bridge.call_args_list), 1
+        )
+        self.assertTrue(
+            any(
+                call.args[1].get('chat_id') == 456
+                for call in self.bot.telegram.call_args_list
+                if len(call.args) > 1
+            )
+        )
+        self.assertTrue(self.bot.last_poll_success)
+
+    def test_temporary_delivery_survives_restart_and_honors_backoff(self):
+        self.bot.telegram.side_effect = TelegramError(429, 'rate limit', retry_after=120)
+        with patch('worker.time.time', return_value=100):
+            self.bot.send(123, 'Результат операции')
+        restarted = Bot(self.bot.config, self.tmp.name)
+        try:
+            restarted.telegram = Mock(return_value={'message_id': 5})
+            with patch('worker.time.time', return_value=219):
+                restarted.retry_deliveries()
+            restarted.telegram.assert_not_called()
+            with patch('worker.time.time', return_value=220):
+                restarted.retry_deliveries()
+            restarted.telegram.assert_called_once()
+            self.assertEqual(
+                restarted.db.execute(
+                    "SELECT COUNT(*) FROM state WHERE key LIKE 'delivery:%'"
+                ).fetchone()[0],
+                0,
+            )
+        finally:
+            restarted.db.close()
+
+    def test_new_screen_supersedes_pending_old_navigation(self):
+        self.bot.telegram.side_effect = TelegramError(429, 'rate limit')
+        self.bot.screen(123, 'Старое меню')
+        self.bot.telegram.side_effect = None
+        self.bot.screen(123, 'Новое меню')
+        self.bot.telegram.reset_mock()
+        with patch('worker.time.time', return_value=time.time() + 100):
+            self.bot.retry_deliveries()
+        self.bot.telegram.assert_not_called()
+        self.assertEqual(self.bot.state('navigation:123')['payload']['text'], 'Новое меню')
+
+    def test_notifications_isolate_permanent_and_temporary_recipient_failures(self):
+        items = [{'uid': uid, 'id': str(uid), 'message': 'Уведомление'} for uid in (1, 2, 3)]
+        acknowledgements = []
+
+        def control(request):
+            if request['action'] == 'servers':
+                return self.policy
+            if request['action'] == 'federation_notifications':
+                return {'notifications': items}
+            acknowledgements.append(request['uid'])
+            return {'ok': True}
+
+        def send(method, payload, **kwargs):
+            if payload['chat_id'] == 1:
+                raise TelegramError(403, 'blocked')
+            if payload['chat_id'] == 2:
+                raise requests.Timeout()
+            return {'message_id': 3}
+
+        self.bot.telegram.side_effect = send
+        with patch('worker.bridge_call', side_effect=control):
+            self.bot.notifications()
+        self.assertEqual(acknowledgements, [1, 3])
+        self.assertEqual(self.bot.state('delivery:notification:2:2')['status'], 'pending')
+
+    def test_delivery_retries_are_bounded_and_eventually_terminal(self):
+        self.bot.telegram.side_effect = requests.Timeout()
+        for uid in range(4):
+            self.bot.send(uid, 'Ответ')
+        self.bot.telegram.reset_mock()
+        with patch('worker.time.time', return_value=time.time() + 100):
+            self.bot.retry_deliveries()
+        self.assertEqual(self.bot.telegram.call_count, 2)
+        for step in range(20):
+            with patch('worker.time.time', return_value=time.time() + 10000 * (step + 1)):
+                self.bot.retry_deliveries()
+        self.assertEqual(
+            self.bot.db.execute(
+                "SELECT COUNT(*) FROM state WHERE key LIKE 'delivery:%'"
+            ).fetchone()[0],
+            0,
+        )
+        self.assertEqual(len(self.bot.state('delivery_failures')), 4)
+
+    def test_callback_transport_failure_does_not_discard_command(self):
+        self.bot.telegram.side_effect = [requests.Timeout(), {'message_id': 1}]
+        self.bot.call = Mock(return_value={'authenticated': True})
+        self.bot.menu = Mock()
+        with patch('worker.bridge_call', return_value=self.policy):
+            self.bot.process(self.callback('menu'))
+        self.bot.menu.assert_called_once()
 
     def test_unavailable_statistics_do_not_invent_counts(self):
         self.bot.call = Mock(

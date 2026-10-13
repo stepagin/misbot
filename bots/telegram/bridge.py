@@ -119,6 +119,7 @@ class Bridge:
         self.db.commit()
         self.apis = {name: api_factory(cfg) for name, cfg in self.config['servers'].items()}
         self.lock = threading.RLock()
+        self.auth_inflight = set()
 
     def policies(self):
         policies = read_json(self.policy_path).get('servers')
@@ -132,14 +133,30 @@ class Bridge:
             raise BotError('Сервер не подключён к этому боту.')
         return name, self.apis[name], self.policies()[name]
 
-    def member(self, name, uid):
-        self.poll_auths()
-        row = self.db.execute(
+    def external(self, operation, *args, **kwargs):
+        """Run I/O outside the handle's state lock, never during a transaction."""
+        if self.db.in_transaction:
+            raise RuntimeError('External operation during an uncommitted transaction')
+        self.lock.release()
+        try:
+            return operation(*args, **kwargs)
+        finally:
+            self.lock.acquire()
+
+    def authorization(self, name, uid):
+        return self.db.execute(
             'SELECT * FROM authorizations WHERE server=? AND uid=?', (name, uid)
         ).fetchone()
+
+    def member(self, name, uid):
+        row = self.authorization(name, uid)
         if not row or row['expires'] <= time.time():
             raise BotError('Вход в Misbot не подтверждён. Для входа отправьте /start.')
-        return self.apis[name].active_user(row['user_id'])
+        user = self.external(self.apis[name].active_user, row['user_id'])
+        current = self.authorization(name, uid)
+        if not current or tuple(current) != tuple(row) or current['expires'] <= time.time():
+            raise BotError('Привязка аккаунта изменилась. Для входа отправьте /start.')
+        return user
 
     def admin(self, name, uid):
         user = self.member(name, uid)
@@ -195,53 +212,81 @@ class Bridge:
         )
 
     def poll_auths(self):
+        now = int(time.time())
         with self.lock:
-            now = int(time.time())
             rows = self.db.execute(
                 'SELECT * FROM auth_requests WHERE server=? AND expires>? AND next_poll<=? AND error IS NULL',
                 (self.server_name, now, now),
             ).fetchall()
-            for row in rows:
-                if not self.db.execute(
-                    'SELECT 1 FROM auth_requests WHERE request=?', (row['request'],)
-                ).fetchone():
+        for row in rows:
+            key = row['request']
+            with self.lock:
+                if (
+                    key in self.auth_inflight
+                    or not self.db.execute(
+                        'SELECT 1 FROM auth_requests WHERE request=?', (key,)
+                    ).fetchone()
+                ):
                     continue
+                self.auth_inflight.add(key)
+            try:
                 api = self.apis[row['server']]
+                failure = None
+                user = None
                 try:
                     status, token = api.device_token(row['device_code'])
                     if status == 200:
                         user = api.device_user(token)
-                        with self.db:
+                except Exception as error:
+                    failure = error
+                with self.lock:
+                    current = self.db.execute(
+                        'SELECT * FROM auth_requests WHERE request=?', (key,)
+                    ).fetchone()
+                    # Logout or a newer grant must win over an old network response.
+                    if (
+                        not current
+                        or tuple(current) != tuple(row)
+                        or current['expires'] <= time.time()
+                    ):
+                        continue
+                    now = int(time.time())
+                    with self.db:
+                        if failure is not None:
+                            if isinstance(failure, BotError):
+                                self.db.execute(
+                                    'UPDATE auth_requests SET error=? WHERE request=?',
+                                    ('denied', key),
+                                )
+                            else:
+                                self.db.execute(
+                                    'UPDATE auth_requests SET next_poll=? WHERE request=?',
+                                    (now + 15, key),
+                                )
+                            LOG.error(
+                                'device authorization poll failed type=%s', type(failure).__name__
+                            )
+                        elif user is not None:
                             self.bind_telegram_account(
                                 row['server'], row['uid'], user['id'], now + 86400
                             )
-                            self.db.execute(
-                                'DELETE FROM auth_requests WHERE request=?', (row['request'],)
+                            self.db.execute('DELETE FROM auth_requests WHERE request=?', (key,))
+                            LOG.info('account authorization completed server=%s', row['server'])
+                        elif token.get('error') in ('authorization_pending', 'slow_down'):
+                            interval = row['interval'] + (
+                                5 if token.get('error') == 'slow_down' else 0
                             )
-                        LOG.info('account authorization completed server=%s', row['server'])
-                    elif token.get('error') in ('authorization_pending', 'slow_down'):
-                        interval = row['interval'] + (5 if token.get('error') == 'slow_down' else 0)
-                        self.db.execute(
-                            'UPDATE auth_requests SET interval=?,next_poll=? WHERE request=?',
-                            (interval, now + interval, row['request']),
-                        )
-                    else:
-                        self.db.execute(
-                            'UPDATE auth_requests SET error=? WHERE request=?',
-                            ('denied', row['request']),
-                        )
-                except BotError:
-                    self.db.execute(
-                        'UPDATE auth_requests SET error=? WHERE request=?',
-                        ('denied', row['request']),
-                    )
-                except Exception as error:
-                    self.db.execute(
-                        'UPDATE auth_requests SET next_poll=? WHERE request=?',
-                        (now + 15, row['request']),
-                    )
-                    LOG.error('device authorization poll failed type=%s', type(error).__name__)
-                self.db.commit()
+                            self.db.execute(
+                                'UPDATE auth_requests SET interval=?,next_poll=? WHERE request=?',
+                                (interval, now + interval, key),
+                            )
+                        else:
+                            self.db.execute(
+                                'UPDATE auth_requests SET error=? WHERE request=?', ('denied', key)
+                            )
+            finally:
+                with self.lock:
+                    self.auth_inflight.discard(key)
 
     def auth_loop(self):
         while True:
@@ -297,19 +342,25 @@ class Bridge:
                 period = request.get('period', 'day')
                 if period not in ('day', 'week', 'month', 'all'):
                     raise BotError('Период не распознан. Выберите день, неделю или месяц.')
-                return run_control(config, operation, period=period)
-            return run_control(config, operation)
+                result = self.external(run_control, config, operation, period=period)
+            else:
+                result = self.external(run_control, config, operation)
+            if self.admin(name, uid)['id'] != user['id']:
+                raise BotError('Привязка аккаунта изменилась. Повторите вход.')
+            return result
         if action == 'manage_prepare':
             if operation not in controls.WRITES:
                 raise BotError('Эта операция доступна без подтверждения. Выберите её в меню бота.')
             key = secrets.token_urlsafe(16)
-            self.db.execute('DELETE FROM confirmations WHERE expires<?', (int(time.time()),))
             version = ''
             if operation == 'update':
-                release = run_control(config, 'update_check').get('release', {})
+                release = self.external(run_control, config, 'update_check').get('release', {})
+                if self.admin(name, uid)['id'] != user['id']:
+                    raise BotError('Привязка аккаунта изменилась. Повторите вход.')
                 if not release.get('update_available') or not release.get('latest'):
                     raise BotError('Более новая поддерживаемая версия не найдена.')
                 version = release['latest']
+            self.db.execute('DELETE FROM confirmations WHERE expires<?', (int(time.time()),))
             self.db.execute(
                 'INSERT INTO confirmations VALUES (?,?,?,?,?,?)',
                 (key, name, uid, 'manage:' + operation, version, int(time.time()) + 300),
@@ -577,7 +628,12 @@ class Bridge:
         ).fetchone()
         if not row:
             raise BotError('Получатель уведомлений не подключён.')
-        user = self.apis[name].active_user(row['user_id'])
+        user = self.external(self.apis[name].active_user, row['user_id'])
+        current = self.db.execute(
+            'SELECT user_id FROM authorizations WHERE server=? AND uid=?', (name, uid)
+        ).fetchone()
+        if not current or current['user_id'] != row['user_id']:
+            raise BotError('Получатель уведомлений больше не подключён.')
         attributes = user['attributes']
         if not attributes.get('admin', attributes.get('can_request_admin', False)):
             raise BotError('Для уведомлений нужны действующие права администратора MAS.')
@@ -586,11 +642,13 @@ class Bridge:
     def notifications(self, name):
         users = self.db.execute('SELECT uid FROM authorizations WHERE server=?', (name,)).fetchall()
         notices = []
+        recipients = {}
         backend = None
         for row in users:
             uid = row['uid']
             try:
                 user = self.notification_admin(name, uid)
+                recipients[uid] = user['id']
                 actor = '@' + user['attributes']['username'] + ':' + name
                 config = self.config['servers'][name]
                 if config.get('federation_backend') == 'misbot' and config.get(
@@ -715,8 +773,19 @@ class Bridge:
                 )
             except Exception as error:
                 LOG.warning('Telegram notification check failed type=%s', type(error).__name__)
-        self.db.commit()
-        return {'notifications': notices}
+            finally:
+                self.db.commit()
+        current = {
+            row['uid']: row['user_id']
+            for row in self.db.execute(
+                'SELECT uid,user_id FROM authorizations WHERE server=?', (name,)
+            )
+        }
+        return {
+            'notifications': [
+                item for item in notices if current.get(item['uid']) == recipients[item['uid']]
+            ]
+        }
 
     def invite(self, name, api, policy, uid, request_id, inviter_name=None):
         if not isinstance(request_id, str) or not 1 <= len(request_id) <= 90:
@@ -864,21 +933,21 @@ class Bridge:
         raise BotError('Запуск Synapse не подтверждён. Обратитесь к администратору.')
 
     def handle(self, request):
-        with self.lock:
-            action = request.get('action')
-            if action == 'servers':
-                return {
-                    name: {
-                        'lifetime_seconds': p['invitation_lifetime_seconds'],
-                        'usage_limit': p['invitation_usage_limit'],
-                        'registration_required': p['registration_required'],
-                        'federation_enabled': self.config['servers'][name].get(
-                            'federation_enabled', True
-                        ),
-                        'management_actions': self.management_config(name)['management_actions'],
-                    }
-                    for name, p in self.policies().items()
+        action = request.get('action')
+        if action == 'servers':
+            return {
+                name: {
+                    'lifetime_seconds': p['invitation_lifetime_seconds'],
+                    'usage_limit': p['invitation_usage_limit'],
+                    'registration_required': p['registration_required'],
+                    'federation_enabled': self.config['servers'][name].get(
+                        'federation_enabled', True
+                    ),
+                    'management_actions': self.management_config(name)['management_actions'],
                 }
+                for name, p in self.policies().items()
+            }
+        with self.lock:
             if action == 'federation_notifications':
                 name = request.get('server')
                 if name not in self.apis:
@@ -903,9 +972,12 @@ class Bridge:
                 identifier = request.get('id')
                 if not isinstance(identifier, str) or not re.fullmatch(r'[0-9a-f]{64}', identifier):
                     raise BotError('Уведомление не распознано.')
+                delivery_status = request.get('delivery_status', 'sent')
+                if delivery_status not in ('sent', 'failed'):
+                    raise BotError('Состояние доставки не распознано.')
                 self.db.execute(
-                    "UPDATE telegram_notifications SET state='sent' WHERE id=? AND server=? AND uid=?",
-                    (identifier, name, uid),
+                    'UPDATE telegram_notifications SET state=? WHERE id=? AND server=? AND uid=?',
+                    (delivery_status, identifier, name, uid),
                 )
                 self.db.commit()
                 return {'acknowledged': True}
@@ -938,7 +1010,7 @@ class Bridge:
                     raise
             if matrix_action:
                 uid = request.get('mxid')
-                user = api.matrix_user(uid, name)
+                user = self.external(api.matrix_user, uid, name)
                 if action == 'matrix_identity':
                     return {'authenticated': True, 'username': user['attributes']['username']}
                 action = action.removeprefix('matrix_')
@@ -982,7 +1054,14 @@ class Bridge:
                     # after their expiry; explicit revocation always hides them.
                     visible = []
                     for row in rows:
-                        item = api.api('user-registration-tokens/' + row['resource'])['data']
+                        item = self.external(
+                            api.api, 'user-registration-tokens/' + row['resource']
+                        )['data']
+                        if not self.db.execute(
+                            'SELECT 1 FROM invitations WHERE server=? AND uid=? AND resource=?',
+                            (name, uid, row['resource']),
+                        ).fetchone():
+                            raise BotError('Приглашение больше не принадлежит этому аккаунту.')
                         attr = item['attributes']
                         expired = (
                             attr.get('expires_at')
