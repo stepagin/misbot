@@ -70,6 +70,60 @@ class WorkerTests(unittest.TestCase):
             return {'user_code': 'ABCD-EFGH', 'url': 'https://mas.misbot.ru/link'}
         raise AssertionError('Unexpected action: ' + request['action'])
 
+    def test_failed_checks_show_safe_backend_details_and_repeat_button(self):
+        self.bot.call = Mock(
+            return_value={
+                'ok': False,
+                'checks': [
+                    {
+                        'name': 'mas_health',
+                        'passed': False,
+                        'detail': 'Ответ не получен за отведённое время.',
+                    }
+                ],
+            }
+        )
+        self.bot.manage(123, 123, 'check')
+        payload = self.bot.telegram.call_args.args[1]
+        self.assertIn('Ответ не получен', payload['text'])
+        self.assertNotIn('misbot check', payload['text'])
+        self.assertEqual(
+            payload['reply_markup']['inline_keyboard'][0][0]['callback_data'], 'manage|check'
+        )
+
+    def test_status_explains_stopped_and_unhealthy_services(self):
+        self.bot.call = Mock(
+            return_value={
+                'ok': False,
+                'containers': [
+                    {'name': 'mas', 'running': False, 'healthy': False},
+                    {'name': 'synapse', 'running': True, 'healthy': False},
+                ],
+            }
+        )
+        self.bot.manage(123, 123, 'status')
+        text = self.bot.telegram.call_args.args[1]['text']
+        self.assertIn('mas — служба остановлена', text)
+        self.assertIn('synapse — служба работает, проверка здоровья не пройдена', text)
+        self.assertNotIn('misbot status', text)
+
+    def test_stop_confirmation_has_ssh_return_instructions(self):
+        self.bot.call = Mock(return_value={'confirmation': 'saved'})
+        self.bot.manage(123, 123, 'stop')
+        text = self.bot.telegram.call_args.args[1]['text']
+        self.assertIn('<code>sudo misbot start</code>', text)
+        self.assertIn('<code>sudo misbot check</code>', text)
+        self.assertIn('MAS', text)
+
+    def test_more_has_logout_and_explicit_prepared_profile_action(self):
+        self.policy['misbot.ru']['management_actions'] = ['storage_connect']
+        with patch('worker.bridge_call', side_effect=self.control):
+            self.bot.group(123, 123, 'more')
+        buttons = self.bot.telegram.call_args.args[1]['reply_markup']['inline_keyboard']
+        labels = {button['callback_data']: button['text'] for row in buttons for button in row}
+        self.assertEqual(labels['/logout'], 'Выйти из бота')
+        self.assertIn('подготовленный профиль', labels['manage|storage_connect'])
+
     def test_start_reaches_control_and_sends_admin_menu(self):
         self.identity = {'authenticated': True, 'username': 'stepan', 'admin': True}
         with patch('worker.bridge_call', side_effect=self.control) as control:
@@ -454,8 +508,9 @@ class WorkerTests(unittest.TestCase):
         body = self.bot.telegram.call_args.args[1]['text']
         self.assertIn('Проверено: synapse', body)
         self.assertIn('Нужна проверка: mas', body)
-        for command in ('misbot backup recover', 'misbot status', 'misbot check'):
-            self.assertIn(command, body)
+        self.assertIn('misbot backup recover', body)
+        self.assertNotIn('misbot status', body)
+        self.assertNotIn('misbot check', body)
         self.bot.call.assert_called_once_with('manage_read', 123, operation='check')
 
     @staticmethod

@@ -187,6 +187,8 @@ def primary_output(path, line):
             )
         return messages or ['Сведения о службах не получены.']
     if record.get('check') in ('existing_storage_status', 'storage_status'):
+        if record.get('passed') is False:
+            return ['Сохранённое состояние хранилища не удалось проверить.']
         return [
             'Медиа: ' + ('S3' if record.get('media_s3') else 'на этом сервере') + '.',
             'Копии: ' + ('S3' if record.get('backup_s3') else 'локальные') + '.',
@@ -196,7 +198,20 @@ def primary_output(path, line):
             'Внешняя копия: '
             + ('проверена' if record.get('last_backup_verified') else 'не подтверждена')
             + '.',
-        ]
+        ] + (
+            [
+                'База данных: '
+                + (
+                    'внешняя PostgreSQL'
+                    if record.get('database_mode') == 'external'
+                    else 'на этом сервере'
+                )
+                + '.',
+                'Команда «Создать локальную копию» сохраняет архив на этом сервере.',
+            ]
+            if record.get('manual_backup_destination') == 'local'
+            else []
+        )
     if record.get('check') == 'backup_schedule_status':
         if 'configured' in record:
             return [

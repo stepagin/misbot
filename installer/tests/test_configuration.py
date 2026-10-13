@@ -1,6 +1,7 @@
 """Real publication faults and shared runtime loading, with fictional data only."""
 
 import fcntl
+from contextlib import ExitStack
 import hashlib
 import json
 import os
@@ -262,6 +263,65 @@ class ConfigurationTests(unittest.TestCase):
             schema.validate(
                 {'DOMAIN': 'fictional.example.org', 'MAS_DOMAIN': 'web.fictional.example.org'}
             )
+
+    def test_apply_provider_pair_uses_backup_and_publishes_private_auth_settings(self):
+        config.migrate(self.root)
+        changes = {
+            'TELEGRAM_CLIENT_ID': 'FICTIONAL_TELEGRAM_ID',
+            'TELEGRAM_CLIENT_SECRET': 'FICTIONAL_TELEGRAM_SECRET',
+            'SOCKS5_CONFIG': 'socks5://proxy.example.org:1080',
+        }
+        calls = []
+        with ExitStack() as stack:
+            for name in ('configure', 'ownership_check', 'backup', 'restore_check', 'up'):
+                stack.enter_context(
+                    patch(
+                        'lifecycle.' + name,
+                        side_effect=lambda *args, name=name, **kwargs: calls.append(name),
+                    )
+                )
+            config.apply_settings(self.root, changes)
+        self.assertEqual(calls, ['configure', 'ownership_check', 'backup', 'restore_check', 'up'])
+        current = config.load(self.root, True)
+        self.assertEqual({key: current[key] for key in changes}, changes)
+        self.assertEqual(current['DOMAIN'], 'fictional.example.org')
+        self.assertEqual((self.key / 'identity.key').read_text(), 'FICTIONAL_IMMUTABLE')
+        self.assertEqual((self.root / 'settings/auth.env').stat().st_mode & 0o777, 0o600)
+
+    def test_incomplete_provider_pair_and_identity_change_fail_before_backup(self):
+        before = config.load(self.root, True)
+        for changes in (
+            {'TELEGRAM_CLIENT_ID': 'FICTIONAL_ONLY_ID'},
+            {'DOMAIN': 'different.example.org'},
+            {'MAS_DOMAIN': 'auth.example.net'},
+        ):
+            with self.subTest(changes=tuple(changes)), patch('lifecycle.backup') as backup:
+                with self.assertRaises(RuntimeError):
+                    config.apply_settings(self.root, changes)
+                backup.assert_not_called()
+                self.assertEqual(config.load(self.root, True), before)
+
+    def test_failed_provider_apply_restores_previous_pair_and_proxy(self):
+        before = config.load(self.root, True)
+        with ExitStack() as stack:
+            for name in ('configure', 'ownership_check', 'backup', 'restore_check'):
+                stack.enter_context(patch('lifecycle.' + name))
+            stack.enter_context(
+                patch('lifecycle.up', side_effect=RuntimeError('FICTIONAL_RUNTIME_ERROR'))
+            )
+            with self.assertRaisesRegex(RuntimeError, 'Settings restored'):
+                config.apply_settings(
+                    self.root,
+                    {
+                        'GOOGLE_CLIENT_ID': '',
+                        'GOOGLE_CLIENT_SECRET': '',
+                        'TELEGRAM_CLIENT_ID': 'FICTIONAL_NEW_ID',
+                        'TELEGRAM_CLIENT_SECRET': 'FICTIONAL_NEW_SECRET',
+                        'SOCKS5_CONFIG': 'socks5://proxy.example.org:1080',
+                    },
+                )
+        self.assertEqual(config.load(self.root, True), before)
+        self.assertEqual((self.key / 'identity.key').read_text(), 'FICTIONAL_IMMUTABLE')
 
 
 if __name__ == '__main__':

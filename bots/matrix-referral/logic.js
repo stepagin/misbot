@@ -138,12 +138,13 @@ class ReferralBot {
             roomId,
             `Реферальный бот\n\nпригласить — создать приглашение\nпригласить Для Антона — создать с названием\nтокены [offset] — показать ваши приглашения (например: токены 20)\nотозвать [ID] — выбрать и отозвать ваше приглашение
 помощь — эта справка
-отмена — отменить выбор; ещё — следующая страница выбора\n\nРегистраций на код: ${usage}. Срок: ${duration}.`
+отмена — отменить выбор; ещё / назад — страницы списка; ещё — следующая страница выбора отзыва\n\nРегистраций на код: ${usage}. Срок: ${duration}.`
         );
     }
     async list(room, sender, offset, revoke = false, previous = null) {
         const page = await this.call("tokens", sender, { offset, limit: 20 });
         if (!page.tokens.length) {
+            if (!revoke) this.store.setValue(this.key("browse", room, sender), null);
             if (revoke && !previous) this.store.setValue(this.key("revoke", room, sender), null);
             return this.client.sendNotice(
                 room,
@@ -164,9 +165,12 @@ class ReferralBot {
         const title = revoke ? "Какое приглашение отозвать?" : "Ваши приглашения";
         const footer = revoke
             ? `Напишите номер приглашения. Отмена: отмена. Выбор действует 15 минут.${page.has_more ? "\nЕщё приглашения: ещё" : ""}`
-            : page.has_more
-              ? `Ещё приглашения: токены ${offset + 20}`
-              : "";
+            : [
+                  offset > 0 ? "Предыдущая страница: назад" : "",
+                  page.has_more ? "Следующая страница: ещё" : ""
+              ]
+                  .filter(Boolean)
+                  .join("\n");
         if (revoke)
             this.store.setValue(this.key("revoke", room, sender), {
                 ids: [...(previous?.ids || []), ...page.tokens.map((x) => x.id)],
@@ -184,6 +188,13 @@ class ReferralBot {
         ]
             .filter(Boolean)
             .join("<br><br>");
+        if (!revoke)
+            this.store.setValue(this.key("browse", room, sender), {
+                offset,
+                next: offset + page.tokens.length,
+                hasMore: page.has_more,
+                expires: Date.now() + 900000
+            });
         return this.client.sendMessage(room, notice(body, html));
     }
     async handle(room, event, text) {
@@ -196,7 +207,26 @@ class ReferralBot {
         let dialog = this.store.getValue(key);
         if (["отмена", "0"].includes(command)) {
             this.store.setValue(key, null);
-            return this.client.sendNotice(room, "Отзыв отменён. Коды сохранены.");
+            this.store.setValue(this.key("browse", room, sender), null);
+            return this.client.sendNotice(room, "Выбор отменён. Коды сохранены.");
+        }
+        if (!dialog && ["ещё", "назад"].includes(command)) {
+            const browse = this.store.getValue(this.key("browse", room, sender));
+            if (!browse || browse.expires <= Date.now())
+                return this.client.sendNotice(
+                    room,
+                    "Список приглашений не открыт или устарел. Отправьте «токены»."
+                );
+            if (command === "ещё" && !browse.hasMore)
+                return this.client.sendNotice(
+                    room,
+                    "Это последняя страница. Предыдущая: назад. Открыть список сначала: токены."
+                );
+            return this.list(
+                room,
+                sender,
+                command === "назад" ? Math.max(0, browse.offset - 20) : browse.next
+            );
         }
         if (/^\d+$/.test(text) || command === "ещё") {
             if (!dialog || dialog.expires <= Date.now()) {

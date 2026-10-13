@@ -151,7 +151,9 @@ class OperationTests(unittest.TestCase):
             self.assertIn('sudo misbot backup verify', frame)
             self.assertIn('Подтверждено:', frame)
             self.assertNotIn('FICTIONAL_RAW_SDK_SECRET', frame)
-            self.assertEqual(interface.operation_records, [])
+            self.assertEqual(len(interface.operation_records), 1)
+            self.assertEqual(interface.operation_records[0]['sha256'], 'a' * 64)
+            self.assertNotIn('FICTIONAL_RAW_SDK_SECRET', str(interface.operation_records))
 
     @unittest.skipIf(terminal_views.Console is None, 'Rich is optional')
     def test_failure_reason_remains_on_final_operation_page(self):
@@ -245,7 +247,6 @@ class OperationTests(unittest.TestCase):
     @unittest.skipIf(terminal_views.Console is None, 'Rich is optional')
     def test_restore_continuation_is_visible_before_final_acknowledgement(self):
         from rich.console import Group
-        import shlex
 
         for path in ('backup restore', 'backup restore-local'):
             for mode in ('local', 'external'):
@@ -295,17 +296,14 @@ class OperationTests(unittest.TestCase):
                         )
                     self.assertEqual(len(final_frames), 1)
                     frame = final_frames[0]
-                    expected = (
-                        'sudo misbot --directory '
-                        + shlex.quote(str(target))
-                        + ' backup activate --confirm source-stopped'
-                    )
+                    expected = '«Восстановление и перенос» → «Активировать восстановленный сервер»'
                     self.assertIn(expected, frame)
+                    self.assertNotIn('sudo misbot', frame)
                     self.assertIn('остановите источник и переключите DNS', frame)
                     self.assertEqual(
-                        '--external-mas-confirm preserved-state' in frame, mode == 'external'
+                        'подтверждение сохранности внешнего MAS' in frame, mode == 'external'
                     )
-                    self.assertEqual(interface.root, root)
+                    self.assertEqual(interface.root, target)
 
     def test_external_mas_activation_preserves_both_confirmations(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -319,7 +317,7 @@ class OperationTests(unittest.TestCase):
                     'mas_mode': 'external',
                 },
             )
-            answers = iter(['source-stopped', 'wrong', 'preserved-state', 'да'])
+            answers = iter(['да', 'да', 'да'])
             with patch('configuration.load', return_value={}):
                 interface = self.interface(root, reader=lambda *_: next(answers))
             with (

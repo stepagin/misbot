@@ -40,7 +40,6 @@ SHELL_TARGETS = {
     'generate': ('lifecycle.py', 'generate'),
     'preflight': ('preflight.py', None),
     'status': ('lifecycle.py', 'status'),
-    'storage-status': ('lifecycle.py', 'status'),
     'check': ('lifecycle.py', 'check'),
     'up': ('lifecycle.py', 'up'),
     'stop': ('lifecycle.py', 'stop'),
@@ -272,6 +271,8 @@ class CommandContractTests(unittest.TestCase):
             complete = self.arguments(command)
             cases = [complete + ['--unknown-private-option', 'FICTIONAL_SECRET']]
             for name in command.arguments:
+                if name in cli_commands.AUTOMATIC_ARGUMENTS.get(command.path, ()):
+                    continue
                 index = complete.index('--' + name)
                 cases.append(complete[:index] + complete[index + 2 :])
             for args in cases:

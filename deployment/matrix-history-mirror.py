@@ -7,11 +7,13 @@ through federation when the destination account paginates room history.
 
 import argparse
 import fcntl
+import getpass
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import secrets
 import signal
 import sqlite3
 import ssl
@@ -650,44 +652,121 @@ def status(state_dir):
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
+def start_parameters(args, state_dir, parser):
+    """Fill only missing interactive inputs, keeping credentials out of argv and output."""
+    interactive = sys.stdin.isatty() and sys.stdout.isatty()
+    previous = state_dir / 'config.json'
+    saved = {}
+    if previous.exists():
+        private_file(previous)
+        saved = json.loads(previous.read_text(encoding='utf-8'))
+        if not isinstance(saved, dict):
+            raise ValueError('Invalid saved mirror configuration')
+    config = {
+        key: str(value.resolve()) if isinstance(value, Path) else value
+        for key, value in vars(args).items()
+        if key not in ('command', 'state_dir') and value is not None
+    }
+    tokens = {}
+    for side, label in (('source', 'Исходный аккаунт'), ('target', 'Новый аккаунт')):
+        for suffix, prompt in (
+            ('url', 'HTTPS-адрес Matrix API'),
+            ('user', 'Matrix ID (@имя:домен)'),
+        ):
+            key = side + '_' + suffix
+            if config.get(key):
+                continue
+            if not interactive:
+                parser.error('the following argument is required: --' + key.replace('_', '-'))
+            config[key] = saved.get(key) or input(label + ': ' + prompt + ': ').strip()
+        file_key, command_key = side + '_token_file', side + '_token_command'
+        if config.get(file_key) or config.get(command_key):
+            continue
+        if not interactive:
+            parser.error(
+                'one of --'
+                + file_key.replace('_', '-')
+                + ' / --'
+                + command_key.replace('_', '-')
+                + ' is required'
+            )
+        if all(config[side + '_' + key] == saved.get(side + '_' + key) for key in ('url', 'user')):
+            for key in (file_key, command_key):
+                if saved.get(key):
+                    config[key] = saved[key]
+        if config.get(file_key) or config.get(command_key):
+            continue
+        token = getpass.getpass(label + ': Client API access token (ввод скрыт): ')
+        if not token or len(token.encode()) > 4096 or any(ord(char) < 33 for char in token):
+            raise ValueError(
+                'Токен должен быть непустой строкой без пробелов и управляющих символов.'
+            )
+        path = state_dir / (side + '-token-' + secrets.token_hex(12))
+        tokens[path] = token
+        config[file_key] = str(path)
+    for key, default in (('interval', 30), ('reconcile_interval', 1800)):
+        config.setdefault(key, saved.get(key, default) if interactive else default)
+    if interactive:
+        for key in ('media_manifest', 'media_origin'):
+            if key not in config and saved.get(key):
+                config[key] = saved[key]
+    return config, saved, tokens
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
     start = sub.add_parser('start', help='Save parameters and launch a background worker')
-    start.add_argument('--state-dir', type=Path, required=True)
+    start.add_argument(
+        '--state-dir',
+        type=Path,
+        default=Path.home() / '.local/state/matrix-history-mirror',
+        help='Saved mirror directory (default: ~/.local/state/matrix-history-mirror)',
+    )
     for side in ('source', 'target'):
-        start.add_argument(f'--{side}-url', required=True)
-        start.add_argument(f'--{side}-user', required=True)
-        credentials = start.add_mutually_exclusive_group(required=True)
+        start.add_argument(f'--{side}-url')
+        start.add_argument(f'--{side}-user')
+        credentials = start.add_mutually_exclusive_group()
         credentials.add_argument(f'--{side}-token-file', type=Path)
         credentials.add_argument(f'--{side}-token-command', type=Path)
-    start.add_argument('--interval', type=int, default=30, help='Seconds between live checks')
+    start.add_argument('--interval', type=int, help='Seconds between live checks (default: 30)')
     start.add_argument(
-        '--reconcile-interval', type=int, default=1800, help='Seconds between full event ID scans'
+        '--reconcile-interval', type=int, help='Seconds between full event ID scans (default: 1800)'
     )
     start.add_argument(
         '--media-manifest', type=Path, help='Private TSV: media_id, byte size, optional SHA-256'
     )
     start.add_argument('--media-origin', help='Original Matrix server_name for MXC URLs')
     for name in ('run', 'resume', 'status', 'stop'):
-        sub.add_parser(name).add_argument('--state-dir', type=Path, required=True)
+        sub.add_parser(name).add_argument(
+            '--state-dir',
+            type=Path,
+            required=name == 'run',
+            default=None if name == 'run' else Path.home() / '.local/state/matrix-history-mirror',
+            help='Saved mirror directory (default: ~/.local/state/matrix-history-mirror)',
+        )
     args = parser.parse_args()
+    if args.command == 'start' and not (sys.stdin.isatty() and sys.stdout.isatty()):
+        for side in ('source', 'target'):
+            for suffix in ('url', 'user'):
+                if not getattr(args, side + '_' + suffix):
+                    parser.error('the following argument is required: --' + side + '-' + suffix)
+            if not (getattr(args, side + '_token_file') or getattr(args, side + '_token_command')):
+                parser.error('provide --' + side + '-token-file or --' + side + '-token-command')
     state_dir = args.state_dir.expanduser().resolve()
+    created_tokens = []
+    saved_config = False
     try:
         if args.command == 'start':
             state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-            if state_dir.stat().st_mode & 0o077 or is_running(state_dir):
+            if (
+                state_dir.stat().st_mode & 0o077
+                or state_dir.stat().st_uid != os.getuid()
+                or is_running(state_dir)
+            ):
                 raise ValueError('State directory is not private or mirror is already running')
-            config = {
-                key: str(value.resolve()) if isinstance(value, Path) else value
-                for key, value in vars(args).items()
-                if key not in ('command', 'state_dir') and value is not None
-            }
-            validate_config(config)
-            existing = state_dir / 'config.json'
-            if existing.exists():
-                private_file(existing)
-                old = json.loads(existing.read_text(encoding='utf-8'))
+            config, old, tokens = start_parameters(args, state_dir, parser)
+            if old:
                 if any(
                     old[f'{side}_user'] != config[f'{side}_user'] for side in ('source', 'target')
                 ):
@@ -698,7 +777,18 @@ def main():
                     raise ValueError(
                         'Existing media state belongs to another origin; use another state directory'
                     )
+            for path, token in tokens.items():
+                descriptor = os.open(
+                    path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
+                )
+                created_tokens.append(path)
+                with os.fdopen(descriptor, 'w', encoding='utf-8') as outgoing:
+                    outgoing.write(token)
+                    outgoing.flush()
+                    os.fsync(outgoing.fileno())
+            validate_config(config)
             write_private(state_dir / 'config.json', config)
+            saved_config = True
         if args.command in ('start', 'resume'):
             if not (state_dir / 'config.json').exists() or is_running(state_dir):
                 raise ValueError('Mirror configuration is missing or worker is already running')
@@ -753,6 +843,26 @@ def main():
                 print('Stop requested; the worker is still finishing its current request.')
     except (OSError, ValueError, sqlite3.Error) as error:
         parser.exit(1, f'mirror: {error}\n')
+    except (KeyboardInterrupt, EOFError):
+        parser.exit(130, 'mirror: Ввод отменён.\n')
+    finally:
+        if not saved_config and created_tokens:
+            # Publication may have completed just before an interrupt. Preserve
+            # credentials referenced by that config, including ambiguous recovery.
+            references = set()
+            try:
+                current = state_dir / 'config.json'
+                if current.exists():
+                    private_file(current)
+                    published = json.loads(current.read_text(encoding='utf-8'))
+                    references = {
+                        published.get(side + '_token_file') for side in ('source', 'target')
+                    }
+            except (OSError, ValueError, AttributeError, TypeError):
+                references = {str(path) for path in created_tokens}
+            for path in created_tokens:
+                if str(path) not in references:
+                    path.unlink(missing_ok=True)
 
 
 if __name__ == '__main__':

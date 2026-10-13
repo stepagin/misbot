@@ -98,6 +98,38 @@ def safe_name(value):
     return isinstance(value, str) and re.fullmatch(r'[a-zA-Z0-9_.-]{1,80}', value)
 
 
+def check_detail(item):
+    from terminal_diagnostics import FAILURES
+
+    code = item.get('failure_code')
+    detail = (
+        FAILURES.get(code, FAILURES['check_failed'])
+        if isinstance(code, str)
+        else FAILURES['check_failed']
+    )
+    if code == 'http_status':
+        status, expected = item.get('status'), item.get('expected')
+        if type(status) is int and 100 <= status <= 599:
+            detail = 'HTTP ' + str(status) + '.'
+            if type(expected) is int and 100 <= expected <= 599:
+                detail += ' Ожидается HTTP ' + str(expected) + '.'
+                if status == expected:
+                    detail += ' Содержимое ответа не соответствует настройкам.'
+    return detail
+
+
+def media_profile_ready(config):
+    """Validate the prepared private profile locally, without revealing its contents."""
+    import s3_config
+
+    root = root_path(config['stack_root'])
+    try:
+        s3_config.read_profile(root / '.misbot/s3/media.env')
+    except (s3_config.ConfigError, OSError, ValueError):
+        return False
+    return True
+
+
 def sanitized(operation, response):
     result = {'operation': operation, 'ok': response.returncode == 0}
     checks = []
@@ -126,12 +158,22 @@ def sanitized(operation, response):
             ]
         if kind == 'existing_checks':
             checks.extend(
-                {'name': c['name'], 'passed': c.get('passed') is True}
+                {
+                    'name': c['name'],
+                    'passed': c.get('passed') is True,
+                    **({'detail': check_detail(c)} if c.get('passed') is not True else {}),
+                }
                 for c in item.get('checks', [])
                 if isinstance(c, dict) and safe_name(c.get('name'))
             )
         elif operation == 'check' and safe_name(kind) and type(item.get('passed')) is bool:
-            checks.append({'name': kind, 'passed': item['passed']})
+            checks.append(
+                {
+                    'name': kind,
+                    'passed': item['passed'],
+                    **({'detail': check_detail(item)} if not item['passed'] else {}),
+                }
+            )
         elif operation == 'check' and kind == 'service' and safe_name(item.get('name')):
             checks.append(
                 {

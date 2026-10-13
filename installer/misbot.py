@@ -126,22 +126,29 @@ def help_commands(commands):
 
 
 def operation_help(command, existing=False):
+    automatic = vocabulary.AUTOMATIC_ARGUMENTS.get(command.path, ())
     syntax = (
         'misbot '
         + command.path
         + ' '
-        + ' '.join('--' + name + ' VALUE' for name in command.arguments)
+        + ' '.join(
+            ('[--' + name + ' VALUE]') if name in automatic else '--' + name + ' VALUE'
+            for name in command.arguments
+        )
     )
     purpose = command.purpose
     if existing and command.backend == 'restore-check':
         purpose = 'Проверить AES-GCM архив и восстановить дампы в новые временные БД с их последующим удалением.'
     help_paragraph(purpose)
     print('\nКоманда:')
-    help_command(syntax.rstrip())
+    help_paragraph(syntax.rstrip(), '  ')
     print('\nОбязательные аргументы:')
-    for name in command.arguments or ('нет',):
+    for name in tuple(name for name in command.arguments if name not in automatic) or ('нет',):
         print('  ' + ('--' + name if name != 'нет' else name))
     optional = ['--directory PATH']
+    optional.extend(
+        '--' + name + ' VALUE (сохранённое значение или форма в TTY)' for name in automatic
+    )
     optional.extend('--' + name.replace('_', '-') + ' VALUE' for name in command.optional_arguments)
     optional.extend('--' + name.replace('_', '-') for name in command.switches)
     if command.backend in ('update', 'update-recover'):
@@ -165,7 +172,7 @@ def operation_help(command, existing=False):
     )
     if command.backend == 's3-check':
         help_paragraph(
-            'S3: --purpose обязателен. По умолчанию проверяется запись; каталоги проверок — /root/.local/state/misbot/s3-probes. --read-only не проверяет GET/PUT/DELETE. --json: schema=1 и безопасные stages; коды завершения 0/1/130.'
+            'S3: --purpose выбирает media или backup; без него в TTY открывается форма. По умолчанию проверяется запись; каталоги проверок — /root/.local/state/misbot/s3-probes. --read-only не проверяет GET/PUT/DELETE. --json: schema=1 и безопасные stages; коды завершения 0/1/130.'
         )
     elif command.backend == 's3-cleanup':
         help_paragraph(
@@ -229,7 +236,7 @@ def operation_help(command, existing=False):
         sample['config'] = '/root/misbot-backup-s3.env'
     if command.backend == 'backup-cleanup':
         sample['catalog'] = '/opt/matrix-stack/stages/external-backups/OWNED/catalog.json'
-    example = 'sudo ' + syntax.split(' --', 1)[0]
+    example = 'sudo misbot ' + command.path
     for name in command.arguments:
         example += ' --' + name + ' ' + shlex.quote(sample[name])
     if command.backend in ('update', 'update-recover'):
@@ -347,7 +354,7 @@ def parse(argv):
         parser.add_argument(
             '--' + name,
             dest=name,
-            required=True,
+            required=name not in vocabulary.AUTOMATIC_ARGUMENTS.get(command.path, ()),
             choices=('media', 'backup') if name == 'purpose' else None,
         )
     for name in command.optional_arguments:
@@ -449,6 +456,8 @@ def plan(command, options, values, source=None):
         root = update_directory(source, root, command, options)
     if root is not None and any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in str(root)):
         raise InputError('Каталог установки не должен содержать управляющие символы.')
+    if any(values.get(name) is None for name in command.arguments):
+        return input_plan(command, values, source, root)
     if command.backend.startswith('draft-'):
         root = root or Path('/opt/matrix-stack')
         if not root.is_absolute() or root == Path('/') or root.resolve() != root:
@@ -563,7 +572,7 @@ def plan(command, options, values, source=None):
         if root is None:
             raise InputError('Укажите --directory PATH.')
         command_wrapper.trusted_installation(root)
-        return ['/bin/bash', str(root / 'install.sh'), 'status', str(root)]
+        return ['/usr/bin/python3', str(root / 'storage_summary.py'), '--directory', str(root)]
     if root is None and not command.installed:
         root = Path('/opt/matrix-stack')
     if root is None:
@@ -608,6 +617,38 @@ def plan(command, options, values, source=None):
         ):
             raise InputError('Чужой комплект обновления.')
     return vocabulary.execution_argv(command, values, root, backend)
+
+
+def input_plan(command, values, source, root):
+    """Run the input helper only from an admitted runtime, never import private code here."""
+    root = root or Path('/opt/matrix-stack')
+    if not root.is_absolute() or root == Path('/') or root.resolve() != root:
+        raise InputError('Нужен абсолютный каталог установки без symlinks и переходов ..')
+    installed = (root / 'installation.json').is_file()
+    if installed:
+        command_wrapper.trusted_installation(root)
+        metadata = json.loads((root / 'installation.json').read_text())
+        if metadata.get('backend') == 'existing-compose':
+            if command.backend not in vocabulary.EXISTING_BACKENDS:
+                raise InputError('Команда не поддерживается для существующего Compose-стека.')
+        elif command.backend.startswith('features-'):
+            raise InputError('Компоненты предназначены для подключённого Compose-стека.')
+    elif command.installed:
+        raise InputError('Сначала выберите установленный сервер через --directory.')
+    backend = root if installed else source
+    if (source / 'command.json').is_file() and not installed:
+        raise InputError('Используйте проверенный распакованный комплект для новой установки.')
+    helper = backend / 'operation_inputs.py'
+    info = command_wrapper.regular(helper)
+    if info.st_uid != 0 or info.st_mode & 0o022:
+        raise InputError('Модуль ввода должен принадлежать root без чужой записи.')
+    args = ['/usr/bin/python3', str(helper), '--directory', str(root), '--command', command.path]
+    for key, value in values.items():
+        if value is True:
+            args.append('--' + key.replace('_', '-'))
+        elif isinstance(value, str):
+            vocabulary.append_option(args, '--' + key.replace('_', '-'), value)
+    return args
 
 
 def main(argv=None):

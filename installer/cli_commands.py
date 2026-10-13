@@ -811,6 +811,34 @@ COMMANDS = [
     ),
 ]
 BY_PATH = {c.path: c for c in COMMANDS}
+# These inputs can come from the selected installation or an interactive form.
+# Explicit arguments retain their original meaning for scripts.
+AUTOMATIC_ARGUMENTS = {
+    'backup key create': ('key',),
+    'backup external create': ('config', 'key'),
+    'backup schedule external': ('config', 'key', 'calendar'),
+    'backup schedule local': ('calendar',),
+    'backup fetch': ('config', 'key', 'object', 'sha256', 'output'),
+    'backup restore': ('archive', 'sha256', 'public-ip'),
+    'backup restore-local': ('archive', 'sha256', 'public-ip'),
+    'storage s3 check': ('config', 'purpose'),
+    'storage s3 connect': ('config',),
+    'storage database connect': ('config',),
+    'credentials s3 rotate': ('config',),
+    'credentials vault connect': ('config',),
+    'credentials vault auth': ('config',),
+    'features enable': ('config',),
+    'users password set': ('input',),
+    'credentials admin set': ('input',),
+    'admin access add': ('mxid',),
+    'admin access remove': ('mxid',),
+    'federation remove': ('server',),
+    'federation requests status': ('request',),
+    'federation requests approve': ('request',),
+    'federation requests reject': ('request',),
+    'federation requests cancel': ('request',),
+    'federation requests retry': ('request',),
+}
 ALIASES = {'update': 'update apply'}
 BY_BACKEND = {c.backend: c.path for c in COMMANDS}
 GROUPS = frozenset(

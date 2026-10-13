@@ -306,7 +306,12 @@ class CommandTests(unittest.TestCase):
 
     def test_missing_required_arguments_name_options_and_operation_help(self):
         for command in cli_commands.COMMANDS:
-            if not command.arguments:
+            required = tuple(
+                name
+                for name in command.arguments
+                if name not in cli_commands.AUTOMATIC_ARGUMENTS.get(command.path, ())
+            )
+            if not required:
                 continue
             with self.subTest(command=command.path):
                 output = io.StringIO()
@@ -317,7 +322,7 @@ class CommandTests(unittest.TestCase):
                     contextlib.redirect_stderr(output),
                 ):
                     self.assertEqual(misbot.main(command.path.split()), 2)
-                for argument in command.arguments:
+                for argument in required:
                     self.assertIn('--' + argument, output.getvalue())
                 self.assertIn('Справка: misbot ' + command.path + ' --help', output.getvalue())
 

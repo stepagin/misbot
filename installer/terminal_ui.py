@@ -21,6 +21,7 @@ import state_store
 from terminal_views import TerminalView, literal
 from terminal_diagnostics import CHECKS, SERVICES, check_summary, parse_checks
 import ui_actions
+import terminal_navigation
 
 
 class Back(Exception):
@@ -77,6 +78,8 @@ class UI:
         self.result_total = 0
         self.result_messages = []
         self.result_notices = []
+        self.restart_requested = False
+        self.supplied_arguments = {}
         self.explicit_draft = draft is not None
         self.draft = Path(draft) if self.explicit_draft else self.draft_path(self.root)
         self.model = {}
@@ -643,6 +646,17 @@ class UI:
             process_group_running,
         )
 
+        if path == 'users invitation list':
+            # Use the shared read backend directly: one CLI JSON line can exceed
+            # the terminal process line limit on a server with many invitations.
+            import registration
+
+            with self.view.busy(label):
+                result = registration.manage(self.root, 'list')
+            self.result_lines = present_output(path, json.dumps(result))
+            self.result_total = len(self.result_lines)
+            return 0
+
         interactive = path in (
             'users invitation show',
             'credentials admin show',
@@ -696,10 +710,37 @@ class UI:
         def remember_output(record, messages):
             if not isinstance(record, dict):
                 return
-            if (path == 'storage s3 check' and record.get('schema') == 1) or (
-                path.startswith('users invitation ') and 'state' in record
+            if (
+                (path == 'storage s3 check' and record.get('schema') == 1)
+                or (path.startswith('users invitation ') and 'state' in record)
+                or path in ('federation requests', 'federation servers', 'admin access list')
             ):
                 self.operation_records.append(record)
+                del self.operation_records[:-100]
+            if path in (
+                'backup create',
+                'backup move export',
+                'backup external create',
+                'backup fetch',
+            ) and record.get('check') in (
+                'consistent_backup',
+                'encrypted_external_backup',
+                'external_backup_download',
+            ):
+                self.operation_records.append(
+                    {
+                        key: record[key]
+                        for key in (
+                            'check',
+                            'passed',
+                            'archive',
+                            'downloaded_archive',
+                            'archive_sha256',
+                            'sha256',
+                        )
+                        if key in record
+                    }
+                )
                 del self.operation_records[:-100]
             if path != 'users invitation list':
                 self.result_messages = messages[:100]
@@ -874,11 +915,27 @@ class UI:
             finally:
                 input_mode.__exit__(None, None, None)
 
-    def s3_profile(self, values):
+    def s3_profile(self, values, *, reuse=True):
         """Collect a complete profile without changing a wizard or active settings."""
         import s3_config
 
         scratch = {key: values.get(key, '') for key in s3_config.FIELDS}
+        try:
+            saved = s3_config.validate(scratch)
+        except s3_config.ConfigError:
+            saved = None
+        if saved and reuse:
+            choice = self.choose(
+                'Использовать сохранённое подключение S3?',
+                [
+                    ('1', 'Использовать сохранённые настройки', saved['S3_BUCKET']),
+                    ('2', 'Изменить настройки', 'Ключи доступа вводятся скрыто'),
+                ],
+            )
+            if choice == '0':
+                raise Back()
+            if choice == '1':
+                return saved
         for key in (
             'S3_BUCKET',
             'S3_ENDPOINT_URL',
@@ -954,7 +1011,7 @@ class UI:
                     self.save()
                     return
                 if choice == '1':
-                    values = self.s3_profile(values)
+                    values = self.s3_profile(values, reuse=False)
         except (Back, Cancel, SaveExit, KeyboardInterrupt):
             if purpose == 'media':
                 self.model = previous
@@ -1074,6 +1131,8 @@ class UI:
                 raise ValueError('Укажите локальное имя бота: строчные латинские буквы и цифры.')
         if key == 'mxid':
             domain = self.installation()['domain']
+            if ':' not in value:
+                value = '@' + value.removeprefix('@') + ':' + domain
             if not re.fullmatch(r'@[a-z0-9][a-z0-9._=-]{0,63}:' + re.escape(domain), value):
                 raise ValueError(
                     'Укажите зарегистрированный аккаунт на этом сервере: @имя:' + domain
@@ -1497,15 +1556,9 @@ class UI:
                 self.save()
                 break
         elif index == 1:
-            import shutil
+            import terminal_dependencies
 
-            missing = [tool for tool in ('dig', 'ip') if not shutil.which(tool)]
-            if missing:
-                raise RuntimeError(
-                    'Отсутствуют локальные зависимости: '
-                    + ', '.join(missing)
-                    + '. Выполните sudo apt-get update; sudo apt-get install -y dnsutils iproute2 python3-yaml; затем повторите ui. Это не ошибка DNS или S3.'
-                )
+            terminal_dependencies.ensure(self)
             self.view.message(
                 'Проверка Linux amd64, systemd, памяти, диска и портов. Ошибку исправьте и повторите; шаг не пропускается.'
             )
@@ -1981,6 +2034,10 @@ class UI:
         if not self.supported(item.path):
             self.view.message(self.unavailable_reason(item.path), 'yellow')
             return 2
+        import terminal_forms
+
+        if item.path in terminal_forms.HANDLED_PATHS:
+            return terminal_forms.execute(self, item)
         if item.path in ('storage s3 check', 'storage s3 connect'):
             return self.execute_s3(item)
         if item.path in ('users password set', 'credentials admin set'):
@@ -1989,8 +2046,14 @@ class UI:
             return self.execute_invitation(item)
         command = cli_commands.BY_PATH[item.path]
         self.view.heading(item.title, item.hint)
-        args = {}
+        args = {
+            key: value
+            for key, value in self.supplied_arguments.items()
+            if value is not None and value is not False
+        }
         execution_root = self.root
+        if command.path == 'backup external cleanup':
+            args = terminal_navigation.cleanup_arguments(self, args)
         if command.backend in ('restore', 'restore-local'):
             while True:
                 target = self.input_value(
@@ -2004,9 +2067,18 @@ class UI:
                 self.view.message(
                     'Выберите пустой абсолютный каталог без symlink и переходов ..', 'yellow'
                 )
-        if 'request' in command.arguments:
-            self.run('federation requests')
+        if command.backend in ('restore', 'restore-local'):
+            args.update(terminal_forms.collect_restore(self, command.backend))
         for key in command.arguments:
+            if key in args:
+                continue
+            if key == 'calendar':
+                args[key] = self.schedule_calendar()
+                continue
+            selected = terminal_navigation.operation_selection(self, command, key)
+            if selected is not None:
+                args[key] = selected
+                continue
             label, default = ui_actions.ARGUMENTS[key]
             if key == 'config':
                 if command.path.startswith('backup '):
@@ -2028,17 +2100,25 @@ class UI:
             if key == 'key' and self.adopted():
                 default = self.installation().get('existing', {}).get('backup_key', default)
             if key == 'confirm':
-                default = ''
-                self.view.message(
-                    'Введите source-stopped после остановки источника и переключения DNS.'
+                acknowledged = self.confirm(
+                    'Исходный сервер остановлен и DNS переключён на этот сервер?'
                     if command.backend == 'restore-activate'
-                    else 'Введите target-stopped после остановки назначения и возврата DNS.'
+                    else 'Сервер назначения остановлен и DNS возвращён на исходный сервер?'
                 )
+                if not acknowledged:
+                    self.view.message('Действие отменено. Сначала завершите переключение серверов.')
+                    return 0
+                args[key] = (
+                    'source-stopped' if command.backend == 'restore-activate' else 'target-stopped'
+                )
+                continue
             args[key] = self.input_value(
                 label, default, lambda value: self.operation_argument(key, value, command.backend)
             )
-        if command.backend in ('update', 'update-recover'):
-            args['source'] = self.input_value(
+        if command.backend in ('update', 'update-recover') and 'source' not in args:
+            with self.view.busy('Проверяем текущий установочный комплект'):
+                source = terminal_navigation.trusted_bundle(self.source, self.root)
+            args['source'] = source or self.input_value(
                 'Доверенный распакованный комплект, абсолютный путь',
                 '',
                 lambda value: self.operation_argument('source', value, command.backend),
@@ -2046,6 +2126,7 @@ class UI:
         if (
             command.backend == 'restore-activate'
             and self.installation().get('mas_mode') == 'external'
+            and not args.get('external_mas_confirm')
         ):
             self.view.heading('Подтвердить сохранность внешнего MAS')
             self.view.message(
@@ -2055,13 +2136,10 @@ class UI:
                 'восстановленной базе Matrix.',
                 'yellow',
             )
-            args['external_mas_confirm'] = self.input_value(
-                'Введите preserved-state после проверки внешнего MAS',
-                '',
-                lambda value: self.operation_argument(
-                    'external_mas_confirm', value, command.backend
-                ),
-            )
+            if not self.confirm('Соответствующие данные внешнего MAS сохранены или восстановлены?'):
+                self.view.message('Активация отменена. Сначала проверьте данные внешнего MAS.')
+                return 0
+            args['external_mas_confirm'] = 'preserved-state'
         if not item.read_only and command.path != 'remove':
             rows = [
                 ('Операция', item.title),
@@ -2070,7 +2148,10 @@ class UI:
                 ('Данные', command.data),
             ]
             rows.extend(
-                (ui_actions.ARGUMENTS[key][0], value)
+                (
+                    ui_actions.ARGUMENTS.get(key, (key.replace('_', ' '), ''))[0],
+                    'Подтверждено' if key == 'confirm' else value,
+                )
                 for key, value in args.items()
                 if key not in ('source', 'external_mas_confirm')
             )
@@ -2088,6 +2169,8 @@ class UI:
             code = self.run(command.path, **args)
         finally:
             self.root = previous
+        if code == 0 and command.path in ('backup create', 'backup move export'):
+            terminal_forms.remember_backup_results(self, command.path)
         if command.path == 'check':
             self.check_result(code)
             return code
@@ -2099,22 +2182,23 @@ class UI:
             from configuration import read_private_json
 
             restored = read_private_json(execution_root / 'installation.json')
+            self.root = execution_root
+            self.draft = self.draft_path(self.root)
+            self.model, self.backup = {}, {}
             continuation = (
-                'Продолжение: sudo misbot --directory '
-                + shlex.quote(str(execution_root))
-                + ' backup activate --confirm source-stopped'
+                'Продолжение: «Восстановление и перенос» → «Активировать восстановленный сервер».'
             )
             if restored.get('mas_mode') == 'external':
-                continuation += ' --external-mas-confirm preserved-state'
+                continuation += ' Потребуется подтверждение сохранности внешнего MAS.'
             completion.extend(
                 [
                     'Копия восстановлена. Перед активацией остановите источник и переключите DNS.',
                     continuation,
                 ]
             )
-        if command.backend in ('update', 'release-update') and code == 0:
+        if command.backend in ('update', 'update-recover', 'release-update') and code == 0:
             completion.append(
-                'Обновление применено. Откройте sudo misbot ui заново, чтобы использовать новый интерфейс.'
+                'Операция завершена. После закрытия результата откроется интерфейс установленной версии.'
             )
         self.result_notices.extend(completion)
         self.show_operation_result(item, code)
@@ -2127,14 +2211,61 @@ class UI:
             self.step = 0
         if command.path == 'users invitation list' and code == 0:
             self.show_result_lines(item.title)
-        if command.backend in ('update', 'release-update') and code == 0:
+        if command.backend in ('update', 'update-recover', 'release-update') and code == 0:
             if not getattr(self, '_result_waited', False):
                 try:
                     self.pause('Enter — закрыть мастер')
                 except (Back, Cancel, SaveExit):
                     pass
+            self.restart_requested = True
             raise SaveExit()
         return code
+
+    def schedule_calendar(self, default=''):
+        return terminal_navigation.schedule_calendar(self, default)
+
+    def reopen_updated(self, plain=False):
+        import command_wrapper
+
+        command_wrapper.trusted_installation(self.root)
+        arguments = [
+            '/usr/bin/python3',
+            str(self.root / 'misbot.py'),
+            '--directory',
+            str(self.root),
+            'ui',
+        ]
+        if plain:
+            arguments.append('--plain')
+        os.execv(arguments[0], arguments)
+
+    def configuration_recovery(self):
+        """Reach recovery without loading partially published editable settings."""
+        while (self.root / 'configuration-transition.json').exists():
+            self.view.heading('Прервано сохранение настроек')
+            self.view.message(
+                'Настройки и сохранённая копия остаются на сервере. Выберите продолжение.'
+            )
+            try:
+                choice = self.choose(
+                    'Как продолжить?',
+                    [
+                        ('1', 'Продолжить сохранение настроек', ''),
+                        ('2', 'Вернуть прежние настройки', ''),
+                    ],
+                    exit_label='Выйти из Misbot',
+                )
+            except (Back, Cancel, SaveExit):
+                return 0
+            if choice == '0':
+                return 1
+            path = 'config recover' if choice == '1' else 'config rollback'
+            try:
+                self.execute(ui_actions.Action(path, 'Восстановить настройки'))
+            except (Back, Cancel, SaveExit):
+                return 0
+        self.use_active_configuration()
+        return self.menu()
 
     def show_operation_result(self, item, code, messages=None):
         if messages is None:
@@ -2174,7 +2305,8 @@ class UI:
                     raise ValueError('Введите имя существующего пользователя или @имя:' + domain)
                 return name
 
-            values['username'] = self.input_value('Аккаунт пользователя', '', username)
+            selected = terminal_navigation.account_selection(self)
+            values['username'] = selected or self.input_value('Аккаунт пользователя', '', username)
         else:
             values['username'] = 'matrix-admin'
         self.view.message('Пароль: от 16 до 1024 символов. Существующие сеансы сохранятся.')
@@ -2251,9 +2383,10 @@ class UI:
         self.view.heading(item.title)
         self.view.message('Введите параметры S3 здесь. Ключи доступа скрыты при вводе.')
         self.view.message('«Назад» отменяет ввод; Ctrl+C прерывает выполняемую операцию.', 'dim')
+        explicit = self.supplied_arguments
         try:
-            purpose = 'media'
-            if item.path == 'storage s3 check':
+            purpose = explicit.get('purpose', 'media')
+            if item.path == 'storage s3 check' and not explicit.get('purpose'):
                 choice = self.choose(
                     'Что проверить?',
                     [('1', 'Хранилище медиа', ''), ('2', 'Хранилище резервных копий', '')],
@@ -2263,7 +2396,11 @@ class UI:
                     raise Back()
                 purpose = 'media' if choice == '1' else 'backup'
             initial = self.model if purpose == 'media' else self.backup
-            values = self.s3_profile(initial)
+            values = (
+                s3_config.read_profile(Path(explicit['config']), purpose)
+                if explicit.get('config')
+                else self.s3_profile(initial)
+            )
         except (Back, Cancel):
             self._result_waited = True
             self.view.message('Ввод S3 отменён. Возвращаемся в меню.')
@@ -2291,6 +2428,8 @@ class UI:
             self.view.message(
                 'Для переноса будет создана копия и остановлен Matrix. Локальные файлы сохраняются.'
             )
+        elif explicit.get('read_only'):
+            self.view.message('Проверка только чтения. Проверочный объект не создаётся.')
         else:
             self.view.message(
                 'Будет создан и удалён собственный проверочный объект. Текущие файлы сохраняются.'
@@ -2301,19 +2440,25 @@ class UI:
         parent = directory(self.draft.parent)
         recovery_lines = []
         with tempfile.TemporaryDirectory(prefix='.s3-operation-', dir=parent) as folder:
-            profile = Path(folder) / 'profile.env'
-            state_store.write_text(
-                profile, serialize({key: values[key] for key in sorted(s3_config.FIELDS)})
+            profile = (
+                Path(explicit['config']) if explicit.get('config') else Path(folder) / 'profile.env'
             )
+            if not explicit.get('config'):
+                state_store.write_text(
+                    profile, serialize({key: values[key] for key in sorted(s3_config.FIELDS)})
+                )
             args = {'config': profile}
             if item.path == 'storage s3 check':
                 args.update(purpose=purpose, json=True)
+                for key in ('read_only', 'catalog_directory'):
+                    if explicit.get(key):
+                        args[key] = explicit[key]
             code = self.run(item.path, **args)
             records = getattr(self, 'operation_records', [])
             pending = next(
                 (record for record in records if record.get('cleanup_pending') is True), None
             )
-            if pending:
+            if pending and not explicit.get('config'):
                 # Keep only required recovery material when the provider refuses
                 # cleanup; all successful/cancelled temporary forms are removed.
                 recovery = parent / (
@@ -2358,11 +2503,6 @@ class UI:
     def show_result_lines(self, title):
         if not self.result_lines:
             return
-        if self.result_total > len(self.result_lines):
-            self.view.message(
-                'Список ограничен последними 1000 приглашениями. Для полного списка используйте CLI.',
-                'yellow',
-            )
         if not self.view.fullscreen or self.result_lines == ['Приглашений пока нет.']:
             for line in self.result_lines:
                 self.view.message(line)
@@ -2387,6 +2527,7 @@ class UI:
     def task_menu(self, group):
         title = ui_actions.MENUS[group][0]
         while True:
+            pending = terminal_navigation.pending_actions(self) if group == 'recovery' else []
             actions = (
                 self.available_actions(group)
                 if self.adopted()
@@ -2401,11 +2542,22 @@ class UI:
             if not actions:
                 self.view.message('Этот раздел недоступен для выбранной установки.')
                 return
+            if pending:
+                actions = pending + list(actions)
+            if self.adopted():
+                actions = [
+                    ui_actions.Action(
+                        item.path, 'Создать копию', 'Используется сохранённое место хранения'
+                    )
+                    if item.path == 'backup create'
+                    else item
+                    for item in actions
+                ]
             try:
                 self.view.heading(title)
                 if group == 'recovery':
                     self.view.message(
-                        'Сначала проверьте состояние. Выберите продолжение, указанное сервером; не удаляйте сохранённые этапы операции.'
+                        'В начале списка — действия для найденных незавершённых операций. Сохранённые этапы не удаляются.'
                     )
                 choices = []
                 for i, item in enumerate(actions, 1):
@@ -2530,8 +2682,19 @@ class UI:
         self.view.message('Системные пакеты и их зависимости сохраняют собственные лицензии.')
         self.pause()
 
-    def edit_fields(self, title, keys, section='', subtitle=''):
-        before = {key: self.model[key] for key in keys}
+    def edit_fields(self, title, keys, section='', subtitle='', providers=False):
+        before = dict(self.model)
+        tracked = list(keys)
+        if providers:
+            tracked.extend(
+                (
+                    'GOOGLE_CLIENT_ID',
+                    'GOOGLE_CLIENT_SECRET',
+                    'TELEGRAM_CLIENT_ID',
+                    'TELEGRAM_CLIENT_SECRET',
+                    'SOCKS5_CONFIG',
+                )
+            )
         aliases = {key: str(i) for i, key in enumerate(keys, 1)}
         aliases['применить'] = 'a'
         while True:
@@ -2549,11 +2712,27 @@ class UI:
             choices.append(
                 ('a', 'Применить изменения', 'Сначала покажем итог и запросим подтверждение')
             )
+            if providers:
+                choices.extend(
+                    (
+                        letter,
+                        'Вход через ' + provider.title(),
+                        'Включён' if self.model.get(provider + '_CLIENT_ID') else 'Выключен',
+                    )
+                    for letter, provider in (('g', 'GOOGLE'), ('t', 'TELEGRAM'))
+                )
             choice = self.choose(title, choices, aliases=aliases, keep_hints=True)
             if choice == '0':
                 return None
             if choice == 'a':
-                return {key: self.model[key] for key in keys if self.model[key] != before[key]}
+                return {
+                    key: self.model.get(key, '')
+                    for key in tracked
+                    if self.model.get(key, '') != before.get(key, '')
+                }
+            if providers and choice in ('g', 't'):
+                self.setup_provider('GOOGLE' if choice == 'g' else 'TELEGRAM')
+                continue
             key = keys[int(choice) - 1]
             self.view.heading(schema.FIELDS[key].label, section)
             self.field(key)
@@ -2629,6 +2808,7 @@ class UI:
             keys,
             'Настройки сервера',
             'Домен сервера закреплён. Хранилище и ключи доступа — в отдельных разделах.',
+            providers=self.model.get('MAS_MODE', 'local') == 'local',
         )
         if not changes:
             self.view.message('Изменения не применялись.')
@@ -2637,7 +2817,12 @@ class UI:
         self.view.heading('Применить настройки сервера', 'Проверьте выбранные изменения.')
         self.view.details(
             [
-                (schema.FIELDS[key].label, before[key] + ' → ' + value)
+                (
+                    schema.FIELDS[key].label,
+                    ('настроено' if value else 'отключено')
+                    if schema.FIELDS[key].secret
+                    else before.get(key, '') + ' → ' + value,
+                )
                 for key, value in changes.items()
             ]
         )
@@ -2667,6 +2852,8 @@ def main():
         with view.busy('Загружаем настройки установки'):
             ui = UI(args.directory, view=view)
         code = interaction(ui)
+    if ui.restart_requested:
+        ui.reopen_updated(plain=args.plain)
     if ui.view.screen_used:
         text(
             'Мастер закрыт. Продолжение: sudo python3 '
@@ -2688,22 +2875,10 @@ def interaction(ui):
         if state.get('backend') == 'existing-compose':
             return ui.menu()
         if (ui.root / 'configuration-transition.json').exists():
-            text(
-                'Незавершённая публикация: sudo misbot --directory '
-                + shlex.quote(str(ui.root))
-                + ' config recover'
-            )
-            return 1
+            return ui.configuration_recovery()
         if state.get('restore_pending'):
             return ui.menu()
         if state.get('databases_initialized'):
-            if (ui.root / 'configuration-transition.json').exists():
-                text(
-                    'Конфигурация не опубликована полностью. Продолжение: sudo misbot --directory '
-                    + shlex.quote(str(ui.root))
-                    + ' config recover'
-                )
-                return 1
             if ui.draft.exists() and 7 <= ui.step <= 9:
                 return ui.wizard()
             return ui.menu()

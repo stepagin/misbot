@@ -61,6 +61,60 @@ class ManagementTests(unittest.TestCase):
     def call(self, action, uid=10, **extras):
         return self.bridge.handle({'action': action, 'server': 'example.org', 'uid': uid, **extras})
 
+    def test_s3_prepare_checks_private_profile_before_creating_confirmation(self):
+        self.bridge.config['servers']['example.org']['management_actions'].append('storage_connect')
+        for content, mode in [
+            (None, 0o600),
+            ('SECRET_PRIVATE_VALUE', 0o600),
+            ('S3_BUCKET=example-bucket', 0o644),
+        ]:
+            folder = self.root / '.misbot/s3'
+            folder.mkdir(parents=True, exist_ok=True)
+            path = folder / 'media.env'
+            if content is not None:
+                path.write_text(content)
+                path.chmod(mode)
+            with self.subTest(content=content), self.assertRaises(BotError) as raised:
+                self.call('manage_prepare', operation='storage_connect')
+            self.assertNotIn('SECRET_PRIVATE_VALUE', str(raised.exception))
+            self.assertEqual(
+                self.bridge.db.execute('SELECT count(*) FROM confirmations').fetchone()[0], 0
+            )
+        path.write_text(
+            'S3_BUCKET=example-bucket\nS3_REGION=example-region\nS3_ENDPOINT_URL=https://objects.example.org\nS3_ACCESS_KEY_ID=fictional-access\nS3_SECRET_ACCESS_KEY=fictional-secret\nS3_PREFIX=media/'
+        )
+        path.chmod(0o600)
+        result = self.call('manage_prepare', operation='storage_connect')
+        self.assertTrue(result['confirmation'])
+
+    def test_check_details_are_allowlisted_without_raw_errors(self):
+        output = b'\n'.join(
+            json.dumps(item).encode()
+            for item in [
+                {
+                    'check': 'mas_health',
+                    'passed': False,
+                    'failure_code': 'timeout',
+                    'error': 'SECRET',
+                },
+                {
+                    'check': 'synapse',
+                    'passed': False,
+                    'failure_code': 'http_status',
+                    'status': 503,
+                    'expected': 200,
+                },
+                {'check': 'unknown', 'passed': False, 'failure_code': 'SECRET', 'detail': 'SECRET'},
+            ]
+        )
+        with patch(
+            'control.subprocess.run', return_value=subprocess.CompletedProcess([], 1, output)
+        ):
+            result = run_control(self.config, 'check')
+        self.assertIn('отведённое время', result['checks'][0]['detail'])
+        self.assertIn('HTTP 503', result['checks'][1]['detail'])
+        self.assertNotIn('SECRET', json.dumps(result))
+
     def test_management_read_releases_lock_and_rechecks_authorization(self):
         started, release = threading.Event(), threading.Event()
 

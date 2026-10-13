@@ -392,7 +392,7 @@ class Bot:
                 [
                     ('storage', 'Хранилища'),
                     ('components', 'Компоненты и веб-панель'),
-                    ('storage_connect', 'Подключить S3 вложений'),
+                    ('storage_connect', 'Применить подготовленный профиль S3'),
                 ],
             ),
         }
@@ -409,6 +409,7 @@ class Bot:
                 buttons.append([self.button('Обновления', 'updates')])
         if group == 'more':
             buttons.insert(0, [self.button('Приглашения', 'invitations')])
+            buttons.append([self.button('Выйти из бота', '/logout')])
         buttons.append(self.back('maintenance' if group in ('backups', 'updates') else 'menu'))
         return self.screen(chat, title + '\n\nВыберите действие.', buttons)
 
@@ -831,9 +832,15 @@ class Bot:
                 text += '\nАдминистративная панель: https://' + data['admin'] + '/'
             if data.get('homepage'):
                 text += '\nСайт: https://' + data['homepage'] + '/'
-            if not result.get('ok') or data.get('pending'):
-                text += '\nПодключение не завершено. Проверьте misbot features status.'
-            return self.screen(chat, text, [self.back('more')])
+            if data.get('pending'):
+                text += '\nПодключение компонентов не завершено. Сохранённый этап требует проверки через SSH: sudo misbot features status.'
+            if not result.get('ok') and not data.get('pending'):
+                text += (
+                    '\nПолное состояние компонентов не получено. Повторите проверку этой кнопкой.'
+                )
+            return self.screen(
+                chat, text, [[self.button('Обновить', 'manage|components')], self.back('more')]
+            )
         if operation == 'storage':
             result = self.call('manage_read', uid, operation=operation)
             data = result.get('storage', {})
@@ -847,9 +854,13 @@ class Bot:
             )
             if data.get('media_pending'):
                 text += '\nПеренос вложений в S3 не завершён. Через SSH выполните misbot storage recover.'
+            if data.get('backup_pending'):
+                text += '\nРезервная копия не завершена. Для восстановления через SSH: sudo misbot backup recover.'
             if not result['ok']:
-                text += '\nСостояние не подтверждено. Через SSH выполните misbot storage status.'
-            return self.screen(chat, text, [self.back('backups')])
+                text += '\nПолное состояние хранилищ не получено. Повторите проверку этой кнопкой.'
+            return self.screen(
+                chat, text, [[self.button('Обновить', 'manage|storage')], self.back('backups')]
+            )
         if operation in ('status', 'check'):
             result = self.call('manage_read', uid, operation=operation)
             text = 'Состояние служб:' if operation == 'status' else 'Проверка сервера:'
@@ -858,12 +869,19 @@ class Bot:
                     item['running'] and item['healthy'] if operation == 'status' else item['passed']
                 )
                 text += '\n' + ('Проверено: ' if good else 'Нужна проверка: ') + item['name']
+                if not good:
+                    if operation == 'status':
+                        text += ' — ' + (
+                            'служба остановлена'
+                            if not item['running']
+                            else 'служба работает, проверка здоровья не пройдена'
+                        )
+                    elif item.get('detail'):
+                        text += ' — ' + item['detail']
             if result.get('backup_pending'):
                 text += '\nРезервная копия не завершена. Через SSH выполните misbot backup recover.'
             if not result['ok']:
-                text += (
-                    '\nПроверка не подтверждена. Через SSH выполните misbot status и misbot check.'
-                )
+                text += '\nПроверка не подтвердила полную готовность. Полученные результаты показаны выше; повторить проверку можно кнопкой «Обновить».'
             text += (
                 '\n\nПроверка служб и адресов не подтверждает вход в клиент, переписку и звонки.'
             )
@@ -873,24 +891,32 @@ class Bot:
         confirmation = self.call('manage_prepare', uid, operation=operation)
         text = {
             'start': 'Запустить службы?\nИзменённые службы могут перезапуститься.',
-            'stop': 'Остановить службы Matrix?\nСервер будет недоступен до запуска служб.',
+            'stop': 'Остановить службы Matrix?\nСервер будет недоступен до запуска служб. Вход через MAS и управление ботами могут стать недоступны. Для возвращения через SSH: sudo misbot start, затем sudo misbot check. Убедитесь, что у вас есть доступ по SSH.',
             'restart': 'Перезапустить службы Matrix?\nОбщение будет кратко недоступно. После перезапуска будет проверена доступность.',
             'update': 'Обновить компоненты?\nПеред применением сервер проверит совместимость и резервную копию. Общение может быть временно недоступно.',
             'backup_verify': 'Проверить последнюю резервную копию?\nДля проверки будут восстановлены временные базы. Службы продолжат работу.',
-            'storage_connect': 'Подключить S3 вложений из профиля, заполненного через SSH?\nSynapse кратко перезапустится. Локальные файлы сохранятся.',
+            'storage_connect': 'Применить подготовленный профиль S3 вложений?\nФайл проверен; доступ к хранилищу будет проверен при применении. Synapse кратко перезапустится. Локальные файлы сохранятся.',
             'backup': 'Создать согласованную резервную копию?\nSynapse и MAS временно остановятся. Если S3 подключён, полный архив отправится туда зашифрованным.',
         }.get(operation, 'Выполнить операцию управления?')
         if confirmation.get('summary'):
             text = confirmation['summary']
         if operation == 'update' and confirmation.get('version'):
             text += '\nВерсия: ' + str(confirmation['version'])
+        text += '\nПодтверждение действует 5 минут.'
+        parse_mode = None
+        if operation == 'stop':
+            text = html.escape(text)
+            for command in ('sudo misbot start', 'sudo misbot check'):
+                text = text.replace(command, '<code>' + command + '</code>')
+            parse_mode = 'HTML'
         return self.screen(
             chat,
-            text + '\nПодтверждение действует 5 минут.',
+            text,
             [
                 [self.button('Подтвердить', 'manage_apply|' + confirmation['confirmation'])],
                 self.back('maintenance', 'Отмена'),
             ],
+            parse_mode=parse_mode,
         )
 
     def job_message(self, chat, job):

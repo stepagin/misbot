@@ -1,8 +1,11 @@
+from contextlib import redirect_stderr, redirect_stdout
+import io
+import json
 import importlib.util
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / 'matrix-history-mirror.py'
@@ -31,6 +34,273 @@ class FailingOnceClient(FakeClient):
             self.failed = True
             raise mirror.MirrorError('source', 'UNAVAILABLE')
         return super().messages(room_id, cursor)
+
+
+class MirrorCommandTests(unittest.TestCase):
+    def test_interactive_start_collects_hidden_tokens_and_retains_them_on_failed_launch(self):
+        with tempfile.TemporaryDirectory() as folder:
+            state = Path(folder) / 'state'
+            stdin, stdout = Mock(), Mock()
+            stdin.isatty.return_value = stdout.isatty.return_value = True
+            with (
+                patch('sys.argv', ['mirror', 'start', '--state-dir', str(state)]),
+                patch('sys.stdin', stdin),
+                patch('sys.stdout', stdout),
+                patch(
+                    'builtins.input',
+                    side_effect=[
+                        'https://old.example',
+                        '@alice:old.example',
+                        'https://new.example',
+                        '@alice:new.example',
+                    ],
+                ),
+                patch.object(
+                    mirror.getpass,
+                    'getpass',
+                    side_effect=['FICTIONAL_SOURCE_TOKEN', 'FICTIONAL_TARGET_TOKEN'],
+                ),
+                patch.object(
+                    mirror.subprocess, 'Popen', side_effect=OSError('fictional launch failure')
+                ),
+                redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit) as stopped,
+            ):
+                mirror.main()
+            self.assertEqual(stopped.exception.code, 1)
+            saved = json.loads((state / 'config.json').read_text())
+            self.assertEqual(saved['source_user'], '@alice:old.example')
+            self.assertEqual(saved['interval'], 30)
+            self.assertNotIn('FICTIONAL_SOURCE_TOKEN', (state / 'config.json').read_text())
+            self.assertNotIn('FICTIONAL_SOURCE_TOKEN', str(stdout.mock_calls))
+            for side in ('source', 'target'):
+                token = Path(saved[side + '_token_file'])
+                self.assertTrue(token.exists())
+                self.assertEqual(token.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(state.stat().st_mode & 0o777, 0o700)
+
+    def test_interactive_saved_profile_needs_no_input_and_explicit_values_win(self):
+        with tempfile.TemporaryDirectory() as folder:
+            state = Path(folder)
+            saved = {
+                'source_url': 'https://old.example',
+                'source_user': '@alice:old.example',
+                'target_url': 'https://new.example',
+                'target_user': '@alice:new.example',
+                'interval': 77,
+                'reconcile_interval': 1900,
+            }
+            for side in ('source', 'target'):
+                token = state / (side + '.token')
+                token.write_text('FICTIONAL_TOKEN')
+                token.chmod(0o600)
+                saved[side + '_token_file'] = str(token)
+            mirror.write_private(state / 'config.json', saved)
+            stdin, stdout = Mock(), Mock()
+            stdin.isatty.return_value = stdout.isatty.return_value = True
+            with (
+                patch(
+                    'sys.argv', ['mirror', 'start', '--state-dir', str(state), '--interval', '91']
+                ),
+                patch('sys.stdin', stdin),
+                patch('sys.stdout', stdout),
+                patch('builtins.input') as ask,
+                patch.object(mirror.getpass, 'getpass') as secret,
+                patch.object(
+                    mirror.subprocess, 'Popen', side_effect=OSError('fictional launch failure')
+                ),
+                redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit),
+            ):
+                mirror.main()
+            ask.assert_not_called()
+            secret.assert_not_called()
+            current = json.loads((state / 'config.json').read_text())
+            self.assertEqual(current, {**saved, 'interval': 91})
+
+    def test_changed_api_origin_requires_new_token_and_preserves_previous_file(self):
+        with tempfile.TemporaryDirectory() as folder:
+            state = Path(folder)
+            saved = {
+                'source_url': 'https://old.example',
+                'source_user': '@alice:old.example',
+                'target_url': 'https://new.example',
+                'target_user': '@alice:new.example',
+                'interval': 30,
+                'reconcile_interval': 1800,
+            }
+            for side in ('source', 'target'):
+                path = state / (side + '.token')
+                path.write_text('PREVIOUS_FICTIONAL_TOKEN')
+                path.chmod(0o600)
+                saved[side + '_token_file'] = str(path)
+            mirror.write_private(state / 'config.json', saved)
+            stdin, stdout = Mock(), Mock()
+            stdin.isatty.return_value = stdout.isatty.return_value = True
+            with (
+                patch(
+                    'sys.argv',
+                    [
+                        'mirror',
+                        'start',
+                        '--state-dir',
+                        str(state),
+                        '--source-url',
+                        'https://replacement.example',
+                    ],
+                ),
+                patch('sys.stdin', stdin),
+                patch('sys.stdout', stdout),
+                patch('builtins.input') as ask,
+                patch.object(
+                    mirror.getpass, 'getpass', return_value='NEW_FICTIONAL_TOKEN'
+                ) as secret,
+                patch.object(
+                    mirror.subprocess, 'Popen', side_effect=OSError('fictional launch failure')
+                ),
+                redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit),
+            ):
+                mirror.main()
+            ask.assert_not_called()
+            secret.assert_called_once()
+            current = json.loads((state / 'config.json').read_text())
+            self.assertEqual(current['source_url'], 'https://replacement.example')
+            self.assertNotEqual(current['source_token_file'], saved['source_token_file'])
+            self.assertEqual(current['target_token_file'], saved['target_token_file'])
+            self.assertEqual(Path(current['source_token_file']).read_text(), 'NEW_FICTIONAL_TOKEN')
+            self.assertEqual(
+                Path(saved['source_token_file']).read_text(), 'PREVIOUS_FICTIONAL_TOKEN'
+            )
+
+    def test_interrupt_after_config_publication_keeps_its_token_files(self):
+        with tempfile.TemporaryDirectory() as folder:
+            state = Path(folder)
+            stdin, stdout = Mock(), Mock()
+            stdin.isatty.return_value = stdout.isatty.return_value = True
+            publish = mirror.write_private
+
+            def interrupted(path, data):
+                publish(path, data)
+                raise KeyboardInterrupt()
+
+            with (
+                patch('sys.argv', ['mirror', 'start', '--state-dir', str(state)]),
+                patch('sys.stdin', stdin),
+                patch('sys.stdout', stdout),
+                patch(
+                    'builtins.input',
+                    side_effect=[
+                        'https://old.example',
+                        '@alice:old.example',
+                        'https://new.example',
+                        '@alice:new.example',
+                    ],
+                ),
+                patch.object(
+                    mirror.getpass, 'getpass', side_effect=['SOURCE_TOKEN', 'TARGET_TOKEN']
+                ),
+                patch.object(mirror, 'write_private', side_effect=interrupted),
+                patch.object(mirror.subprocess, 'Popen') as launch,
+                redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit) as stopped,
+            ):
+                mirror.main()
+            self.assertEqual(stopped.exception.code, 130)
+            launch.assert_not_called()
+            current = json.loads((state / 'config.json').read_text())
+            for side in ('source', 'target'):
+                self.assertTrue(Path(current[side + '_token_file']).exists())
+
+    def test_noninteractive_missing_input_does_not_create_state(self):
+        with tempfile.TemporaryDirectory() as folder:
+            state = Path(folder) / 'state'
+            with (
+                patch('sys.argv', ['mirror', 'start', '--state-dir', str(state)]),
+                patch('sys.stdin.isatty', return_value=False),
+                patch('builtins.input') as ask,
+                redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit) as stopped,
+            ):
+                mirror.main()
+            self.assertEqual(stopped.exception.code, 2)
+            ask.assert_not_called()
+            self.assertFalse(state.exists())
+
+    def test_invalid_new_profile_removes_only_new_token_files(self):
+        with tempfile.TemporaryDirectory() as folder:
+            state = Path(folder)
+            keep = state / 'existing.txt'
+            keep.write_text('retain')
+            stdin, stdout = Mock(), Mock()
+            stdin.isatty.return_value = stdout.isatty.return_value = True
+            with (
+                patch('sys.argv', ['mirror', 'start', '--state-dir', str(state)]),
+                patch('sys.stdin', stdin),
+                patch('sys.stdout', stdout),
+                patch(
+                    'builtins.input',
+                    side_effect=[
+                        'http://old.example',
+                        '@alice:old.example',
+                        'https://new.example',
+                        '@alice:new.example',
+                    ],
+                ),
+                patch.object(
+                    mirror.getpass, 'getpass', side_effect=['SOURCE_TOKEN', 'TARGET_TOKEN']
+                ),
+                patch.object(mirror.subprocess, 'Popen') as launch,
+                redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit),
+            ):
+                mirror.main()
+            launch.assert_not_called()
+            self.assertEqual(list(state.iterdir()), [keep])
+
+    def test_default_status_and_stop_reuse_the_documented_saved_directory(self):
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder)
+            state = home / '.local/state/matrix-history-mirror'
+            state.mkdir(parents=True, mode=0o700)
+            db = mirror.connect(state)
+            mirror.set_meta(db, 'state', 'LIVE')
+            db.close()
+            output = io.StringIO()
+            with (
+                patch.object(Path, 'home', return_value=home),
+                patch('sys.argv', ['mirror', 'status']),
+                redirect_stdout(output),
+            ):
+                mirror.main()
+            self.assertEqual(json.loads(output.getvalue())['state'], 'LIVE')
+            with (
+                patch.object(Path, 'home', return_value=home),
+                patch('sys.argv', ['mirror', 'stop']),
+                redirect_stdout(io.StringIO()),
+            ):
+                mirror.main()
+            db = mirror.connect(state)
+            self.assertEqual(mirror.get_meta(db, 'stop_requested'), '1')
+            db.close()
+
+    def test_explicit_state_directory_wins_and_does_not_create_default(self):
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder)
+            explicit = home / 'separate-profile'
+            explicit.mkdir(mode=0o700)
+            db = mirror.connect(explicit)
+            mirror.set_meta(db, 'state', 'WAIT_SOURCE')
+            db.close()
+            output = io.StringIO()
+            with (
+                patch.object(Path, 'home', return_value=home),
+                patch('sys.argv', ['mirror', 'status', '--state-dir', str(explicit)]),
+                redirect_stdout(output),
+            ):
+                mirror.main()
+            self.assertEqual(json.loads(output.getvalue())['state'], 'WAIT_SOURCE')
+            self.assertFalse((home / '.local').exists())
 
 
 class MirrorStateTests(unittest.TestCase):

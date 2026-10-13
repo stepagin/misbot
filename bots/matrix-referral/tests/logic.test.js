@@ -450,3 +450,33 @@ test("plain and HTML lists share the same remaining time at an expiry boundary",
         Date.now = original;
     }
 });
+
+test("invitation list pages continue after restart without a manually entered offset", async () => {
+    const x = setup();
+    x.bot.control = async (request) => {
+        x.calls.push(request);
+        return request.action === "matrix_tokens"
+            ? {
+                  tokens: Array.from({ length: 20 }, (_, index) => ({
+                      ...x.item,
+                      id: "token-" + (request.offset + index)
+                  })),
+                  has_more: request.offset === 0
+              }
+            : {};
+    };
+    const send = (body, id) =>
+        x.bot.message("!room", { ...x.event, event_id: id, content: { msgtype: "m.text", body } });
+    await send("токены", "$list");
+    assert.match(x.sent.at(-1).body, /Следующая страница: ещё/);
+    x.bot = new ReferralBot(x.client, x.bot.control, x.store, x.config);
+    await send("ещё", "$next");
+    assert.equal(x.calls.at(-1).offset, 20);
+    assert.match(x.sent.at(-1).body, /Предыдущая страница: назад/);
+    await send("назад", "$previous");
+    assert.equal(x.calls.at(-1).offset, 0);
+    await send("отмена", "$cancel");
+    await send("ещё", "$no-list");
+    assert.match(x.sent.at(-1).body, /Список приглашений не открыт/);
+    assert.equal(x.calls.filter((request) => request.action === "matrix_revoke").length, 0);
+});

@@ -19,19 +19,30 @@
 
 ## Запуск
 
-Сначала создайте два приватных файла с токенами (без завершающего JSON). Например, через защищённый редактор:
+В обычном терминале запустите:
 
 ```sh
-install -d -m 700 ~/.config/matrix-history-mirror
-install -m 600 /dev/null ~/.config/matrix-history-mirror/source.token
-install -m 600 /dev/null ~/.config/matrix-history-mirror/target.token
+python3 deployment/matrix-history-mirror.py start
 ```
 
-Затем заполните файлы реальными токенами и запустите процесс. Адреса, MXID и пути ниже — примеры, их нужно заменить:
+При первом запуске скрипт попросит HTTPS-адрес Matrix API и Matrix ID каждой
+стороны, затем access token скрытым вводом. Файлы токенов создаются автоматически
+с правами `0600` внутри закрытого каталога состояния; значения не попадают в
+аргументы команд или журнал. Если запуск worker не завершился после сохранения
+профиля, реквизиты остаются для `resume`. Ошибка до сохранения профиля удаляет
+только новые файлы токенов этого запуска.
+
+Повторный `start` в терминале использует сохранённые поля и реквизиты; явно
+переданные параметры имеют приоритет. При смене URL реквизиты прежнего адреса
+автоматически не используются. Для других аккаунтов нужен отдельный каталог.
+Самостоятельное создание аккаунтов, приглашения в комнаты и импорт E2EE-ключей
+в клиенте остаются обязательными условиями выше.
+
+Для автоматизации без терминала все URL, Matrix ID и источники токенов передаются
+явно, как раньше. Если файлы уже подготовлены, полный пример запуска:
 
 ```sh
 python3 deployment/matrix-history-mirror.py start \
-  --state-dir ~/.local/state/matrix-history-mirror \
   --source-url https://matrix.old.example \
   --source-user @alice:old.example \
   --source-token-file ~/.config/matrix-history-mirror/source.token \
@@ -43,10 +54,15 @@ python3 deployment/matrix-history-mirror.py start \
 Вместо `--source-token-file` или `--target-token-file` можно указать `--source-token-command /absolute/path/to/helper` или соответствующий параметр назначения. Это полезно при коротком сроке жизни OAuth-токенов. Путь к helper не должен содержать секретов. Скрипт перечитывает token files перед каждым запросом и повторно вызывает helper после HTTP 401.
 
 ```sh
-python3 deployment/matrix-history-mirror.py status --state-dir ~/.local/state/matrix-history-mirror
-python3 deployment/matrix-history-mirror.py stop --state-dir ~/.local/state/matrix-history-mirror
-python3 deployment/matrix-history-mirror.py resume --state-dir ~/.local/state/matrix-history-mirror
+python3 deployment/matrix-history-mirror.py status
+python3 deployment/matrix-history-mirror.py stop
+python3 deployment/matrix-history-mirror.py resume
 ```
+
+Каталог состояния по умолчанию — `~/.local/state/matrix-history-mirror`;
+`status`, `stop` и `resume` используют его без повторного ввода пути. Для отдельной
+пары аккаунтов или прежнего нестандартного каталога передайте `--state-dir /private/path`
+в каждой команде. Уже сохранённый профиль другой пары аккаунтов не перезаписывается.
 
 `start` и `resume` запускают фоновый процесс. Его журнал находится в приватном `worker.log`; токены в журнал не записываются. SQLite-состояние сохраняется в каталоге с правами `0700`. При недоступности старого сервера состояние переходит в `WAIT_SOURCE`, а процесс повторяет подключение. После возвращения сервера сканирование продолжится с сохранённых курсоров. `stop` запрашивает остановку; уже начатый HTTP-запрос может завершаться до 25 секунд. После ручной остановки `resume` использует прежние параметры и контрольные точки.
 

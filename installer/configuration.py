@@ -543,6 +543,11 @@ def apply_settings(root, changes):
         'INVITATION_LIFETIME_SECONDS',
         'INVITATION_USAGE_LIMIT',
         'MAX_UPLOAD_SIZE_MIB',
+        'GOOGLE_CLIENT_ID',
+        'GOOGLE_CLIENT_SECRET',
+        'TELEGRAM_CLIENT_ID',
+        'TELEGRAM_CLIENT_SECRET',
+        'SOCKS5_CONFIG',
     }
     if set(changes) - allowed:
         raise RuntimeError(

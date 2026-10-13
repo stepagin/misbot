@@ -702,7 +702,7 @@ test("server maintenance needs one bound confirmation and returns its saved task
     assert.equal(operations.length, 1);
     assert.deepEqual(operations[0].argument, { operation: "restart" });
     assert.equal(operations[0].event_id, "$restart");
-    assert.ok(x.sent.some((s) => s.includes("задача SO-fictional")));
+    assert.ok(x.sent.some((s) => s.includes("задача 1")));
     await send("задача SO-fictional", "$result");
     assert.equal(x.calls.find((c) => c.action === "panel-server-result").argument, "SO-fictional");
 });
@@ -847,7 +847,7 @@ test("expected federation refusals are actionable and arbitrary remote error tex
         errorText({ toString: null, secret: "FICTIONAL_SECRET" }),
         /FICTIONAL_SECRET/
     );
-    assert.match(errorText("FICTIONAL_SECRET"), /задача ID/);
+    assert.match(errorText("FICTIONAL_SECRET"), /задачи/);
 });
 
 test("statistics keep unavailable counters unknown and show a compact activity report", () => {
@@ -1751,4 +1751,121 @@ test("remote decisions supersede a saved initial delivery timeout, but local ter
             assert.equal(x.sent.length, count);
         }
     }
+});
+
+test("request pages keep permanent numbers and never send later pages to CLI", async () => {
+    const x = setup();
+    const requests = Array.from({ length: 43 }, (_, index) => ({
+        id: "MB-" + index.toString(16).padStart(32, "0"),
+        server: `server${index}.example.org`,
+        direction: "incoming",
+        state: "pending"
+    }));
+    const control = x.bot.control;
+    x.bot.control = async (request) =>
+        request.action === "requests" ? { requests } : control(request);
+    const send = (body, event_id) =>
+        x.bot.message("!room", { ...x.event, event_id, content: { msgtype: "m.text", body } });
+    await send("заявки входящие", "$page1");
+    assert.match(x.sent.at(-1), /заявки входящие 2/);
+    assert.doesNotMatch(x.sent.at(-1), /server20|CLI/);
+    await send("заявки входящие 2", "$page2");
+    assert.match(x.sent.at(-1), /21\. server20/);
+    assert.match(x.sent.at(-1), /подтвердить 21/);
+    assert.match(x.sent.at(-1), /заявки входящие 3/);
+    // Recreate the bot with persisted storage, then change a filter and order.
+    x.bot = new FederationBot(x.client, x.bot.control, x.bot.store, x.cfg);
+    requests.reverse();
+    await send("заявки входящие 1", "$afterRestart");
+    assert.match(x.sent.at(-1), /31\. server30/);
+    assert.doesNotMatch(x.sent.at(-1), /CLI/);
+    await send("заявки входящие 99", "$outside");
+    assert.match(x.sent.at(-1), /Такой страницы нет/);
+});
+
+test("service tasks have actor-bound stable numbers, list and legacy ID lookup", async () => {
+    const x = setup();
+    const control = x.bot.control;
+    x.bot.control = async (request) => {
+        if (request.action === "panel-server-operation")
+            return { status: "queued", operation_id: "SO-saved", operation: "backup" };
+        if (request.action === "panel-server-result") {
+            x.calls.push(request);
+            return {
+                status: "complete",
+                operation_id: request.argument,
+                operation: "backup",
+                result: { ok: true }
+            };
+        }
+        return control(request);
+    };
+    const send = (body, event_id) =>
+        x.bot.message("!room", { ...x.event, event_id, content: { msgtype: "m.text", body } });
+    await send("создать копию", "$backup");
+    await send("выполнить подтверждаю", "$apply");
+    assert.match(x.sent.at(-1), /задача 1/);
+    x.bot = new FederationBot(x.client, x.bot.control, x.bot.store, x.cfg);
+    await send("задачи", "$tasks");
+    assert.match(x.sent.at(-1), /Создание копии.*задача 1/);
+    assert.deepEqual(x.bot.serviceTasks("@another:example.org"), []);
+    await send("задача 1", "$short");
+    assert.equal(
+        x.calls.filter((r) => r.action === "panel-server-result").at(-1).argument,
+        "SO-saved"
+    );
+    await send("задача SO-legacy", "$legacy");
+    await send("задачи", "$tasks2");
+    assert.match(x.sent.at(-1), /задача 2/);
+    const before = x.calls.filter((r) => r.action === "panel-server-result").length;
+    await send("задача 999", "$unknown");
+    assert.match(x.sent.at(-1), /Такого номера задачи нет/);
+    assert.equal(x.calls.filter((r) => r.action === "panel-server-result").length, before);
+});
+
+test("full service task index preserves accepted operations and legacy result lookup", async () => {
+    const x = setup();
+    const tasks = Array.from({ length: 1000 }, (_, index) => ({
+        id: `SO-history-${index}`,
+        operation: "backup"
+    }));
+    x.bot.store.setValue("service-tasks:" + x.event.sender, tasks);
+    const control = x.bot.control;
+    x.bot.control = async (request) => {
+        if (request.action === "panel-server-operation") {
+            x.calls.push(request);
+            return { status: "queued", operation_id: "SO-overflow", operation: "backup" };
+        }
+        if (request.action === "panel-server-result") {
+            x.calls.push(request);
+            return {
+                status: "complete",
+                operation_id: request.argument,
+                operation: "backup",
+                result: { ok: true }
+            };
+        }
+        return control(request);
+    };
+    const send = (body, event_id) =>
+        x.bot.message("!room", { ...x.event, event_id, content: { msgtype: "m.text", body } });
+    await send("создать копию", "$new");
+    await send("выполнить подтверждаю", "$confirm");
+    assert.match(x.sent.at(-1), /задача SO-overflow/);
+    assert.match(x.sent.at(-1), /принято/);
+    assert.doesNotMatch(x.sent.at(-1), /не подтверждён|null/);
+    await send("выполнить подтверждаю", "$repeat");
+    assert.match(x.sent.at(-1), /Действующего предложения нет/);
+    assert.equal(x.calls.filter((r) => r.action === "panel-server-operation").length, 1);
+    await send("задача SO-overflow", "$result");
+    assert.match(x.sent.at(-1), /готово/);
+    assert.match(x.sent.at(-1), /задача SO-overflow/);
+    await send("задача 1", "$previous");
+    assert.equal(
+        x.calls.filter((r) => r.action === "panel-server-result").at(-1).argument,
+        "SO-history-0"
+    );
+    assert.deepEqual(x.bot.serviceTasks(x.event.sender), tasks);
+    await send("задачи", "$list");
+    assert.match(x.sent.at(-1), /Список заполнен/);
 });

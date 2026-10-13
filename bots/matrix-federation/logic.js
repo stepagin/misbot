@@ -29,7 +29,7 @@ const MAINTENANCE = `Обслуживание сервера
 4. \`копии\` — создать или проверить резервную копию
 5. \`хранилище\` — медиа и резервные копии
 6. \`операции\` — задачи федерации
-7. \`задача ID\` — результат задачи обслуживания
+7. \`задачи\` — выбрать задачу обслуживания и проверить результат
 
 Памятка: изменения требуют подтверждения. Отмена предложения не прерывает запущенную задачу.
 Назад: \`меню\``;
@@ -367,7 +367,7 @@ function serverText(result) {
     return lines.join("\n");
 }
 
-function requestsText(result, category, number = (_, index) => index + 1) {
+function requestsText(result, category, number = (_, index) => index + 1, page = 1) {
     const terminal = new Set(["rejected", "expired"]);
     const items = (result.requests || []).filter((item) => {
         if (item.hidden || item.cleared || ["cancelled", "connected"].includes(item.state))
@@ -378,8 +378,11 @@ function requestsText(result, category, number = (_, index) => index + 1) {
     });
     const labels = { incoming: "Входящие", outgoing: "Исходящие", rejected: "Отклонённые" };
     const lines = [`${labels[category] || "Актуальные"} заявки: ${items.length}.`];
-    for (const [index, item] of items.slice(0, 20).entries()) {
-        const reference = number(item, index);
+    const pages = Math.max(1, Math.ceil(items.length / 20));
+    if (page > pages) return `Такой страницы нет. Страниц: ${pages}. Откройте \`заявки\`.`;
+    const offset = (page - 1) * 20;
+    for (const [index, item] of items.slice(offset, offset + 20).entries()) {
+        const reference = number(item, offset + index);
         lines.push(`\n${reference}. ${item.server} — ${stateText(item.state)}.`);
         if (item.expires_at) lines.push(`Срок: ${humanDate(item.expires_at * 1000)}`);
         if (item.state === "pending" && item.direction === "incoming")
@@ -390,7 +393,17 @@ function requestsText(result, category, number = (_, index) => index + 1) {
             lines.push(`Отозвать: \`отменить ${reference}\``);
         if (item.delivery_pending) lines.push("Доставка решения пока не подтверждена.");
     }
-    if (items.length > 20) lines.push("Показаны первые 20. Полный список доступен через CLI.");
+    if (pages > 1) {
+        const command =
+            "заявки" +
+            (category
+                ? " " +
+                  { incoming: "входящие", outgoing: "исходящие", rejected: "отклонённые" }[category]
+                : "");
+        lines.push(`\nСтраница ${page} из ${pages}.`);
+        if (page > 1) lines.push(`Назад: \`${command} ${page - 1}\``);
+        if (page < pages) lines.push(`Далее: \`${command} ${page + 1}\``);
+    }
     return lines.join("\n");
 }
 
@@ -422,7 +435,7 @@ function confirmationText(action, argument) {
         lines.push("Возможен временный перерыв в работе сервера и бота.");
     if (action === "stop")
         lines.push(
-            "При остановке Matrix или MAS управление через этот чат станет недоступным. Для запуска потребуется SSH."
+            "При остановке Matrix или MAS управление через этот чат станет недоступным. Убедитесь, что у вас есть доступ по SSH. Для возвращения: `sudo misbot start`, затем `sudo misbot check`."
         );
     if (action === "api-disable")
         lines.push(
@@ -465,10 +478,10 @@ function errorText(code) {
             code
         )
     )
-        return "Управляющая служба сейчас недоступна или занята. Ответ не получен. Повторите команду позже; результат ранее принятой задачи можно проверить командой «\`задача ID\`».";
+        return "Управляющая служба сейчас недоступна или занята. Ответ не получен. Повторите команду позже; ранее принятую задачу можно выбрать командой «\`задачи\`».";
     return typeof code === "string" && Object.hasOwn(messages, code)
         ? messages[code]
-        : "Результат команды не подтверждён. Проверьте состояние сервера и сохранённой задачи. Команды: `состояние`, `задача ID`, `операции`. Для восстановления используйте SSH. Справка: `помощь`.";
+        : "Результат команды не подтверждён. Проверьте состояние сервера и сохранённой задачи. Команды: `состояние`, `задачи`, `операции`. Для восстановления используйте SSH. Справка: `помощь`.";
 }
 
 class FederationBot {
@@ -505,6 +518,32 @@ class FederationBot {
             this.store.setValue("request-index", { format: 1, ids: [...saved.ids, id] });
         }
         return index + 1;
+    }
+    serviceTasks(actor) {
+        const saved = this.store.getValue("service-tasks:" + actor) || [];
+        if (
+            !Array.isArray(saved) ||
+            saved.length > 1000 ||
+            saved.some(
+                (item) =>
+                    !item || typeof item.id !== "string" || !/^[A-Za-z0-9_-]{1,100}$/.test(item.id)
+            ) ||
+            new Set(saved.map((item) => item.id)).size !== saved.length
+        )
+            throw new Error("Invalid saved service task index");
+        return saved;
+    }
+    serviceTaskNumber(actor, id, operation) {
+        const saved = this.serviceTasks(actor);
+        const index = saved.findIndex((item) => item.id === id);
+        if (index >= 0) return index + 1;
+        if (typeof id !== "string" || !/^[A-Za-z0-9_-]{1,100}$/.test(id))
+            throw new Error("Invalid service task identity");
+        // A full local index must not hide an operation already accepted by the
+        // backend. Keep permanent numbers and fall back to its original ID.
+        if (saved.length >= 1000) return null;
+        this.store.setValue("service-tasks:" + actor, [...saved, { id, operation }]);
+        return saved.length + 1;
     }
     resolveRequest(original) {
         const match = original.match(
@@ -706,13 +745,21 @@ class FederationBot {
                     action: draft.action,
                     argument: draft.argument
                 });
+            const taskNumber =
+                result.operation_id && draft.action === "panel-server-operation"
+                    ? this.serviceTaskNumber(
+                          event.sender,
+                          result.operation_id,
+                          draft.argument.operation
+                      )
+                    : null;
             this.store.setValue(key, null);
             await reply(
                 (WRITES.has(draft.action)
                     ? this.operationText(draft, result)
                     : resultText(result)) +
                     (result.operation_id && draft.action === "panel-server-operation"
-                        ? `\nПроверить: \`задача ${result.operation_id}\``
+                        ? `\nПроверить: \`задача ${taskNumber ?? result.operation_id}\`. Список: \`задачи\``
                         : "")
             );
             return;
@@ -874,27 +921,89 @@ class FederationBot {
             await reply(confirmationText(operation));
             return;
         }
-        const categories = {
-            "заявки входящие": "incoming",
-            "заявки исходящие": "outgoing",
-            "заявки отклонённые": "rejected",
-            "заявки отклоненные": "rejected"
-        };
-        if (text === "заявки" || Object.hasOwn(categories, text)) {
+        const requestPage = text.match(
+            /^заявки(?: (входящие|исходящие|отклонённые|отклоненные))?(?: ([1-9]\d{0,3}))?$/
+        );
+        if (requestPage) {
+            const categories = {
+                входящие: "incoming",
+                исходящие: "outgoing",
+                отклонённые: "rejected",
+                отклоненные: "rejected"
+            };
             const result = await this.call("requests", null, event);
             await reply(
-                requestsText(result, categories[text], (item) => this.requestNumber(item.id))
+                requestsText(
+                    result,
+                    categories[requestPage[1]],
+                    (item) => this.requestNumber(item.id),
+                    Number(requestPage[2] || 1)
+                )
             );
             if (text === "заявки") await reply(REQUESTS);
             return;
         }
+        const taskPage = text.match(/^задачи(?: ([1-9]\d{0,3}))?$/);
+        if (taskPage) {
+            const tasks = this.serviceTasks(event.sender);
+            const page = Number(taskPage[1] || 1);
+            const pages = Math.max(1, Math.ceil(tasks.length / 20));
+            if (page > pages) {
+                await reply("Такой страницы нет. Откройте `задачи`.");
+                return;
+            }
+            const names = {
+                start: "Запуск служб",
+                stop: "Остановка служб",
+                restart: "Перезапуск служб",
+                backup: "Создание копии",
+                backup_verify: "Проверка копии",
+                storage_connect: "Подключение S3",
+                update: "Обновление"
+            };
+            const offset = (page - 1) * 20;
+            const lines = [
+                tasks.length
+                    ? "Ваши задачи обслуживания (сначала новые):"
+                    : "Сохранённых задач обслуживания пока нет."
+            ];
+            tasks
+                .map((item, index) => ({ ...item, number: index + 1 }))
+                .reverse()
+                .slice(offset, offset + 20)
+                .forEach((item) => {
+                    lines.push(
+                        `${item.number}. ${names[item.operation] || "Обслуживание сервера"} — \`задача ${item.number}\``
+                    );
+                });
+            if (page > 1) lines.push(`Назад: \`задачи ${page - 1}\``);
+            if (page < pages) lines.push(`Далее: \`задачи ${page + 1}\``);
+            lines.push(
+                tasks.length >= 1000
+                    ? "Список заполнен; прежние номера сохранены. Для остальных задач используйте команду `задача ID` из результата операции."
+                    : "Список сохраняется после перезапуска. Для прежней задачи можно один раз указать `задача ID`."
+            );
+            await reply(lines.join("\n"));
+            return;
+        }
         const job = original.match(/^задача ([A-Za-z0-9_-]{1,100})$/i);
         if (job) {
-            const result = await this.call("panel-server-result", job[1], event);
+            const target = /^\d+$/.test(job[1])
+                ? this.serviceTasks(event.sender)[Number(job[1]) - 1]?.id
+                : job[1];
+            if (!target) {
+                await reply("Такого номера задачи нет. Откройте `задачи`.");
+                return;
+            }
+            const result = await this.call("panel-server-result", target, event);
+            const number = this.serviceTaskNumber(event.sender, target, result.operation);
             await reply(
-                result.result
-                    ? `${resultText(result)}\n${serverText(result.result)}`
-                    : resultText(result)
+                (number === null
+                    ? `Проверить снова: \`задача ${target}\`.\n`
+                    : `Задача №${number}.\n`) +
+                    (result.result
+                        ? `${resultText(result)}\n${serverText(result.result)}`
+                        : resultText(result))
             );
             return;
         }

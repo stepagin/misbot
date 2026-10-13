@@ -1128,6 +1128,8 @@ class Installation:
             )
             with interface.view.screen():
                 code = interface.menu()
+            if getattr(interface, 'restart_requested', False):
+                interface.reopen_updated(plain=plain)
             if interface.view.screen_used:
                 print('Мастер закрыт. ' + interface.continuation())
             return code

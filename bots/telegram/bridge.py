@@ -351,6 +351,12 @@ class Bridge:
         if action == 'manage_prepare':
             if operation not in controls.WRITES:
                 raise BotError('Эта операция доступна без подтверждения. Выберите её в меню бота.')
+            if operation == 'storage_connect' and not controls.media_profile_ready(config):
+                raise BotError(
+                    'Подготовленный профиль S3 отсутствует или не прошёл проверку. '
+                    'Через SSH подготовьте приватный файл .misbot/s3/media.env в каталоге установки. '
+                    'Затем повторите применение профиля; ключи доступа в чат не отправляйте.'
+                )
             key = secrets.token_urlsafe(16)
             version = ''
             if operation == 'update':
