@@ -94,12 +94,12 @@ async function main() {
         console.log(
             "Invitation issued over E2EE; server stores m.room.encrypted; monospace and MSK confirmed"
         );
-        const listed = await sendAndWait("токены", (c) => c.body.includes("Мои приглашения"));
+        const listed = await sendAndWait("токены", (c) => c.body.includes("Ваши приглашения"));
         if (!listed.content.body.includes(label) || !listed.content.body.includes(code))
             throw new Error("Creator name missing from list");
         await sendAndWait("отозвать", (c) => c.body.includes("Какое приглашение отозвать"));
         await sendAndWait("отмена", (c) => c.body.includes("Отзыв отменён"));
-        const afterCancel = await sendAndWait("токены", (c) => c.body.includes("Мои приглашения"));
+        const afterCancel = await sendAndWait("токены", (c) => c.body.includes("Ваши приглашения"));
         if (!afterCancel.content.body.includes(code))
             throw new Error("Cancellation revoked the token");
         const selection = await sendAndWait("отозвать", (c) =>
@@ -114,7 +114,7 @@ async function main() {
         );
         const after = await sendAndWait(
             "токены",
-            (c) => c.body.includes("Мои приглашения") || c.body.includes("Нет приглашений")
+            (c) => c.body.includes("Ваши приглашения") || c.body.includes("Пока нет приглашений.")
         );
         if (after.content.body.includes(code)) throw new Error("Revoked token remained in list");
         console.log(
