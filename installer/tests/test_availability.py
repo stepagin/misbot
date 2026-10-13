@@ -151,7 +151,7 @@ class ProtocolTests(unittest.TestCase):
             patch.object(lifecycle, 'log', Path('/dev/null'), create=True),
             patch.object(lifecycle, 'dns_check'),
             patch.object(
-                lifecycle.subprocess,
+                lifecycle.startup_process,
                 'run',
                 return_value=subprocess.CompletedProcess([], 1, raw, 'PRIVATE_MARKER'),
             ),

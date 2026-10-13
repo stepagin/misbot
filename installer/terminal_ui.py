@@ -453,6 +453,7 @@ class UI:
                 self.field(provider + '_CLIENT_SECRET')
                 if self.model.get(provider + '_CLIENT_SECRET') and provider == 'TELEGRAM':
                     self.field('SOCKS5_CONFIG')
+                    self.check_telegram_login()
             schema.validate(
                 {
                     'DOMAIN': self.model['DOMAIN'],
@@ -465,6 +466,38 @@ class UI:
             self.model = previous
             self.save()
             raise
+
+    def check_telegram_login(self):
+        from telegram_login_check import check, LoginCheckError
+
+        while True:
+            try:
+                with self.view.busy('Проверяем связь с Telegram, до 36 секунд'):
+                    check(self.model)
+            except LoginCheckError as error:
+                self.view.message(str(error), 'yellow')
+                choice = self.answer(
+                    '1 — исправить прокси, 2 — повторить, 3 — отключить Telegram; назад',
+                    ('1', '2', '3'),
+                    '1',
+                )
+                if choice == '3':
+                    self.disable_provider('TELEGRAM')
+                    return
+                if choice == '1':
+                    self.field('SOCKS5_CONFIG')
+                continue
+            self.view.message(
+                'Telegram ответил на три HTTPS-запроса через выбранное подключение. '
+                'Обрывов во время проверки не обнаружено.'
+            )
+            self.view.message(
+                'Client ID и Client Secret относятся к OIDC, а не к токену бота. '
+                'Их правильность и Redirect URI подтверждаются входом через Telegram '
+                'после запуска сервера; эта проверка их не подтверждает.',
+                'dim',
+            )
+            return
 
     def setup_mas(self):
         previous = self.model.copy()
@@ -545,7 +578,18 @@ class UI:
             if key == 'MEDIA_MODE' and self.model[key] == 's3':
                 # Keep the valid previous mode until all dependent fields are entered.
                 self.model['MEDIA_MODE'] = previous.get('MEDIA_MODE', 'local')
-                self.s3_form('media')
+                while True:
+                    try:
+                        self.s3_form('media')
+                        break
+                    except (Back, Cancel):
+                        self.model = previous.copy()
+                        self.save()
+                        self.view.heading('Хранилище медиа', 'Ввод S3 отменён. Выберите хранилище.')
+                        self.field('MEDIA_MODE')
+                        if self.model[key] != 's3':
+                            break
+                        self.model['MEDIA_MODE'] = previous.get('MEDIA_MODE', 'local')
             elif key == 'POSTGRES_MODE' and self.model[key] == 'external':
                 for name in (
                     'POSTGRES_HOST',
@@ -774,7 +818,10 @@ class UI:
                         if interactive or child.stdout is None:
                             child.wait(timeout=1)
                         else:
-                            read_interrupted_output(child, collect_recovery)
+                            if path == 'start':
+                                read_interrupted_output(child, collect_recovery, timeout=10)
+                            else:
+                                read_interrupted_output(child, collect_recovery)
                             if process_group_running(child):
                                 time.sleep(0.2)
                     except subprocess.TimeoutExpired:
@@ -797,10 +844,6 @@ class UI:
         import s3_config
 
         scratch = {key: values.get(key, '') for key in s3_config.FIELDS}
-        self.view.message(
-            'Введите реквизиты существующего S3-хранилища. Ключи вводятся скрыто. '
-            '«Назад» или «отмена» отменяют выбор; файлы настроек открывать не нужно.'
-        )
         for key in (
             'S3_BUCKET',
             'S3_ENDPOINT_URL',
@@ -809,6 +852,8 @@ class UI:
             'S3_ACCESS_KEY_ID',
             'S3_SECRET_ACCESS_KEY',
         ):
+            self.view.heading('Параметры S3')
+            self.view.message('0 / назад / отмена — вернуться. Ключи вводятся скрыто.', 'dim')
             self.s3_field(key, scratch, save=False)
         return s3_config.validate(scratch)
 
@@ -892,6 +937,8 @@ class UI:
         item = schema.FIELDS[key]
 
         def validate(value):
+            if value.strip() == '0':
+                raise Back()
             if key == 'S3_ENDPOINT_URL' and value == '/очистить':
                 value = ''
             return s3_config.validate_field(key, schema.field_value(key, value))
@@ -2021,18 +2068,23 @@ class UI:
         self.view.heading(item.title)
         self.view.message('Введите параметры S3 здесь. Ключи доступа скрыты при вводе.')
         self.view.message('«Назад» отменяет ввод; Ctrl+C прерывает выполняемую операцию.', 'dim')
-        purpose = 'media'
-        if item.path == 'storage s3 check':
-            choice = self.choose(
-                'Что проверить?',
-                [('1', 'Хранилище медиа', ''), ('2', 'Хранилище резервных копий', '')],
-                aliases={'media': '1', 'backup': '2'},
-            )
-            if choice == '0':
-                return 0
-            purpose = 'media' if choice == '1' else 'backup'
-        initial = self.model if purpose == 'media' else self.backup
-        values = self.s3_profile(initial)
+        try:
+            purpose = 'media'
+            if item.path == 'storage s3 check':
+                choice = self.choose(
+                    'Что проверить?',
+                    [('1', 'Хранилище медиа', ''), ('2', 'Хранилище резервных копий', '')],
+                    aliases={'media': '1', 'backup': '2'},
+                )
+                if choice == '0':
+                    raise Back()
+                purpose = 'media' if choice == '1' else 'backup'
+            initial = self.model if purpose == 'media' else self.backup
+            values = self.s3_profile(initial)
+        except (Back, Cancel):
+            self._result_waited = True
+            self.view.message('Ввод S3 отменён. Возвращаемся в меню.')
+            return 0
         self.view.heading(item.title, 'Проверьте настройки перед выполнением.')
         self.view.details(
             [

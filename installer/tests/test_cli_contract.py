@@ -422,6 +422,9 @@ elif name == 'dirname':
     print(Path(args[-1]).parent)
 elif name == 'docker' and args[:2] == ['info', '--format']:
     print('x86_64')
+elif name == 'python3' and args and Path(args[0]).name == 'startup_process.py':
+    # Run the actual bounded wrapper; its children still resolve to this sandbox.
+    os.execv(sys.executable, [sys.executable, *args])
 elif name == 'python3' and '-c' in args:
     code = args[args.index('-c') + 1]
     if 'get("backend"' in code:

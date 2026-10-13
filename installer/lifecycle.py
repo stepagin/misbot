@@ -20,6 +20,7 @@ from contextlib import contextmanager, nullcontext
 import referral
 import preflight
 import state_store
+import startup_process
 import backup_archive
 import backup_writers
 from operation_models import OperationError
@@ -47,17 +48,20 @@ GENERATION_ERRORS = {
 
 def run(command, stdin=None, allowed=(0,), configuration_errors=None):
     # Compose exec can otherwise consume the remaining commands of `ssh ... bash -s`.
-    result = subprocess.run(
-        command,
-        input='' if stdin is None else stdin,
-        capture_output=True,
-        text=True,
-        **state_store.child_process_options(),
-    )
+    if startup_process.ACTIVE.get() or startup_process.DEADLINE.get() is not None:
+        result = startup_process.run(command, stdin=stdin, emit=emit)
+    else:
+        result = subprocess.run(
+            command,
+            input='' if stdin is None else stdin,
+            capture_output=True,
+            text=True,
+            **state_store.child_process_options(),
+        )
     if result.returncode not in allowed:
         if (
             Path(command[0]).name == 'docker'
-            and 'Cannot connect to the Docker daemon' in result.stderr
+            and 'Cannot connect to the Docker daemon' in result.stderr + result.stdout
         ):
             root = Path(globals().get('ROOT', '/opt/matrix-stack'))
             raise RuntimeError(preflight.docker_unavailable_message(root))
@@ -396,15 +400,24 @@ def image(role):
 
 def wait(check, attempts=60, service='service'):
     emit('waiting_for_service', service=service, timeout_seconds=attempts * 2)
+    expires = time.monotonic() + attempts * 2
     for _ in range(attempts):
+        remaining = expires - time.monotonic()
+        if remaining <= 0:
+            break
         try:
-            if check():
-                return
+            with startup_process.deadline(remaining):
+                if check():
+                    return
         except state_store.OperationInterrupted:
             raise
-        except Exception:
+        except RuntimeError:
+            # Failed readiness probes are expected during service boot. Programming
+            # errors must propagate immediately instead of becoming apparent hangs.
             pass
-        time.sleep(2)
+        remaining = expires - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(2, remaining))
     diagnostic = (
         'sudo docker compose --project-directory '
         + str(ROOT)
@@ -527,6 +540,7 @@ def upgrade_legacy_network():
     emit('legacy_network_upgrade', phase='old_network_removed', data_retained=True)
 
 
+@startup_process.bounded
 def generate():
     ownership_check()
     metadata = state()
@@ -548,15 +562,8 @@ def generate():
     for role, digest in lock['digests'].items():
         if role == 'mas' and external_mas():
             continue
-        present = (
-            subprocess.run(
-                ['docker', 'image', 'inspect', digest],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            ).returncode
-            == 0
-        )
-        if not present:
+        present = startup_process.run(['docker', 'image', 'inspect', digest], emit=emit)
+        if present.returncode != 0:
             run(['docker', 'pull', digest])
         emit('image_ready', role=role, version=lock['tags'][role])
     run(
@@ -569,11 +576,9 @@ def generate():
             raise RuntimeError('S3 Synapse base differs from the pinned image lock')
         tag = 'matrix-stack/synapse-s3:1.7.0'
         source_hash = hashlib.sha256(dockerfile.read_bytes()).hexdigest()
-        image_id = subprocess.run(
-            ['docker', 'image', 'inspect', tag, '--format', '{{.Id}}'],
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
+        image_id = run(
+            ['docker', 'image', 'inspect', tag, '--format', '{{.Id}}'], allowed=(0, 1)
+        ).strip()
         image_lock = ROOT / 'synapse-s3-image.lock.json'
         saved = json.loads(image_lock.read_text()) if image_lock.exists() else {}
         if (
@@ -885,8 +890,10 @@ def up_admission_check():
         )
 
 
+@startup_process.bounded
 def up():
     up_admission_check()
+    emit('startup_progress', completed=0, total=10, stage='admission')
     values = preflight.settings(ROOT)
     if values.get('MAS_MODE') == 'external':
         external_mas_probe(values)
@@ -915,7 +922,9 @@ def up():
             )
             raise RuntimeError('S3 check failed before startup. ' + next_action) from None
         emit('s3_connection', passed=True)
+    emit('startup_progress', completed=1, total=10, stage='images')
     generate()
+    emit('startup_progress', completed=2, total=10, stage='host')
     dns_check()
     upgrade_legacy_network()
     if not state().get('databases_initialized'):
@@ -934,6 +943,7 @@ def up():
                     sock.bind(('0.0.0.0', port))
                 except OSError:
                     raise RuntimeError('Required UDP port occupied: ' + str(port))
+    emit('startup_progress', completed=3, total=10, stage='database')
     if external_database():
         if not state().get('databases_initialized'):
             import postgres_setup
@@ -983,6 +993,7 @@ def up():
         metadata['s3_identity'] = media_transfer.identity(preflight.settings(ROOT))
     metadata['storage_committed'] = True
     state_store.write_json(ROOT / 'installation.json', metadata)
+    emit('startup_progress', completed=4, total=10, stage='applications')
     dc('up', '-d', *owned_databases())
     probe = "import urllib.request; urllib.request.urlopen('http://synapse:8008/_matrix/client/versions',timeout=3).read()"
     if not external_mas():
@@ -1003,10 +1014,12 @@ def up():
         raise RuntimeError('Synapse has not generated its signing key')
     metadata['synapse_signing_key_created'] = True
     state_store.write_json(ROOT / 'installation.json', metadata)
+    emit('startup_progress', completed=5, total=10, stage='administrator')
     create_admin()
     if external_mas() and state().get('referral_provisioned'):
         verify_external_mas_state()
         verify_external_bot_tokens()
+    emit('startup_progress', completed=6, total=10, stage='referral')
     dc('up', '-d', 'referral-control')
     wait(
         lambda: dc(
@@ -1047,6 +1060,7 @@ def up():
         cross_signed=True,
         admin_scopes=False,
     )
+    emit('startup_progress', completed=7, total=10, stage='federation')
     import federation_runtime
 
     federation_runtime.provision(ROOT, dc, metadata)
@@ -1070,6 +1084,7 @@ def up():
     metadata['welcome_crypto_initialized'] = True
     federation_runtime.validate(ROOT, metadata)
     state_store.write_json(ROOT / 'installation.json', metadata)
+    emit('startup_progress', completed=8, total=10, stage='https')
     dc('up', '-d', 'jwt', 'web', 'admin', 'caddy', 'tls-router')
     cert, key = certificate_paths()
     wait(lambda: cert.is_file() and key.is_file(), attempts=150, service='caddy')
@@ -1084,6 +1099,7 @@ def up():
         and {row['Service'] for row in service_rows()} == expected_services(),
         service=' '.join(sorted(expected_services())),
     )
+    emit('startup_progress', completed=9, total=10, stage='verification')
     check()
     release = json.loads((ROOT / 'release.json').read_text())
     metadata = state()
@@ -1093,6 +1109,7 @@ def up():
     ).hexdigest()
     state_store.write_json(ROOT / 'installation.json', metadata)
     vault_cache.sync_optional(ROOT, emit)
+    emit('startup_progress', completed=10, total=10, stage='complete')
     emit(
         'installation_running',
         admin='https://admin.' + state()['domain'],
@@ -1291,10 +1308,10 @@ def backup_recover():
 
 def check():
     dns_check()
-    result = subprocess.run(
+    result = startup_process.run(
         ['python3', str(ROOT / 'verify.py'), '--directory', str(ROOT)],
-        capture_output=True,
-        text=True,
+        emit=emit,
+        timeout=600,
     )
     for line in result.stdout.splitlines():
         record = json.loads(line)
@@ -1813,7 +1830,7 @@ def main():
                 'down': down,
             }[args.action]()
             if args.register_command or args.remove_command:
-                subprocess.run(
+                result = startup_process.run(
                     [
                         '/usr/bin/python3',
                         str(ROOT / 'command_wrapper.py'),
@@ -1822,9 +1839,13 @@ def main():
                         str(ROOT),
                         '--keep-default',
                     ],
-                    check=True,
-                    **state_store.child_process_options(),
+                    emit=emit,
+                    timeout=30,
                 )
+                if result.returncode:
+                    raise RuntimeError(
+                        'System command registration failed; retry the same operation'
+                    )
     except Exception as error:
         recovery = (
             {

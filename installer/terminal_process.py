@@ -6,7 +6,10 @@ import os
 from pathlib import Path
 import re
 import selectors
+import signal
 import time
+
+from startup_process import process_group_running
 
 MAX_LINE = 256 * 1024
 
@@ -71,6 +74,80 @@ def primary_output(path, line):
         'Another installer operation is running for this directory.'
     ):
         return present_output(path, record['message'])
+    if record.get('check') == 'startup_progress':
+        stages = {
+            'admission': 'Проверка условий запуска',
+            'images': 'Загрузка образов и подготовка настроек',
+            'host': 'Проверка DNS и подготовка сервера',
+            'database': 'Запуск базы данных',
+            'applications': 'Запуск Matrix и MAS',
+            'administrator': 'Подготовка администратора',
+            'referral': 'Запуск бота приглашений',
+            'federation': 'Запуск административного бота',
+            'https': 'HTTPS и звонки',
+            'verification': 'Итоговая проверка',
+            'complete': 'Сервер запущен',
+        }
+        completed, total = record.get('completed'), record.get('total')
+        if type(completed) is int and type(total) is int and 0 <= completed <= total and total > 0:
+            return [
+                f'Запуск: {completed * 100 // total}% · этапы {completed}/{total} · '
+                + stages.get(record.get('stage'), 'Подготовка')
+            ]
+        return []
+    if record.get('check') == 'command_progress':
+        command = record.get('command')
+        labels = {
+            'docker pull': 'Загрузка образа Docker',
+            'docker build': 'Сборка образа Docker',
+            'docker': 'Docker',
+            'systemctl': 'Системная служба',
+            'apt-get': 'Установка системных пакетов',
+            'curl': 'Загрузка файла',
+            'python3': 'Подготовка и проверка настроек',
+            'dd': 'Подготовка swap',
+        }
+        seconds = record.get('elapsed_seconds')
+        limit = record.get('timeout_seconds')
+        if type(seconds) is int and type(limit) is int:
+            return [f'{labels.get(command, "Команда")}: {seconds} с · предел {limit} с']
+        return []
+    if record.get('check') in ('download_progress', 'download_layer'):
+        layer = record.get('layer', '')
+        if not isinstance(layer, str) or not re.fullmatch(r'[a-f0-9]{12,64}', layer):
+            return []
+        if record['check'] == 'download_layer':
+            actions = {
+                'Pulling fs layer': 'ожидает загрузки',
+                'Waiting': 'ожидает загрузки',
+                'Download complete': 'загружен',
+                'Pull complete': 'готов',
+                'Already exists': 'уже есть',
+            }
+            action = actions.get(record.get('action'))
+            return ['Слой ' + layer[:12] + ': ' + action] if action else []
+        current, total = record.get('current'), record.get('total')
+        if not (
+            type(current) is int and type(total) is int and 0 <= current <= total and total > 0
+        ):
+            return []
+        action = 'Загрузка' if record.get('action') == 'Downloading' else 'Распаковка'
+        message = f'{action} слоя {layer[:12]}: {current * 100 // total}% · {current / 1e6:.1f}/{total / 1e6:.1f} МБ'
+        speed = record.get('bytes_per_second')
+        if type(speed) is int and speed >= 0:
+            message += f' · {speed / 1e6:.1f} МБ/с'
+        return [message]
+    if record.get('check') == 'image_ready':
+        role = record.get('role')
+        return ['Образ готов: ' + role] if isinstance(role, str) else []
+    if record.get('check') == 'waiting_for_service':
+        return [
+            'Ожидаем готовности: '
+            + str(record.get('service', 'служба'))
+            + ' · предел '
+            + str(record.get('timeout_seconds', '?'))
+            + ' с'
+        ]
     if record.get('check') == 'installation_status':
         from terminal_diagnostics import status_messages
 
@@ -243,37 +320,36 @@ def primary_output(path, line):
     return ['Результат получен.']
 
 
-def process_group_running(child):
-    """Wait for owned live descendants; reaped or orphaned zombies hold no locks."""
-    identifier = getattr(child, 'pid', None)
-    if type(identifier) is not int:
-        return False
-    for path in Path('/proc').glob('[0-9]*/stat'):
-        try:
-            fields = path.read_text().rsplit(') ', 1)[1].split()
-            if fields[0] != 'Z' and int(fields[2]) == identifier and int(fields[3]) == identifier:
-                return True
-        except (OSError, ValueError, IndexError):
-            continue
-    return False
-
-
 def read_output(child, emit):
     return drain_output(child, emit, False)
 
 
-def read_interrupted_output(child, emit):
-    return drain_output(child, emit, True)
+def read_interrupted_output(child, emit, timeout=None):
+    return drain_output(child, emit, True, timeout=timeout)
 
 
-def drain_output(child, emit, wait_descendants):
+def drain_output(child, emit, wait_descendants, timeout=None):
     decoder = codecs.getincrementaldecoder('utf-8')('replace')
     pending = ''
     dropping = False
     exited_at = None
+    expires = None if timeout is None else time.monotonic() + timeout
+    killed = False
     with selectors.DefaultSelector() as selector:
         selector.register(child.stdout, selectors.EVENT_READ)
-        while selector.get_map():
+        while selector.get_map() or (
+            wait_descendants and (child.poll() is None or process_group_running(child))
+        ):
+            if expires is not None and time.monotonic() >= expires and not killed:
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                killed = True
+                emit(
+                    'Прерванный запуск завершён принудительно. Данные и файлы восстановления '
+                    'не удалены; проверьте состояние перед повтором.'
+                )
             # A detached grandchild may retain the pipe after the command exits.
             # Drain queued bytes briefly; the command's exit code is authoritative.
             if child.poll() is not None:

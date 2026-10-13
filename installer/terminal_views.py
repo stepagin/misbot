@@ -1,6 +1,8 @@
 """Rich presentation for SSH, with a plain fallback and literal user values."""
 
 import os
+import re
+import time
 import sys
 from collections import deque
 from contextlib import contextmanager
@@ -37,12 +39,19 @@ class BusyFrame:
         self.label = literal(label)
         self.animated = animated
         self.logs = deque(maxlen=100)
+        self.started = time.monotonic()
+        self.startup_percent = None
+        self.startup_stage = None
         if animated:
             self.spinner = Spinner('dots', text=Text(self.label), style='cyan')
 
     def log(self, line):
         value = literal(line)[:4096]
         self.logs.append(value)
+        stage = re.fullmatch(r'Запуск: (\d+)% · этапы \d+/\d+ · (.+)', value)
+        if stage:
+            self.startup_percent = min(100, int(stage[1]))
+            self.startup_stage = stage[2]
         if not self.animated:
             self.view.message(value)
 
@@ -60,9 +69,20 @@ class BusyFrame:
                 break
             lines.append(rendered)
             used += height
+        elapsed = int(time.monotonic() - self.started)
+        heading = f'{self.label} · {elapsed // 60:02}:{elapsed % 60:02}'
+        if self.startup_percent is not None:
+            heading += f' · {self.startup_percent}% этапов · {self.startup_stage}'
+        self.spinner.update(text=Text(heading))
         return Group(
             self.spinner,
-            ProgressBar(total=None, pulse=True, width=None, pulse_style='cyan'),
+            ProgressBar(
+                total=100 if self.startup_percent is not None else None,
+                completed=self.startup_percent or 0,
+                pulse=self.startup_percent is None,
+                width=None,
+                pulse_style='cyan',
+            ),
             *reversed(lines),
         )
 

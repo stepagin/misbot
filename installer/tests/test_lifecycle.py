@@ -322,6 +322,7 @@ class LifecycleTests(unittest.TestCase):
                     attempts=1,
                 )
 
+    @patch.object(lifecycle, 'emit', lambda *args, **kwargs: None)
     def test_interrupt_is_not_changed_into_optional_S3_failure(self):
         with tempfile.TemporaryDirectory() as folder:
             with (
@@ -340,6 +341,7 @@ class LifecycleTests(unittest.TestCase):
                 with self.assertRaises(lifecycle.state_store.OperationInterrupted):
                     lifecycle.up()
 
+    @patch.object(lifecycle, 'emit', lambda *args, **kwargs: None)
     def test_S3_start_failure_has_correct_continuation_for_database_driver(self):
         for pending in (False, True):
             with self.subTest(database_pending=pending), tempfile.TemporaryDirectory() as folder:

@@ -347,6 +347,7 @@ class ExternalMASTests(unittest.TestCase):
         self.assertNotIn(('up', '-d', 'synapse', 'mas'), events)
         self.assertEqual(events[0], ('external-probe',))
 
+    @patch.object(lifecycle, 'emit', lambda *args, **kwargs: None)
     def test_failed_external_admin_probe_blocks_generation_and_start(self):
         metadata = self.seed()
         metadata['databases_initialized'] = True

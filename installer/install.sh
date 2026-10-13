@@ -173,6 +173,12 @@ if [[ -f "$task_root/installation.json" ]]; then
   [[ "$task_backend" == portable ]] || die 'Unsupported installation backend; no changes performed.'
 fi
 
+bounded() {
+  local task_seconds="$1"
+  shift
+  python3 "$task_source/startup_process.py" --timeout "$task_seconds" -- "$@"
+}
+
 host_dependencies() {
   command -v apt-get >/dev/null || die 'Supported hosts: Ubuntu 24.04/26.04 or Debian 12/13.'
   if command -v curl >/dev/null && command -v openssl >/dev/null &&
@@ -181,8 +187,8 @@ host_dependencies() {
      python3 -c 'import yaml, rich' >/dev/null 2>&1; then
     return
   fi
-  apt-get update -qq
-  apt-get install -y --no-install-recommends ca-certificates curl openssl python3 python3-yaml python3-rich util-linux iproute2 dnsutils
+  bounded 600 apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=60 update -qq
+  bounded 900 apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=60 install -y --no-install-recommends ca-certificates curl openssl python3 python3-yaml python3-rich util-linux iproute2 dnsutils
 }
 
 docker_dependencies() {
@@ -198,7 +204,7 @@ docker_dependencies() {
       fi
     done
     install -d -m 0755 /etc/apt/keyrings
-    curl --fail --silent --show-error --location "https://download.docker.com/linux/$ID/gpg" -o /etc/apt/keyrings/matrix-docker.asc
+    bounded 120 curl --connect-timeout 15 --max-time 90 --fail --silent --show-error --location "https://download.docker.com/linux/$ID/gpg" -o /etc/apt/keyrings/matrix-docker.asc
     chmod 0644 /etc/apt/keyrings/matrix-docker.asc
     cat > /etc/apt/sources.list.d/matrix-docker.sources <<EOF
 Types: deb
@@ -208,26 +214,26 @@ Components: stable
 Architectures: amd64
 Signed-By: /etc/apt/keyrings/matrix-docker.asc
 EOF
-    apt-get update -qq
-    apt-get install -y --no-install-recommends docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    bounded 600 apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=60 update -qq
+    bounded 900 apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=60 install -y --no-install-recommends docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
   fi
-  systemctl enable --now docker.service
-  docker compose version >/dev/null || die 'Install the official docker-compose-plugin package.'
-  docker info >/dev/null
-  [[ "$(docker info --format '{{.Architecture}}')" == x86_64 ]] || die 'Linux amd64 Docker is required by this lock.'
+  bounded 120 systemctl enable --now docker.service
+  bounded 30 docker compose version >/dev/null || die 'Install the official docker-compose-plugin package.'
+  bounded 30 docker info >/dev/null
+  [[ "$(python3 "$task_source/startup_process.py" --timeout 30 --print-output -- docker info --format '{{.Architecture}}')" == x86_64 ]] || die 'Linux amd64 Docker is required by this lock.'
 }
 
 storage_dependencies() {
   if ! python3 -c 'import boto3' >/dev/null 2>&1; then
-    apt-get update -qq
-    apt-get install -y --no-install-recommends python3-boto3
+    bounded 600 apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=60 update -qq
+    bounded 900 apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=60 install -y --no-install-recommends python3-boto3
   fi
 }
 
 backup_dependencies() {
   if ! python3 -c 'import cryptography' >/dev/null 2>&1; then
-    apt-get update -qq
-    apt-get install -y --no-install-recommends python3-cryptography
+    bounded 600 apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=60 update -qq
+    bounded 900 apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=60 install -y --no-install-recommends python3-cryptography
   fi
 }
 

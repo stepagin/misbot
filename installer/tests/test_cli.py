@@ -583,7 +583,11 @@ class CommandTests(unittest.TestCase):
                             action,
                             side_effect=RuntimeError('fictional failure') if failure else None,
                         ),
-                        patch.object(lifecycle.subprocess, 'run') as register,
+                        patch.object(
+                            lifecycle.startup_process,
+                            'run',
+                            return_value=subprocess.CompletedProcess([], 0, '', ''),
+                        ) as register,
                         patch.object(lifecycle, 'emit'),
                     ):
                         if failure:

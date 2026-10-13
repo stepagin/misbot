@@ -507,9 +507,11 @@ class OperationTests(unittest.TestCase):
                 patch.object(interface, 's3_profile', side_effect=ui.Back, create=True),
                 patch.object(interface, 'run') as run,
                 patch('sys.stdout', new=io.StringIO()),
-                self.assertRaises(ui.Back),
             ):
-                interface.execute_s3(ui_actions.Action('storage s3 connect', 'S3'))
+                self.assertEqual(
+                    interface.execute_s3(ui_actions.Action('storage s3 connect', 'S3')), 0
+                )
+                self.assertTrue(interface._result_waited)
             run.assert_not_called()
             self.assertEqual(interface.model, {'MEDIA_MODE': 'local'})
             self.assertFalse(interface.draft.exists())

@@ -681,6 +681,7 @@ class InstallationWizardTests(unittest.TestCase):
 
                 with (
                     patch('shutil.which', return_value='/usr/bin/fictional'),
+                    patch('telegram_login_check.check'),
                     patch.object(preflight, 'system_check'),
                     patch.object(preflight, 'dns_check'),
                     patch.object(interface, 'wait_dns'),

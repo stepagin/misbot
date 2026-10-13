@@ -70,8 +70,8 @@ class SetupFormsTests(unittest.TestCase):
         for index in range(6):
             with self.subTest(field=index):
                 self.interface.model = original.copy()
-                self.answers(['s3', *self.s3_values()[:index], 'назад'])
-                with patch('s3_diagnostics.diagnose') as probe, self.assertRaises(ui.Back):
+                self.answers(['s3', *self.s3_values()[:index], 'назад', 'local'])
+                with patch('s3_diagnostics.diagnose') as probe:
                     self.interface.edit_setup_field('MEDIA_MODE')
                 self.assertEqual(self.interface.model, original)
                 self.assertEqual(json.loads(self.interface.draft.read_text())['values'], original)
@@ -79,17 +79,161 @@ class SetupFormsTests(unittest.TestCase):
 
     def test_failed_s3_probe_back_restores_profile_and_removes_temporary_secrets(self):
         original = self.interface.model.copy()
-        self.answers(['s3', *self.s3_values(), 'назад'])
+        self.answers(['s3', *self.s3_values(), 'назад', 'local'])
         with (
             patch(
                 's3_diagnostics.diagnose',
                 return_value={'passed': False, 'conclusion': 'denied', 'next_actions': []},
             ),
-            self.assertRaises(ui.Back),
         ):
             self.interface.edit_setup_field('MEDIA_MODE')
         self.assertEqual(self.interface.model, original)
         self.assertEqual(list(self.base.glob('draft-s3-probe-recovery-*.env')), [])
+
+    def test_wizard_nested_media_cancel_returns_to_media_and_can_save_exit(self):
+        for command in ('назад', 'отмена', '0'):
+            with self.subTest(command=command):
+                self.interface.step = 3
+                original = self.interface.model.copy()
+                self.answers(['s3', command, 'local', 'сохранить и выйти'])
+                with patch('s3_diagnostics.diagnose') as probe:
+                    self.assertEqual(self.interface.wizard(), 0)
+                self.assertEqual(self.interface.step, 4)
+                self.assertEqual(self.interface.model, original)
+                self.assertEqual(sum('MEDIA_MODE' in prompt for prompt, _ in self.prompts), 2)
+                self.assertFalse(any('MAS_MODE' in prompt for prompt, _ in self.prompts))
+                probe.assert_not_called()
+
+    def test_zero_at_every_s3_field_cancels_without_saving_or_probing(self):
+        import ui_actions
+
+        for index in range(6):
+            with self.subTest(field=index):
+                self.answers(['1', *self.s3_values()[:index], '0'])
+                with patch.object(self.interface, 'run') as run:
+                    self.assertEqual(
+                        self.interface.execute_s3(ui_actions.Action('storage s3 check', 'S3')), 0
+                    )
+                    self.assertTrue(self.interface._result_waited)
+                run.assert_not_called()
+                self.assertFalse(self.interface.draft.exists())
+                self.assertNotIn('S3_BUCKET', self.interface.model)
+
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'Linux PTY required')
+    def test_small_fullscreen_s3_endpoint_zero_and_back_cancel_actual_input(self):
+        import fcntl
+        import pty
+        import re
+        import select
+        import struct
+        import subprocess
+        import termios
+        import time
+        from terminal_views import Console
+
+        if Console is None:
+            self.skipTest('Rich required')
+        script = self.base / 'pty_form.py'
+        script.write_text("""import sys
+sys.path.insert(0, sys.argv[1])
+import terminal_ui, ui_actions
+interface = terminal_ui.UI(sys.argv[2], draft=sys.argv[3])
+with interface.view.screen():
+    assert interface.execute_s3(ui_actions.Action('storage s3 check', 'Проверка S3')) == 0
+    assert interface._result_waited
+    # Only the current form is kept in the fullscreen page, never a stale menu.
+    assert not any('Что проверить?' in str(part) for part in interface.view.page)
+print('CANCELLED_S3')
+""")
+        for command in ('0', 'назад'):
+            with self.subTest(command=command):
+                master, slave = pty.openpty()
+                fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 12, 44, 0, 0))
+                env = {**os.environ, 'TERM': 'xterm-256color'}
+                env.pop('NO_COLOR', None)
+                child = subprocess.Popen(
+                    [
+                        sys.executable,
+                        str(script),
+                        str(Path(ui.__file__).parent),
+                        str(self.interface.root),
+                        str(self.interface.draft),
+                    ],
+                    stdin=slave,
+                    stdout=slave,
+                    stderr=slave,
+                    env=env,
+                    start_new_session=True,
+                )
+                os.close(slave)
+                output = b''
+
+                def until(marker):
+                    nonlocal output
+                    deadline = time.monotonic() + 8
+                    while marker not in re.sub(
+                        r'\x1b\[[0-?]*[ -/]*[@-~]', '', output.decode(errors='replace')
+                    ):
+                        if time.monotonic() >= deadline:
+                            self.fail(output.decode(errors='replace'))
+                        if select.select([master], [], [], 0.1)[0]:
+                            try:
+                                output += os.read(master, 65536)
+                            except OSError:
+                                self.fail(output.decode(errors='replace'))
+
+                try:
+                    until('Номер')
+                    os.write(master, b'1\n')
+                    until('S3_BUCKET')
+                    os.write(master, b'fictional-media\n')
+                    until('S3_ENDPOINT_URL')
+                    # Resize during input, then send an actual navigation command.
+                    fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack('HHHH', 10, 40, 0, 0))
+                    os.write(master, (command + '\n').encode())
+                    until('CANCELLED_S3')
+                    child.wait(timeout=5)
+                    self.assertEqual(child.returncode, 0, output.decode(errors='replace'))
+                    self.assertFalse(self.interface.draft.exists())
+                finally:
+                    if child.poll() is None:
+                        child.kill()
+                        child.wait()
+                    os.close(master)
+
+    def test_telegram_form_checks_supplied_proxy_before_advancing(self):
+        self.answers(['да', 'FICTIONAL_ID', 'FICTIONAL_SECRET', 'socks5://proxy.example.org:1080'])
+        with patch('telegram_login_check.check') as check:
+            self.interface.setup_provider('TELEGRAM')
+        check.assert_called_once_with(self.interface.model)
+        self.assertIn('эта проверка их не подтверждает', self.output.getvalue())
+        self.assertNotIn('FICTIONAL_SECRET', self.output.getvalue())
+
+    def test_telegram_failed_check_allows_correction_and_retry(self):
+        from telegram_login_check import LoginCheckError
+
+        self.answers(
+            [
+                'да',
+                'FICTIONAL_ID',
+                'FICTIONAL_SECRET',
+                'socks5://proxy.example.org:1080',
+                '1',
+                'socks5://fixed.example.org:1080',
+            ]
+        )
+        seen = []
+
+        def check(values):
+            seen.append(values['SOCKS5_CONFIG'])
+            if len(seen) == 1:
+                raise LoginCheckError('Проверка не пройдена.')
+
+        with patch('telegram_login_check.check', side_effect=check):
+            self.interface.setup_provider('TELEGRAM')
+        self.assertEqual(
+            seen, ['socks5://proxy.example.org:1080', 'socks5://fixed.example.org:1080']
+        )
 
     def test_pending_probe_cleanup_keeps_original_credentials_after_profile_correction(self):
         import s3_config
