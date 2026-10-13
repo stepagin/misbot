@@ -66,6 +66,20 @@ def main():
     if payload.get('action') not in ('inspect', 'password'):
         raise RuntimeError('Unknown user password operation')
     client = payload['client']
+    base = client.get('mas_url', 'http://mas:8080')
+    parsed = urllib.parse.urlsplit(base)
+    if base != 'http://mas:8080' and (
+        parsed.scheme != 'https'
+        or not parsed.hostname
+        or parsed.port not in (None, 443)
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in ('', '/')
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise RuntimeError('Unsafe MAS API address')
+    base = base.rstrip('/')
 
     # Refuse redirects for both the token request and the authenticated API.
     class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -77,7 +91,7 @@ def main():
         (client['client_id'] + ':' + client['client_secret']).encode()
     ).decode()
     request = urllib.request.Request(
-        'http://mas:8080/oauth2/token',
+        base + '/oauth2/token',
         data=urllib.parse.urlencode(
             {'grant_type': 'client_credentials', 'scope': 'urn:mas:admin'}
         ).encode(),
@@ -88,7 +102,7 @@ def main():
 
     def send(path, body=None):
         request = urllib.request.Request(
-            'http://mas:8080' + path,
+            base + path,
             data=None if body is None else json.dumps(body).encode(),
             headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'},
         )
@@ -97,7 +111,9 @@ def main():
         except urllib.error.HTTPError as error:
             response = error
         with response:
-            content = response.read()
+            content = response.read(1048577)
+            if len(content) > 1048576:
+                raise RuntimeError('Oversized MAS response')
             return response.status, json.loads(content) if content else None
 
     result = (inspect_user if payload['action'] == 'inspect' else set_password)(

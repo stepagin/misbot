@@ -51,9 +51,15 @@ def question(label, default='', secret=False, reader=None):
         value = getpass.getpass(prompt)
     else:
         value = input(prompt)
-    commands = {'назад': Back, 'отмена': Cancel, 'сохранить и выйти': SaveExit}
-    if value.lower().strip() in commands:
-        raise commands[value.lower().strip()]()
+    commands = {
+        'назад': Back,
+        'b': Back,
+        'отмена': Cancel,
+        'сохранить и выйти': SaveExit,
+        'q': SaveExit,
+    }
+    if value.casefold().strip() in commands:
+        raise commands[value.casefold().strip()]()
     return value if value else default
 
 
@@ -274,6 +280,22 @@ class UI:
         if previous != destination:
             previous.unlink(missing_ok=True)
 
+    def draft_hints(self):
+        import shutil
+
+        entry = (
+            'sudo misbot'
+            if shutil.which('misbot')
+            else ('sudo python3 ' + shlex.quote(str(self.source_entrypoint())))
+        )
+        command = entry + ' --directory ' + shlex.quote(str(self.root))
+        return (
+            'Черновик сохранён приватно.\n'
+            'Продолжить: ' + command + ' ui\n'
+            'Показать состояние черновика: ' + command + ' config draft show\n'
+            'Удалить черновик: ' + command + ' config draft reset --confirm discard-draft'
+        )
+
     def initialized(self):
         from configuration import read_private_json
 
@@ -292,8 +314,6 @@ class UI:
 
     def field_label(self, key):
         label = schema.FIELDS[key].label
-        if key == 'MAS_DOMAIN' and self.model.get('DOMAIN'):
-            label = label.replace('mas.<DOMAIN>', 'mas.' + self.model['DOMAIN'])
         return label
 
     def field(self, key):
@@ -305,8 +325,15 @@ class UI:
             label = self.field_label(key)
             self.view.message(key + ' — ' + label + '. ' + item.required + '; ' + item.impact)
             current = self.model.get(key, item.default)
+            displayed = current
+            if key == 'MAS_DOMAIN' and self.model.get('MAS_MODE', 'local') == 'local':
+                displayed = current or 'mas.' + self.model['DOMAIN']
             choices = {
                 'media': (('local', 'Хранить медиа на этом сервере'), ('s3', 'Хранить медиа в S3')),
+                'mas': (
+                    ('local', 'Установить MAS на этом VPS'),
+                    ('external', 'Подключить уже работающий внешний MAS'),
+                ),
                 'homepage': (
                     ('landing', 'Страница с описанием и кнопками входа'),
                     ('element', 'Сразу открыть клиент чата'),
@@ -330,7 +357,7 @@ class UI:
                     value, value
                 )
             else:
-                if not item.secret and item.kind in (
+                if item.secret or item.kind in (
                     'text',
                     'https',
                     'short_text',
@@ -343,21 +370,190 @@ class UI:
                         'Enter — сохранить значение. /очистить — убрать значение, если поле необязательное.',
                         'dim',
                     )
-                value = self.ask(label if self.view.console else key, current, item.secret)
-                if value == '/очистить' and not item.secret:
+                value = self.ask(label if self.view.console else key, displayed, item.secret)
+                if value == '/очистить':
+                    value = ''
+                elif key == 'MAS_DOMAIN' and not current and value == displayed:
                     value = ''
             try:
                 normalized = schema.field_value(key, value)
                 if key == 'MAS_DOMAIN':
                     schema.validate({'DOMAIN': self.model['DOMAIN'], 'MAS_DOMAIN': normalized})
+                    if self.model.get(
+                        'MAS_MODE'
+                    ) == 'external' and normalized in schema.public_hosts(self.model):
+                        raise schema.InvalidConfiguration(
+                            'форма',
+                            key,
+                            'mas_host_conflict',
+                            'Укажите отдельный домен внешнего MAS, не адрес службы этого VPS.',
+                        )
+                if (
+                    self.model.get('MAS_MODE') == 'external'
+                    and key
+                    in (
+                        'MAS_DOMAIN',
+                        'MAS_SHARED_SECRET',
+                        'MAS_CLIENT_ID',
+                        'MAS_CLIENT_SECRET',
+                    )
+                    and not normalized
+                ):
+                    raise schema.InvalidConfiguration(
+                        'форма',
+                        key,
+                        'mas_required',
+                        'Это поле нужно для подключения внешнего MAS.',
+                    )
             except schema.InvalidConfiguration as error:
                 self.view.message(error.field + ': ' + error.explanation)
                 continue
             if item.kind == 'domain' and not self.confirm_domain(normalized):
                 continue
             self.model[key] = normalized
+            if not normalized and key in (
+                'GOOGLE_CLIENT_ID',
+                'GOOGLE_CLIENT_SECRET',
+                'TELEGRAM_CLIENT_ID',
+                'TELEGRAM_CLIENT_SECRET',
+            ):
+                provider = key.split('_', 1)[0]
+                self.disable_provider(provider)
             self.save()
             return
+
+    def disable_provider(self, provider):
+        self.model[provider + '_CLIENT_ID'] = ''
+        self.model[provider + '_CLIENT_SECRET'] = ''
+        if provider == 'TELEGRAM':
+            self.model['SOCKS5_CONFIG'] = ''
+        self.view.message('Вход через ' + provider.title() + ' отключён.')
+
+    def setup_provider(self, provider):
+        previous = self.model.copy()
+        try:
+            enabled = self.answer(
+                'Подключить вход через ' + provider.title() + '? да/нет',
+                ('да', 'нет'),
+                'да' if self.model.get(provider + '_CLIENT_ID') else 'нет',
+            )
+            if enabled == 'нет':
+                self.disable_provider(provider)
+            else:
+                self.field(provider + '_CLIENT_ID')
+                if not self.model.get(provider + '_CLIENT_ID'):
+                    return
+                self.field(provider + '_CLIENT_SECRET')
+                if self.model.get(provider + '_CLIENT_SECRET') and provider == 'TELEGRAM':
+                    self.field('SOCKS5_CONFIG')
+            schema.validate(
+                {
+                    'DOMAIN': self.model['DOMAIN'],
+                    provider + '_CLIENT_ID': self.model.get(provider + '_CLIENT_ID', ''),
+                    provider + '_CLIENT_SECRET': self.model.get(provider + '_CLIENT_SECRET', ''),
+                }
+            )
+            self.save()
+        except (Back, Cancel, SaveExit, KeyboardInterrupt):
+            self.model = previous
+            self.save()
+            raise
+
+    def setup_mas(self):
+        previous = self.model.copy()
+        try:
+            self.field('MAS_MODE')
+            if self.model['MAS_MODE'] == 'external':
+                self.view.message(
+                    'Внешний MAS должен быть заранее настроен для этого сервера Matrix: '
+                    + self.model['DOMAIN']
+                    + '. Его адрес и IPv4 относятся к другому серверу.'
+                )
+                self.view.message(
+                    'В настройках MAS нужны адрес Matrix https://matrix.'
+                    + self.model['DOMAIN']
+                    + ', совпадающий общий ключ и управляющее приложение с правами администратора. '
+                    'Misbot не устанавливает, не удаляет и не копирует данные внешнего MAS.',
+                    'dim',
+                )
+                self.view.message(
+                    'На внешнем MAS регистрация должна требовать приглашение: '
+                    'account.password_registration_token_required=true; '
+                    'для внешних способов входа — registration_token_required=true.',
+                    'dim',
+                )
+                for key in (
+                    'MAS_DOMAIN',
+                    'MAS_PUBLIC_IP',
+                    'MAS_SHARED_SECRET',
+                    'MAS_CLIENT_ID',
+                    'MAS_CLIENT_SECRET',
+                ):
+                    self.field(key)
+                for key in (
+                    'GOOGLE_CLIENT_ID',
+                    'GOOGLE_CLIENT_SECRET',
+                    'TELEGRAM_CLIENT_ID',
+                    'TELEGRAM_CLIENT_SECRET',
+                    'SOCKS5_CONFIG',
+                ):
+                    self.model[key] = ''
+            else:
+                if previous.get('MAS_MODE', 'local') == 'external':
+                    self.model['MAS_DOMAIN'] = ''
+                for key in (
+                    'MAS_PUBLIC_IP',
+                    'MAS_SHARED_SECRET',
+                    'MAS_CLIENT_ID',
+                    'MAS_CLIENT_SECRET',
+                ):
+                    self.model[key] = ''
+                self.view.message('Адрес входа: https://mas.' + self.model['DOMAIN'])
+            schema.validate(
+                {
+                    key: self.model.get(key, '')
+                    for key in (
+                        'DOMAIN',
+                        'MAS_MODE',
+                        'MAS_DOMAIN',
+                        'MAS_PUBLIC_IP',
+                        'MAS_SHARED_SECRET',
+                        'MAS_CLIENT_ID',
+                        'MAS_CLIENT_SECRET',
+                    )
+                }
+            )
+            self.save()
+        except (Back, Cancel, SaveExit, KeyboardInterrupt):
+            self.model = previous
+            self.save()
+            raise
+
+    def edit_setup_field(self, key):
+        if key == 'MAS_MODE':
+            return self.setup_mas()
+        previous = self.model.copy()
+        try:
+            self.field(key)
+            if key == 'MEDIA_MODE' and self.model[key] == 's3':
+                # Keep the valid previous mode until all dependent fields are entered.
+                self.model['MEDIA_MODE'] = previous.get('MEDIA_MODE', 'local')
+                self.s3_form('media')
+            elif key == 'POSTGRES_MODE' and self.model[key] == 'external':
+                for name in (
+                    'POSTGRES_HOST',
+                    'POSTGRES_PORT',
+                    'POSTGRES_SSL_MODE',
+                    'POSTGRES_SSL_ROOT_CERT',
+                    'POSTGRES_ADMIN_USER',
+                    'POSTGRES_ADMIN_PASSWORD',
+                ):
+                    self.field(name)
+            self.save()
+        except (Back, Cancel, SaveExit, KeyboardInterrupt):
+            self.model = previous
+            self.save()
+            raise
 
     def run(self, path, **values):
         title = next(
@@ -527,70 +723,101 @@ class UI:
             finally:
                 input_mode.__exit__(None, None, None)
 
-    def s3_form(self, purpose):
-        import s3_diagnostics as probe
+    def s3_profile(self, values):
+        """Collect a complete profile without changing a wizard or active settings."""
         import s3_config
 
-        values = self.model if purpose == 'media' else self.backup
-        keys = (
+        scratch = {key: values.get(key, '') for key in s3_config.FIELDS}
+        self.view.message(
+            'Введите реквизиты существующего S3-хранилища. Ключи вводятся скрыто. '
+            '«Назад» или «отмена» отменяют выбор; файлы настроек открывать не нужно.'
+        )
+        for key in (
             'S3_BUCKET',
             'S3_ENDPOINT_URL',
             'S3_REGION',
             'S3_PREFIX',
             'S3_ACCESS_KEY_ID',
             'S3_SECRET_ACCESS_KEY',
+        ):
+            self.s3_field(key, scratch, save=False)
+        return s3_config.validate(scratch)
+
+    def s3_form(self, purpose):
+        import s3_diagnostics as probe
+        import s3_config
+        from configuration import directory, serialize
+
+        previous = self.model.copy() if purpose == 'media' else self.backup.copy()
+        values = self.s3_profile(previous)
+        path = self.draft.parent / (
+            self.draft.stem + '-s3-probe-recovery-' + secrets.token_hex(8) + '.env'
         )
-        for key in keys:
-            self.s3_field(key, values)
-        path = self.draft.parent / (self.draft.stem + '-' + purpose + '.env')
-        while True:
-            from configuration import serialize
-
-            state_store.write_text(
-                path, serialize({key: values.get(key, '') for key in sorted(s3_config.FIELDS)})
-            )
-            result = probe.diagnose(
-                path,
-                purpose,
-                directory=self.root if (self.root / 'installation.json').exists() else None,
-                progress=lambda item: self.view.message(
-                    item['stage'] + ': ' + item['status'] + ' — ' + item['explanation']
-                ),
-            )
-            self.view.message('Итог: ' + result['conclusion'])
-            for action in result['next_actions']:
-                self.view.message(action)
-            if result['passed']:
-                return
-            choice = self.answer(
-                '1 исправить поле, 2 повторить, 3 локальные медиа/отложить, сохранить и выйти',
-                ('1', '2', '3'),
-                '1',
-            )
-            if choice == '3':
-                if purpose == 'media':
-                    self.model['MEDIA_MODE'] = 'local'
-                else:
-                    self.backup = {}
-                self.view.message(
-                    'Позднее: sudo misbot storage s3 connect --config /root/misbot-s3.env; существующие файлы переносятся и сохраняются.'
-                    if purpose == 'media'
-                    else 'Позднее: misbot backup external create --help; настройки можно сохранить в settings/backup.env.'
+        keep_profile = False
+        try:
+            while True:
+                if keep_profile:
+                    # Preserve credentials tied to an uncleared object before trying a new profile.
+                    path = self.draft.parent / (
+                        self.draft.stem + '-s3-probe-recovery-' + secrets.token_hex(8) + '.env'
+                    )
+                    keep_profile = False
+                directory(path.parent)
+                state_store.write_text(path, serialize(values))
+                with self.view.busy('Проверяем подключение к S3'):
+                    result = probe.diagnose(
+                        path,
+                        purpose,
+                        directory=self.root if (self.root / 'installation.json').exists() else None,
+                    )
+                keep_profile = bool(result.get('cleanup_pending'))
+                self.view.message('Итог: ' + result['conclusion'])
+                if result['passed']:
+                    if purpose == 'media':
+                        self.model.update(values, MEDIA_MODE='s3')
+                    else:
+                        self.backup.update(values)
+                    self.save()
+                    return
+                if keep_profile:
+                    for action in result['next_actions']:
+                        self.view.message(action)
+                choice = self.answer(
+                    '1 — исправить реквизиты, 2 — повторить проверку, 3 — отложить S3; '
+                    'назад — отменить выбор; сохранить и выйти',
+                    ('1', '2', '3'),
+                    '1',
                 )
-                self.save()
-                return
-            if choice == '1':
-                selection = self.choose(
-                    'Какое поле исправить?',
-                    [(str(i), schema.FIELDS[key].label, '') for i, key in enumerate(keys, 1)],
-                    aliases={key: str(i) for i, key in enumerate(keys, 1)},
-                )
-                if selection == '0':
-                    raise Back()
-                key = keys[int(selection) - 1]
-                self.s3_field(key, values)
+                if choice == '3':
+                    if purpose == 'media':
+                        self.model['MEDIA_MODE'] = 'local'
+                        for key in s3_config.FIELDS:
+                            self.model.pop(key, None)
+                        self.view.message(
+                            'Медиа останутся на этом VPS. S3 можно подключить в меню «Медиа и базы данных».'
+                        )
+                    else:
+                        self.backup = {}
+                        self.view.message(
+                            'Внешние копии можно настроить позднее в меню «Резервные копии».'
+                        )
+                    self.save()
+                    return
+                if choice == '1':
+                    values = self.s3_profile(values)
+        except (Back, Cancel, SaveExit, KeyboardInterrupt):
+            if purpose == 'media':
+                self.model = previous
+            else:
+                self.backup = previous
+            self.save()
+            raise
+        finally:
+            # A failed owned-object cleanup needs the exact private profile for recovery.
+            if not keep_profile:
+                path.unlink(missing_ok=True)
 
-    def s3_field(self, key, values):
+    def s3_field(self, key, values, save=True):
         import s3_config
 
         item = schema.FIELDS[key]
@@ -601,16 +828,15 @@ class UI:
             return s3_config.validate_field(key, schema.field_value(key, value))
 
         if key == 'S3_ENDPOINT_URL':
-            self.view.message(
-                'Enter сохраняет endpoint; /очистить выбирает AWS endpoint для региона.', 'dim'
-            )
+            self.view.message('Для AWS нажмите Enter. /очистить — убрать сохранённый адрес.', 'dim')
         values[key] = self.input_value(
-            item.label + ' (' + key + ')',
+            'Введите ' + item.label + ' (' + key + ')',
             values.get(key, item.default),
             validate,
             item.secret,
         )
-        self.save()
+        if save:
+            self.save()
 
     def backup_key(self, value):
         import stat
@@ -778,6 +1004,8 @@ class UI:
         try:
             yield
         finally:
+            # Immediate b/q navigation must not leave a trailing Enter for the next form.
+            termios.tcflush(descriptor, termios.TCIFLUSH)
             termios.tcsetattr(descriptor, termios.TCSANOW, original)
             del self._dns_decoder
             self.dns_command_buffer = ''
@@ -788,6 +1016,8 @@ class UI:
         import wizard_dns
 
         hosts = schema.public_hosts(self.model)
+        if self.model.get('MAS_MODE') == 'external':
+            hosts.append(schema.mas_host(self.model))
         statuses = {}
         events = queue.Queue()
         worker = None
@@ -825,11 +1055,16 @@ class UI:
                 if dirty:
                     if progress.animated:
                         progress.logs.clear()
-                    progress.log('Ожидаемый IPv4 VPS: ' + expected)
+                    progress.log('В панели DNS вашего домена создайте или исправьте записи типа A:')
+                    progress.log('Для доменов этого VPS значение A — публичный IPv4: ' + expected)
+                    if self.model.get('MAS_MODE') == 'external':
+                        progress.log(
+                            'Внешний MAS использует адрес своего сервера; его DNS менять на адрес этого VPS не нужно.'
+                        )
                     for host in hosts:
                         status = statuses.get(host)
                         progress.log(host + ': ' + (status.message if status else 'проверяется'))
-                    progress.log('CDN proxy должен быть отключён (DNS only).')
+                    progress.log('Для доменов этого VPS отключите CDN proxy: режим DNS only.')
                     progress.log(hint)
                     progress.log('Команда: ' + getattr(self, 'dns_command_buffer', ''))
                     dirty = False
@@ -865,7 +1100,16 @@ class UI:
                     dirty = True
 
     def dns_values(self):
-        return {key: self.model.get(key, '') for key in ('DOMAIN', 'MAS_DOMAIN', 'PUBLIC_IP')}
+        return {
+            key: self.model.get(key, 'local' if key == 'MAS_MODE' else '')
+            for key in (
+                'DOMAIN',
+                'MAS_MODE',
+                'MAS_DOMAIN',
+                'PUBLIC_IP',
+                'MAS_PUBLIC_IP',
+            )
+        }
 
     def check_dns_settings(self):
         import preflight
@@ -881,15 +1125,25 @@ class UI:
                 self.view.message(
                     'По записи A пока нельзя определить один IPv4 VPS. '
                     'Укажите публичный IPv4 из панели VPS, чтобы проверить все имена '
-                    'и дождаться их DNS-записей. «Назад» вернёт к вводу домена.',
+                    'и дождаться их DNS-записей. Этот адрес нужен только пока его нельзя определить по DNS.',
                     'yellow',
                 )
                 self.field('PUBLIC_IP')
                 ip = self.model.get('PUBLIC_IP')
         self.wait_dns(ip)
         with self.view.busy('Проверяем DNS, сертификаты и сеть'):
-            preflight.dns_check(domain, ip, self.model.get('MAS_DOMAIN', ''))
-            preflight.caa_check(domain, self.model.get('MAS_DOMAIN', ''))
+            preflight.dns_check(
+                domain,
+                ip,
+                self.model.get('MAS_DOMAIN', ''),
+                self.model.get('MAS_MODE', 'local'),
+                self.model.get('MAS_PUBLIC_IP', ''),
+            )
+            preflight.caa_check(
+                domain,
+                self.model.get('MAS_DOMAIN', ''),
+                self.model.get('MAS_MODE', 'local'),
+            )
             preflight.network_check(self.root, self.model.get('DOCKER_SUBNET', '172.30.50.0/24'))
         self.dns_verified = self.dns_values()
         self.save()
@@ -898,7 +1152,10 @@ class UI:
         page = 0
         warning = ''
         while True:
-            self.model = schema.validate(self.model)
+            self.model = {
+                **{key: item.default for key, item in schema.FIELDS.items()},
+                **schema.validate(self.model, complete=False),
+            }
             self.view.heading('Итог установки')
             self.view.message(
                 'Итог. Внутренние пароли и ключи создаются автоматически '
@@ -910,6 +1167,7 @@ class UI:
                 if key
                 in (
                     'DOMAIN',
+                    'MAS_MODE',
                     'MAS_DOMAIN',
                     'PUBLIC_IP',
                     'ACME_EMAIL',
@@ -918,9 +1176,28 @@ class UI:
                 )
                 or (value and value != schema.FIELDS[key].default)
             ]
+            fields = [
+                key
+                for key in fields
+                if key
+                not in (
+                    'GOOGLE_CLIENT_ID',
+                    'GOOGLE_CLIENT_SECRET',
+                    'TELEGRAM_CLIENT_ID',
+                    'TELEGRAM_CLIENT_SECRET',
+                    'SOCKS5_CONFIG',
+                )
+                and not (key.startswith('S3_') and self.model['MEDIA_MODE'] != 's3')
+                and not (
+                    key
+                    in ('MAS_PUBLIC_IP', 'MAS_SHARED_SECRET', 'MAS_CLIENT_ID', 'MAS_CLIENT_SECRET')
+                    and self.model['MAS_MODE'] != 'external'
+                )
+            ]
             rows = []
             labels = {
                 'DOMAIN': 'Основной домен',
+                'MAS_MODE': 'Сервер авторизации',
                 'MAS_DOMAIN': 'Домен авторизации MAS',
                 'PUBLIC_IP': 'IPv4 VPS',
                 'ACME_EMAIL': 'Email для сертификатов',
@@ -931,6 +1208,8 @@ class UI:
                 value = self.model[key]
                 if key == 'MAS_DOMAIN':
                     value = schema.mas_host(self.model)
+                elif key == 'MAS_MODE':
+                    value = 'На этом VPS' if value == 'local' else 'Внешний MAS'
                 shown = 'настроен' if schema.FIELDS[key].secret and value else value or 'не задано'
                 shown = shown if len(shown) <= 100 else shown[:97] + '…'
                 rows.append((str(index) + '. ' + labels.get(key, self.field_label(key)), shown))
@@ -940,9 +1219,20 @@ class UI:
             rows.append(
                 (backup_number + '. Внешние копии', 'настроены' if self.backup else 'отложены')
             )
+            provider_numbers = {}
+            for provider in ('GOOGLE', 'TELEGRAM') if self.model['MAS_MODE'] == 'local' else ():
+                number = str(len(rows) + 1)
+                provider_numbers[number] = provider
+                enabled = bool(self.model.get(provider + '_CLIENT_ID'))
+                rows.append(
+                    (
+                        number + '. Вход через ' + provider.title(),
+                        'включён' if enabled else 'отключён',
+                    )
+                )
             pages = [rows]
             if self.view.fullscreen and self.view.console:
-                budget = max(1, self.view.console.height - self.view.used_lines - 11)
+                budget = max(1, self.view.console.height - self.view.used_lines - 13)
                 pages, part = [], []
                 for row in rows:
                     if part and self.view.details([*part, row], measure=True) > budget:
@@ -970,28 +1260,56 @@ class UI:
             if change.casefold() == 'сохранить и выйти':
                 raise SaveExit()
             if change.casefold() == 'применить':
-                if self.dns_verified != self.dns_values():
-                    self.check_dns_settings()
+                try:
+                    self.model = schema.validate(self.model)
+                except schema.InvalidConfiguration as error:
+                    warning = error.field + ': ' + error.explanation
+                    continue
+                try:
+                    if self.dns_verified != self.dns_values():
+                        self.check_dns_settings()
+                except Back:
+                    continue
                 return
             if change in ('>', '<'):
                 page = max(0, min(page + (1 if change == '>' else -1), len(pages) - 1))
                 continue
             previous_backup = self.backup.copy()
             try:
-                if change == admin_number:
+                if change in provider_numbers:
+                    self.setup_provider(provider_numbers[change])
+                elif change == admin_number:
                     self.setup_admin_tag()
                 elif change == backup_number:
                     self.setup_step(5)
                 elif change.isdecimal() and 1 <= int(change) <= len(fields):
-                    self.field(fields[int(change) - 1])
+                    self.edit_setup_field(fields[int(change) - 1])
                 elif change in fields:
-                    self.field(change)
+                    self.edit_setup_field(change)
                 else:
                     warning = 'Введите номер поля или команду из списка.'
             except Back:
                 if change == backup_number:
                     self.backup = previous_backup
                     self.save()
+
+    def reusable_removed_directory(self, path):
+        if not (path / '.misbot-empty.json').is_file():
+            return False
+        import command_wrapper
+        import update
+
+        try:
+            command_wrapper.trusted_runtime(path)
+            entries, _ = update.validate_manifest(path)
+            allowed = {Path(name).parts[0] for name in entries} | {
+                'SHA256SUMS',
+                '.misbot-empty.json',
+                '__pycache__',
+            }
+            return all(item.name in allowed for item in path.iterdir())
+        except (OSError, ValueError, RuntimeError):
+            return False
 
     def setup_step(self, index):
         import preflight
@@ -1008,6 +1326,7 @@ class UI:
                     path.exists()
                     and any(path.iterdir())
                     and not (path / 'installation.json').exists()
+                    and not self.reusable_removed_directory(path)
                 ):
                     self.view.message('Каталог чужой и непустой. Выберите другой.')
                     continue
@@ -1042,35 +1361,28 @@ class UI:
                 preflight.system_check(self.root)
         elif index == 2:
             self.check_domain_inputs()
-            self.field('MAS_DOMAIN')
-            self.field('PUBLIC_IP')
+            self.setup_mas()
+            self.view.message(
+                'IPv4 будет определён по A-записи основного домена. '
+                'Если запись ещё не создана, мастер попросит адрес из панели VPS.',
+                'dim',
+            )
             self.field('ACME_EMAIL')
             self.check_dns_settings()
         elif index == 3:
-            self.field('MEDIA_MODE')
-            if self.model['MEDIA_MODE'] == 's3':
-                self.s3_form('media')
+            self.edit_setup_field('MEDIA_MODE')
         elif index == 4:
+            if self.model.get('MAS_MODE') == 'external':
+                self.view.message(
+                    'Способы входа Google, Telegram и пароль настраиваются на внешнем MAS. '
+                    'Misbot использует его существующие настройки.'
+                )
+                return
             self.view.message(
                 'Парольный вход доступен без Google/Telegram. OAuth можно пропустить и настроить до запуска позднее.'
             )
             for provider in ('GOOGLE', 'TELEGRAM'):
-                default = (
-                    'да'
-                    if self.model.get(provider + '_CLIENT_ID')
-                    or self.model.get(provider + '_CLIENT_SECRET')
-                    else 'нет'
-                )
-                enabled = self.answer('Подключить ' + provider + '? да/нет', ('да', 'нет'), default)
-                if enabled == 'да':
-                    self.field(provider + '_CLIENT_ID')
-                    self.field(provider + '_CLIENT_SECRET')
-                    if provider == 'TELEGRAM':
-                        self.field('SOCKS5_CONFIG')
-                else:
-                    self.model[provider + '_CLIENT_ID'] = ''
-                    self.model[provider + '_CLIENT_SECRET'] = ''
-                    self.save()
+                self.setup_provider(provider)
             self.view.message(
                 'Срок приглашений можно изменить после установки в настройках сервера.', 'dim'
             )
@@ -1236,16 +1548,11 @@ class UI:
                 return 130
             except SaveExit:
                 self.save()
-                self.view.message(
-                    'Сохранено приватно. Продолжение: sudo python3 '
-                    + shlex.quote(str(self.source_entrypoint()))
-                    + ' ui --directory '
-                    + shlex.quote(str(self.root))
-                )
+                self.view.message(self.draft_hints())
                 return 0
             except (RuntimeError, OSError):
                 self.view.message(
-                    'Этап не завершён. Черновик сохранён; исправьте ввод или повторите проверку.'
+                    'Этап не завершён. Исправьте ввод или повторите проверку.'
                     if not self.installation()
                     else 'Этап не завершён. Данные, настройки и ключи сохранены.'
                 )
@@ -1263,7 +1570,7 @@ class UI:
                     self.previous_step()
                 except (SaveExit, Cancel, KeyboardInterrupt):
                     self.save()
-                    self.view.message('Draft сохранён; повторите ui для продолжения.')
+                    self.view.message(self.draft_hints())
                     return 0
                 continue
             self.step += 1

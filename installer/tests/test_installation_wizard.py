@@ -542,8 +542,8 @@ class InstallationWizardTests(unittest.TestCase):
                 'fictional.example.org',
                 str(self.root),
                 '',
-                '8.8.8.8',
                 '',
+                '8.8.8.8',
                 '',
                 'нет',
                 'нет',
@@ -623,7 +623,7 @@ class InstallationWizardTests(unittest.TestCase):
                     draft=self.base / ('draft-' + str(index) + '.json'),
                     view=TerminalView(plain=True),
                 )
-                answers = ['fictional.example.org', str(root), '', '8.8.8.8', '', media]
+                answers = ['fictional.example.org', str(root), '', '', '8.8.8.8', media]
                 profile = [
                     'fictional-media',
                     '',

@@ -438,7 +438,12 @@ def main():
             record = configuration.read_private_json(args.directory / 'secrets/admin-access.json')
             if record.get('username') != 'matrix-admin':
                 raise RuntimeError('Unexpected administrator identity')
-            print('matrix-admin: ' + record['password'])
+            if not record.get('password'):
+                print(
+                    'Пароль существующего администратора задаётся на внешнем MAS. Misbot его не менял и не сохранял.'
+                )
+            else:
+                print('matrix-admin: ' + record['password'])
             return 0
         result = manage(args.directory, args.action)
         if args.action == 'show' and result['state'] == 'valid':

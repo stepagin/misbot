@@ -40,7 +40,7 @@ def apply(root, credentials):
 
 
 def wait_services():
-    expected = 10 if lifecycle.state().get('database_mode', 'local') == 'external' else 11
+    expected = len(lifecycle.expected_services())
 
     def ready():
         rows = lifecycle.service_rows()
@@ -109,6 +109,10 @@ def rotate(root, password_file):
     previous = private_json(root / 'secrets/admin-access.json')
     if previous.get('username') != 'matrix-admin':
         raise RuntimeError('Unexpected administrator identity; no password changed')
+    if not previous.get('password'):
+        raise RuntimeError(
+            'Misbot не хранит прежний пароль существующего администратора внешнего MAS. Измените пароль на внешнем MAS; локальная операция не начата.'
+        )
     if password == previous['password']:
         raise RuntimeError('The new password equals the saved password; no change requested')
     lifecycle.backup()

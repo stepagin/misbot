@@ -327,7 +327,10 @@ def delete_external_database(root):
     ):
         raise RuntimeError('External database ownership is unconfirmed; credentials preserved')
     marker = 'matrix-installer:' + saved['owner']
-    query = "SELECT json_build_object('roles',(SELECT coalesce(json_agg(json_build_object('name',rolname,'marker',shobj_description(oid,'pg_authid'))),'[]') FROM pg_roles WHERE rolname IN ('synapse','mas')),'databases',(SELECT coalesce(json_agg(json_build_object('name',datname,'owner',pg_get_userbyid(datdba))),'[]') FROM pg_database WHERE datname IN ('synapse','mas')));"
+    scope = ','.join(
+        "'" + name + "'" for name in __import__('configuration_schema').owned_databases(model)
+    )
+    query = f"SELECT json_build_object('roles',(SELECT coalesce(json_agg(json_build_object('name',rolname,'marker',shobj_description(oid,'pg_authid'))),'[]') FROM pg_roles WHERE rolname IN ({scope})),'databases',(SELECT coalesce(json_agg(json_build_object('name',datname,'owner',pg_get_userbyid(datdba))),'[]') FROM pg_database WHERE datname IN ({scope})));"
     observed = json.loads(lifecycle.postgres('psql', '-d', 'postgres', '-X', '-At', '-c', query))
     roles = {row['name']: row for row in observed['roles']}
     if any(row['marker'] != marker for row in roles.values()) or any(

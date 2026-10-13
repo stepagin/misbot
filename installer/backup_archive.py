@@ -93,13 +93,66 @@ def extract(archive, destination, owners=False):
                 target.chmod(0o700 if member.isdir() else 0o600)
 
 
+def snapshot_databases(snapshot):
+    """Older complete archives include MAS; format3 records the external boundary."""
+    path = Path(snapshot) / 'backup-format.json'
+    if not path.exists():
+        return ('synapse', 'mas')
+    metadata = json.loads(path.read_text())
+    if metadata.get('format') not in (1, 2, 3):
+        raise RuntimeError(
+            'Unknown backup format; retain the archive and use a compatible installer'
+        )
+    if metadata.get('mas_mode', 'local') == 'local':
+        if metadata.get('format') == 3:
+            raise RuntimeError('Unexpected authentication boundary in backup format3')
+        return ('synapse', 'mas')
+    boundary = metadata.get('external_mas')
+    if (
+        metadata.get('format') != 3
+        or metadata.get('family') != 'misbot-matrix-portable'
+        or metadata.get('mas_mode') != 'external'
+        or not isinstance(boundary, dict)
+        or boundary.get('snapshot') != 'not-included'
+        or boundary.get('server_name') != metadata.get('server_name')
+        or not isinstance(boundary.get('issuer'), str)
+        or not boundary['issuer'].startswith('https://')
+        or not boundary['issuer'].endswith('/')
+        or set(metadata.get('database_inventory', {})) != {'synapse'}
+    ):
+        raise RuntimeError('External MAS backup boundary is missing or inconsistent')
+    return ('synapse',)
+
+
+def validate_authentication_boundary(snapshot, metadata):
+    databases = snapshot_databases(snapshot)
+    external = metadata.get('mas_mode', 'local') == 'external'
+    if external != (databases == ('synapse',)):
+        raise RuntimeError('Backup authentication mode differs from installation metadata')
+    if external:
+        boundary = json.loads((Path(snapshot) / 'backup-format.json').read_text())['external_mas']
+        if (
+            boundary['issuer'] != metadata.get('mas_issuer')
+            or boundary['server_name'] != metadata.get('domain')
+            or boundary.get('admin_user_id') != metadata.get('external_mas_admin_id')
+            or not metadata.get('external_mas_admin_id')
+        ):
+            raise RuntimeError(
+                'External MAS backup lacks a confirmed matching administrator identity'
+            )
+    return databases
+
+
 def verify_snapshot(directory):
     entries = list(Path(directory).iterdir())
     if len(entries) != 1 or not entries[0].is_dir():
         raise RuntimeError('Unexpected backup layout')
     snapshot = entries[0]
     digests = json.loads((snapshot / 'SHA256.json').read_text())
-    required = {'synapse.dump', 'mas.dump', 'roles.sql', 'files.tar.gz'}
+    databases = snapshot_databases(snapshot)
+    required = {name + '.dump' for name in databases} | {'roles.sql', 'files.tar.gz'}
+    if databases == ('synapse',) and ('mas.dump' in digests or (snapshot / 'mas.dump').exists()):
+        raise RuntimeError('External MAS backup must not contain an unrelated MAS database dump')
     if not isinstance(digests, dict) or not required.issubset(digests):
         raise RuntimeError('Backup lacks required checksum entries')
     if (snapshot / 'backup-format.json').exists():

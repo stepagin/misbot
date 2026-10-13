@@ -203,6 +203,7 @@ def _restore_locked(archive, root, digest, public_ip, local_postgres=False):
         files.mkdir(mode=0o700)
         backup_archive.extract(snapshot / 'files.tar.gz', files, owners=True)
         metadata = json.loads((files / 'installation.json').read_text())
+        databases = backup_archive.validate_authentication_boundary(snapshot, metadata)
         source_database_mode = metadata.get('database_mode', 'local')
         validate_database_destination(metadata, local_postgres)
         update.validate_manifest(files)
@@ -295,7 +296,7 @@ def _restore_locked(archive, root, digest, public_ip, local_postgres=False):
                 # Only this restore-owned target is reset after a partial import.
                 progress['stage'] = 'importing'
                 state_store.write_json(marker, progress)
-                for database in ('synapse', 'mas'):
+                for database in databases:
                     lifecycle.postgres('dropdb', '--if-exists', database)
                     lifecycle.postgres('createdb', '-T', 'template0', '-O', database, database)
                     with (snapshot / (database + '.dump')).open('rb') as source:
@@ -360,7 +361,16 @@ def _restore_locked(archive, root, digest, public_ip, local_postgres=False):
                 writers_disabled=True,
                 database_mode='local',
                 source_database_mode=source_database_mode,
-                next_action='Stop the source writer, then use install.sh restore-activate',
+                **(
+                    {
+                        'authentication': 'external-MAS-not-restored',
+                        'next_action': 'Stop the source; retain or restore the matching external MAS state, then activate with --external-mas-confirm preserved-state.',
+                    }
+                    if metadata.get('mas_mode') == 'external'
+                    else {
+                        'next_action': 'Stop the source writer, then use install.sh restore-activate'
+                    }
+                ),
             )
 
 

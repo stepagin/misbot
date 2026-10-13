@@ -48,7 +48,9 @@ class Field:
     secret: bool = False
     required: str = 'необязательно'
     example: str = ''
-    impact: str = 'Применяется при generate/start; работающий сервер требует копии.'
+    impact: str = (
+        'До установки можно изменить здесь. Для работающего сервера сначала нужна резервная копия.'
+    )
 
 
 FIELDS: dict[str, Field] = {
@@ -89,18 +91,57 @@ FIELDS: dict[str, Field] = {
         kind='domain',
         required='всегда',
         example='example.org',
-        impact='Matrix identity: после init изменять нельзя.',
+        impact='После создания сервера домен менять нельзя.',
+    ),
+    'MAS_MODE': Field(
+        'server',
+        'Сервер авторизации',
+        'local',
+        'mas',
+        example='local',
+        impact='После первого запуска сервер авторизации менять нельзя.',
     ),
     'MAS_DOMAIN': Field(
         'server',
-        'Домен MAS; пусто — mas.<DOMAIN>',
+        'Домен сервера авторизации MAS',
         kind='domain',
         example='auth.example.net',
-        impact='OAuth issuer: после запуска баз изменять нельзя.',
+        impact='После первого запуска адрес входа менять нельзя.',
+    ),
+    'MAS_PUBLIC_IP': Field(
+        'server',
+        'IPv4 внешнего MAS',
+        kind='ip',
+        example='203.0.113.21',
+        impact='Необязательно: проверяет A-запись внешнего MAS; его адрес не обязан совпадать с IPv4 этого VPS.',
+    ),
+    'MAS_SHARED_SECRET': Field(
+        'server',
+        'Общий ключ Synapse и внешнего MAS',
+        secret=True,
+        required='external MAS',
+        example='FICTIONAL_MAS_SHARED_SECRET',
+        impact='Должен совпадать с matrix.secret уже настроенного MAS.',
+    ),
+    'MAS_CLIENT_ID': Field(
+        'server',
+        'Client ID управляющего приложения MAS',
+        secret=True,
+        required='external MAS',
+        example='01K5WZ00000000000000000004',
+        impact='Приложение должно быть разрешено в admin_clients внешнего MAS.',
+    ),
+    'MAS_CLIENT_SECRET': Field(
+        'server',
+        'Client secret управляющего приложения MAS',
+        secret=True,
+        required='external MAS',
+        example='FICTIONAL_MAS_CLIENT_SECRET',
+        impact='Для управления приглашениями, пользователями и ботами через API MAS.',
     ),
     'PUBLIC_IP': Field(
         'server',
-        'Публичный IPv4 из панели VPS; пусто — единственный A домена',
+        'Публичный IPv4 этого VPS',
         kind='ip',
         example='203.0.113.20',
     ),
@@ -113,7 +154,7 @@ FIELDS: dict[str, Field] = {
         'local',
         'media',
         example='local',
-        impact='Действующее хранилище меняется только storage operation.',
+        impact='После установки перенос хранилища выполняется через меню «Медиа и базы данных». Мастер настройки данные не переносит.',
     ),
     'POSTGRES_MODE': Field(
         'server',
@@ -121,7 +162,7 @@ FIELDS: dict[str, Field] = {
         'local',
         'database',
         example='local',
-        impact='Действующее хранилище меняется только storage operation.',
+        impact='После установки перенос хранилища выполняется через меню «Медиа и базы данных». Мастер настройки данные не переносит.',
     ),
     'DOCKER_SUBNET': Field(
         'policy',
@@ -183,7 +224,7 @@ FIELDS: dict[str, Field] = {
         secret=True,
         example='FICTIONAL_GOOGLE_SECRET',
         required='вместе с ID',
-        impact='В активной установке форма не ротирует OAuth credentials.',
+        impact='Действующие ключи входа меняются отдельно с резервной копией.',
     ),
     'TELEGRAM_CLIENT_ID': Field(
         'auth',
@@ -197,11 +238,11 @@ FIELDS: dict[str, Field] = {
         secret=True,
         example='FICTIONAL_TELEGRAM_SECRET',
         required='вместе с ID',
-        impact='В активной установке форма не ротирует OAuth credentials.',
+        impact='Действующие ключи входа меняются отдельно с резервной копией.',
     ),
     'SOCKS5_CONFIG': Field(
         'auth',
-        'Необязательный HTTPS-egress Telegram через SOCKS5',
+        'Прокси SOCKS5 для входа через Telegram',
         kind='proxy',
         secret=True,
         example='socks5://fictional:password@proxy.example.org:1080',
@@ -239,7 +280,7 @@ FIELDS: dict[str, Field] = {
 for key, label, secret, example in (
     ('S3_BUCKET', 'Имя существующего bucket', False, 'fictional-private-bucket'),
     ('S3_REGION', 'Region подписи SigV4 из документации провайдера', False, 'us-east-1'),
-    ('S3_ENDPOINT_URL', 'HTTPS origin провайдера; пусто — AWS', False, 'https://s3.example.org'),
+    ('S3_ENDPOINT_URL', 'HTTPS-адрес S3; для AWS оставьте пустым', False, 'https://s3.example.org'),
     ('S3_PREFIX', 'Отдельный prefix с / в конце', False, 'matrix/example/media/'),
     ('S3_ACCESS_KEY_ID', 'Access key ID провайдера', True, 'FICTIONAL_ACCESS'),
     ('S3_SECRET_ACCESS_KEY', 'Secret access key провайдера', True, 'FICTIONAL_SECRET'),
@@ -356,6 +397,7 @@ def field_value(
         if not value:
             if item.required == 'всегда' or item.kind in (
                 'media',
+                'mas',
                 'database',
                 'bool',
                 'ssl',
@@ -380,6 +422,7 @@ def field_value(
             return ','.join(dict.fromkeys(domain(p) for p in value.split(',')))
         enums = {
             'media': ('local', 's3'),
+            'mas': ('local', 'external'),
             'database': ('local', 'external'),
             'bool': ('true', 'false'),
             'ssl': ('require', 'verify-full'),
@@ -478,6 +521,21 @@ def mas_host(values: Mapping[str, str]) -> str:
     return values.get('MAS_DOMAIN') or 'mas.' + values['DOMAIN']
 
 
+def mas_api_base(values: Mapping[str, str]) -> str:
+    return (
+        'https://' + mas_host(values)
+        if values.get('MAS_MODE', 'local') == 'external'
+        else 'http://mas:8080'
+    )
+
+
+def owned_databases(values: Mapping[str, object]) -> tuple[str, ...]:
+    mode = values.get('MAS_MODE', values.get('mas_mode', 'local'))
+    if mode not in ('local', 'external'):
+        raise RuntimeError('Unknown MAS mode; no database operation performed')
+    return ('synapse',) if mode == 'external' else ('synapse', 'mas')
+
+
 def public_hosts(values: Mapping[str, str]) -> list[str]:
     domain = values['DOMAIN']
     return list(
@@ -485,7 +543,7 @@ def public_hosts(values: Mapping[str, str]) -> list[str]:
             [
                 domain,
                 'matrix.' + domain,
-                mas_host(values),
+                *([mas_host(values)] if values.get('MAS_MODE', 'local') == 'local' else []),
                 *[prefix + '.' + domain for prefix in ('admin', 'web', 'rtc', 'turn')],
             ]
         )
@@ -521,6 +579,24 @@ def validate(
 
     if not model['DOMAIN']:
         error('DOMAIN', 'обязательный hostname без схемы')
+    if model['MAS_MODE'] == 'external':
+        for key in ('MAS_DOMAIN', 'MAS_SHARED_SECRET', 'MAS_CLIENT_ID', 'MAS_CLIENT_SECRET'):
+            if not model[key]:
+                error(key, 'обязательно для подключения уже настроенного внешнего MAS')
+        if mas_host(model) in public_hosts(model):
+            error('MAS_DOMAIN', 'выберите отдельный адрес внешнего MAS, не адрес службы этого VPS')
+        for key in (
+            'GOOGLE_CLIENT_ID',
+            'GOOGLE_CLIENT_SECRET',
+            'TELEGRAM_CLIENT_ID',
+            'TELEGRAM_CLIENT_SECRET',
+            'SOCKS5_CONFIG',
+        ):
+            if model[key]:
+                error(
+                    key,
+                    'способы входа настраиваются на внешнем MAS; удалите локальные OAuth-реквизиты',
+                )
     if mas_host(model) in [
         prefix + '.' + model['DOMAIN'] for prefix in ('web', 'admin', 'rtc', 'turn')
     ]:
@@ -545,12 +621,9 @@ def validate(
         if bool(model[provider + '_CLIENT_ID']) != bool(model[provider + '_CLIENT_SECRET']):
             error(
                 provider + '_CLIENT_SECRET',
-                provider
-                + ' requires both '
-                + provider
-                + '_CLIENT_ID and '
-                + provider
-                + '_CLIENT_SECRET; заполните оба или очистите оба',
+                'Для входа через '
+                + provider.title()
+                + ' нужны Client ID и Client secret. Заполните оба или отключите этот способ входа.',
                 'oauth_' + provider.lower() + '_pair_incomplete',
             )
     if model['MEDIA_MODE'] == 's3':

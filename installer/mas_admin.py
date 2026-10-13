@@ -15,7 +15,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def bootstrap(request, credentials, checkpoint):
+def bootstrap(request, credentials, checkpoint, retain_checkpoint=False):
     username = credentials['username']
     if username != 'matrix-admin':
         raise RuntimeError('Unexpected bootstrap administrator username')
@@ -51,7 +51,7 @@ def bootstrap(request, credentials, checkpoint):
     )
     if not owned:
         if attributes.get('admin', attributes.get('can_request_admin', False)):
-            return
+            return {'user_id': user['id'], 'password_managed': False}
         raise RuntimeError(
             'Existing non-admin account has no bootstrap ownership checkpoint; refusing to overwrite it'
         )
@@ -66,7 +66,9 @@ def bootstrap(request, credentials, checkpoint):
     status, response = request('/api/admin/v1/users/' + user['id'] + '/set-admin', {'admin': True})
     if status != 200 or not response['data']['attributes'].get('admin', False):
         raise RuntimeError('Administrator privileges were not confirmed; retry install.sh up')
-    checkpoint.unlink()
+    if not retain_checkpoint:
+        checkpoint.unlink()
+    return {'user_id': user['id'], 'password_managed': True}
 
 
 def set_password(request, credentials):
@@ -76,6 +78,8 @@ def set_password(request, credentials):
     if status != 200:
         raise RuntimeError('Administrator is unavailable')
     user = response['data']
+    if credentials.get('mas_user_id') is not None and credentials['mas_user_id'] != user['id']:
+        raise RuntimeError('Saved administrator identity changed; no password changed')
     attributes = user['attributes']
     if (
         not attributes.get('admin', attributes.get('can_request_admin', False))
@@ -90,9 +94,68 @@ def set_password(request, credentials):
         raise RuntimeError('Password change was not confirmed')
 
 
+def verify_state(request, users):
+    import re
+
+    if not isinstance(users, list) or not 1 <= len(users) <= 4:
+        raise RuntimeError('Saved external MAS identities are required')
+    for saved in users:
+        username = saved['username']
+        if not re.fullmatch(r'[a-z0-9][a-z0-9._=-]{0,254}', username):
+            raise RuntimeError('Invalid saved MAS username')
+        status, response = request('/api/admin/v1/users/by-username/' + username)
+        if status != 200:
+            raise RuntimeError('Saved external MAS user is unavailable')
+        user = response['data']
+        attributes = user['attributes']
+        if (
+            user['id'] != saved['user_id']
+            or attributes.get('username') != username
+            or attributes.get('locked_at')
+            or attributes.get('deactivated_at')
+            or bool(attributes.get('admin', attributes.get('can_request_admin', False)))
+            != saved['admin']
+        ):
+            raise RuntimeError(
+                'External MAS account identity changed; do not create replacement accounts'
+            )
+        if saved.get('session_id'):
+            if not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', saved['session_id']):
+                raise RuntimeError('Invalid saved MAS session')
+            status, response = request('/api/admin/v1/personal-sessions/' + saved['session_id'])
+            if status != 200:
+                raise RuntimeError('Saved external MAS device session is unavailable')
+            session = response['data']
+            attributes = session['attributes']
+            if (
+                session.get('id') != saved['session_id']
+                or session.get('type') != 'personal-session'
+                or attributes.get('actor_user_id') != saved['user_id']
+                or set(attributes.get('scope', '').split()) != set(saved['scope'].split())
+                or attributes.get('finished_at')
+                or attributes.get('revoked_at')
+            ):
+                raise RuntimeError('Saved external MAS device session changed or expired')
+    return {'passed': True, 'accounts_and_sessions': len(users)}
+
+
 def main():
     payload = json.load(sys.stdin)
     client = payload['client']
+    base = client.get('mas_url', 'http://mas:8080')
+    parsed = urllib.parse.urlsplit(base)
+    if base != 'http://mas:8080' and (
+        parsed.scheme != 'https'
+        or not parsed.hostname
+        or parsed.port not in (None, 443)
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in ('', '/')
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise RuntimeError('Unsafe MAS API address')
+    base = base.rstrip('/')
     opener = urllib.request.build_opener(NoRedirect(), urllib.request.ProxyHandler({}))
     basic = base64.b64encode(
         (client['client_id'] + ':' + client['client_secret']).encode()
@@ -101,7 +164,7 @@ def main():
     def send(path, body=None, headers=None):
         data = None if body is None else json.dumps(body).encode()
         req = urllib.request.Request(
-            'http://mas:8080' + path,
+            base + path,
             data=data,
             headers={'Content-Type': 'application/json', **(headers or {})},
         )
@@ -110,26 +173,70 @@ def main():
         except urllib.error.HTTPError as exc:
             response = exc
         with response:
-            content = response.read()
+            content = response.read(1048577)
+            if len(content) > 1048576:
+                raise RuntimeError('Oversized MAS response')
             return response.status, json.loads(content) if content else None
 
     req = urllib.request.Request(
-        'http://mas:8080/oauth2/token',
+        base + '/oauth2/token',
         data=urllib.parse.urlencode(
             {'grant_type': 'client_credentials', 'scope': 'urn:mas:admin'}
         ).encode(),
         headers={'Authorization': 'Basic ' + basic},
     )
     with opener.open(req, timeout=20) as response:
-        token = json.load(response)['access_token']
+        token = json.loads(response.read(1048577))['access_token']
 
     def request(path, body=None):
         return send(path, body, {'Authorization': 'Bearer ' + token})
 
-    if payload.get('action', 'bootstrap') == 'password':
+    if payload.get('action') == 'probe':
+        # A token alone does not prove access to the required administrative API.
+        status, _ = request('/api/admin/v1/users?page[first]=1')
+        if status != 200:
+            raise RuntimeError('MAS administrative access was not confirmed')
+        discovery = urllib.request.Request(base + '/.well-known/openid-configuration')
+        with opener.open(discovery, timeout=20) as response:
+            body = response.read(1048577)
+        if len(body) > 1048576:
+            raise RuntimeError('Oversized MAS discovery')
+        document = json.loads(body)
+        if any(
+            document.get(key) != base + suffix
+            for key, suffix in (
+                ('issuer', '/'),
+                ('token_endpoint', '/oauth2/token'),
+                ('authorization_endpoint', '/authorize'),
+            )
+        ):
+            raise RuntimeError('External MAS discovery does not match the configured issuer')
+        print(json.dumps({'passed': True}))
+    elif payload.get('action') == 'verify-state':
+        print(json.dumps(verify_state(request, payload['users'])))
+    elif payload.get('action') == 'inspect':
+        status, response = request('/api/admin/v1/users/by-username/matrix-admin')
+        if (
+            status != 200
+            or not response['data']['attributes'].get(
+                'admin', response['data']['attributes'].get('can_request_admin', False)
+            )
+            or response['data']['attributes'].get('locked_at')
+            or response['data']['attributes'].get('deactivated_at')
+        ):
+            raise RuntimeError('Saved external MAS administrator is unavailable')
+        print(json.dumps({'user_id': response['data']['id']}))
+    elif payload.get('action', 'bootstrap') == 'password':
         set_password(request, payload['credentials'])
     elif payload.get('action', 'bootstrap') == 'bootstrap':
-        bootstrap(request, payload['credentials'], Path('/data/bootstrap-admin.json'))
+        result = bootstrap(
+            request,
+            payload['credentials'],
+            Path('/data/bootstrap-admin.json'),
+            retain_checkpoint=base != 'http://mas:8080',
+        )
+        if base != 'http://mas:8080':
+            print(json.dumps(result))
     else:
         raise RuntimeError('Unknown administrator operation')
 

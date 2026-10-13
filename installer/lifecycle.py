@@ -108,6 +108,158 @@ def external_database():
     )
 
 
+def external_mas():
+    try:
+        metadata = state()
+    except FileNotFoundError:
+        return False
+    if metadata.get('databases_initialized') or metadata.get('storage_committed'):
+        return metadata.get('mas_mode', 'local') == 'external'
+    if (ROOT / 'settings').exists() or (ROOT / 'settings.env').exists():
+        return preflight.settings(ROOT).get('MAS_MODE', 'local') == 'external'
+    return metadata.get('mas_mode', 'local') == 'external'
+
+
+def owned_databases(metadata=None):
+    return __import__('configuration_schema').owned_databases(metadata or state())
+
+
+def expected_services(metadata=None):
+    metadata = metadata or state()
+    names = {
+        'synapse',
+        'jwt',
+        'livekit',
+        'web',
+        'admin',
+        'caddy',
+        'tls-router',
+        'referral-control',
+        'referral-bot',
+    }
+    if metadata.get('mas_mode', 'local') == 'local':
+        names.add('mas')
+    if metadata.get('database_mode', 'local') == 'local':
+        names.add('postgres')
+    if metadata.get('federation_seeded'):
+        names.add('federation-bot')
+    return names
+
+
+def external_mas_probe(values):
+    import configuration_schema
+
+    payload = {
+        'action': 'probe',
+        'client': {
+            'mas_url': configuration_schema.mas_api_base(values),
+            'client_id': values['MAS_CLIENT_ID'],
+            'client_secret': values['MAS_CLIENT_SECRET'],
+        },
+    }
+    try:
+        result = json.loads(run(['python3', str(ROOT / 'mas_admin.py')], stdin=json.dumps(payload)))
+        if result != {'passed': True}:
+            raise ValueError()
+    except (OSError, RuntimeError, ValueError):
+        raise RuntimeError(
+            'Подключение к внешнему MAS не подтверждено. Проверьте HTTPS-домен, '
+            'Client ID/secret и права управляющего приложения; данные сервера не изменены.'
+        ) from None
+    emit('external_mas_connection', passed=True, health_endpoint_required=False)
+
+
+def verify_external_mas_state():
+    import configuration
+
+    metadata = state()
+    users = [
+        {
+            'username': 'matrix-admin',
+            'user_id': metadata.get('external_mas_admin_id'),
+            'admin': True,
+        }
+    ]
+    if not users[0]['user_id']:
+        raise RuntimeError(
+            'Сохранённая identity администратора внешнего MAS отсутствует; запуск заблокирован.'
+        )
+    for role in ('referral', 'federation', 'welcome'):
+        if not metadata.get(role + '_provisioned'):
+            continue
+        session = configuration.read_private_json(ROOT / 'secrets' / (role + '-session.json'))
+        if (
+            not session['user_id'].startswith('@')
+            or session['user_id'].split(':', 1)[-1] != metadata['domain']
+        ):
+            raise RuntimeError(
+                'Saved external MAS bot belongs to another homeserver; activation blocked'
+            )
+        users.append(
+            {
+                'username': session['user_id'].split(':', 1)[0].removeprefix('@'),
+                'user_id': session['mas_user_id'],
+                'admin': False,
+                'session_id': session['personal_session_id'],
+                'scope': session['scope'],
+            }
+        )
+    client = configuration.read_private_json(ROOT / 'secrets/referral-client.json')
+    try:
+        result = json.loads(
+            run(
+                ['python3', str(ROOT / 'mas_admin.py')],
+                stdin=json.dumps({'action': 'verify-state', 'client': client, 'users': users}),
+            )
+        )
+        if result != {'passed': True, 'accounts_and_sessions': len(users)}:
+            raise ValueError()
+    except (OSError, RuntimeError, ValueError):
+        raise RuntimeError(
+            'Сохранённые пользователи и устройства внешнего MAS не подтверждены. '
+            'Восстановите его прежнее состояние отдельно; новые аккаунты и ключи не создавались.'
+        ) from None
+    emit('external_mas_saved_identities', passed=True, snapshot_verified=False)
+
+
+def verify_external_bot_tokens():
+    import configuration
+
+    metadata = state()
+    tokens = []
+    for role in ('referral', 'federation', 'welcome'):
+        if not metadata.get(role + '_provisioned'):
+            continue
+        config = configuration.read_private_json(ROOT / 'config' / (role + '-bot.json'))
+        tokens.append({key: config[key] for key in ('access_token', 'user_id', 'device_id')})
+    if not tokens:
+        return
+    script = """import json, sys, urllib.request
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs): return None
+opener = urllib.request.build_opener(NoRedirect(), urllib.request.ProxyHandler({}))
+for saved in json.load(sys.stdin):
+    req = urllib.request.Request('http://synapse:8008/_matrix/client/v3/account/whoami',
+        headers={'Authorization': 'Bearer ' + saved['access_token']})
+    with opener.open(req, timeout=20) as response:
+        actual = json.loads(response.read(1048577))
+    if actual.get('user_id') != saved['user_id'] or actual.get('device_id') != saved['device_id']:
+        raise RuntimeError('Saved external MAS bot identity differs')
+print('{"passed": true}')
+"""
+    try:
+        result = json.loads(
+            dc('exec', '-T', 'synapse', 'python', '-c', script, stdin=json.dumps(tokens))
+        )
+        if result != {'passed': True}:
+            raise ValueError()
+    except (OSError, RuntimeError, ValueError):
+        raise RuntimeError(
+            'Synapse не подтвердил сохранённые устройства внешнего MAS; не заменяйте аккаунты или ключи.'
+        ) from None
+    emit('external_mas_bot_tokens', passed=True)
+
+
 def postgres_command(tool, *arguments):
     if external_database():
         return COMPOSE + ['run', '--rm', '--no-deps', '-T', 'postgres-client', tool, *arguments]
@@ -346,6 +498,8 @@ def generate():
     # Pull exact immutable manifests only when missing locally.
     lock = json.loads((ROOT / 'versions.json').read_text())
     for role, digest in lock['digests'].items():
+        if role == 'mas' and external_mas():
+            continue
         present = (
             subprocess.run(
                 ['docker', 'image', 'inspect', digest],
@@ -398,12 +552,13 @@ def generate():
     def mount(source, target):
         return ['--mount', f'type=bind,source={ROOT / source},target={target},readonly']
 
-    run(
-        isolated
-        + mount('config/mas.yaml', '/config/mas.yaml')
-        + mount('config/mas-signing.pem', '/config/mas-signing.pem')
-        + [image('mas'), 'config', 'check', '--config', '/config/mas.yaml']
-    )
+    if not external_mas():
+        run(
+            isolated
+            + mount('config/mas.yaml', '/config/mas.yaml')
+            + mount('config/mas-signing.pem', '/config/mas-signing.pem')
+            + [image('mas'), 'config', 'check', '--config', '/config/mas.yaml']
+        )
     run(
         isolated
         + mount('config/Caddyfile', '/etc/caddy/Caddyfile')
@@ -475,6 +630,54 @@ def prepare_host():
 
 def create_admin():
     credentials = json.loads((ROOT / 'secrets/admin-access.json').read_text())
+    if external_mas():
+        metadata = state()
+        expected = metadata.get('external_mas_admin_id')
+        payload = {
+            'action': 'inspect' if expected else 'bootstrap',
+            'credentials': credentials,
+            'client': json.loads((ROOT / 'secrets/referral-client.json').read_text()),
+        }
+        try:
+            result = json.loads(
+                dc(
+                    'exec',
+                    '-T',
+                    'synapse',
+                    'python',
+                    '-c',
+                    (ROOT / 'mas_admin.py').read_text(),
+                    stdin=json.dumps(payload),
+                )
+            )
+            if not isinstance(result.get('user_id'), str) or not result['user_id']:
+                raise ValueError()
+            if expected and result['user_id'] != expected:
+                raise ValueError()
+        except (OSError, RuntimeError, ValueError, TypeError):
+            raise RuntimeError(
+                'Администратор внешнего MAS не подтверждён. Сохраните его пользователей '
+                'и ключи; проверьте подключение и повторите запуск.'
+            ) from None
+        if not expected and not result.get('password_managed'):
+            credentials.pop('password', None)
+            credentials['password_managed'] = False
+            state_store.write_json(ROOT / 'secrets/admin-access.json', credentials)
+        if credentials.get('mas_user_id') != result['user_id']:
+            credentials['mas_user_id'] = result['user_id']
+            state_store.write_json(ROOT / 'secrets/admin-access.json', credentials)
+        metadata['external_mas_admin_id'] = result['user_id']
+        state_store.write_json(ROOT / 'installation.json', metadata)
+        if not expected and result.get('password_managed'):
+            (ROOT / 'data/synapse/bootstrap-admin.json').unlink(missing_ok=True)
+        emit(
+            'administrator_ready',
+            credential_file=str(ROOT / 'secrets/admin-access.json'),
+            password_omitted=True,
+            external=True,
+            password_managed='password' in credentials,
+        )
+        return
     # Fixed localpart, independent of user input. Do not interpolate a password into SQL/shell.
     sql = "SELECT json_build_object('admin',can_request_admin,'deleted',deactivated_at IS NOT NULL,'locked',locked_at IS NOT NULL) FROM users WHERE username='matrix-admin';"
     rows = postgres(
@@ -516,8 +719,8 @@ def create_admin():
     )
 
 
-def certificate_paths():
-    host = 'turn.' + state()['domain']
+def certificate_paths(host=None):
+    host = host or 'turn.' + state()['domain']
     path = ROOT / 'data/caddy/caddy/certificates/acme-v02.api.letsencrypt.org-directory' / host
     return path / (host + '.crt'), path / (host + '.key')
 
@@ -637,6 +840,8 @@ def up_admission_check():
 def up():
     up_admission_check()
     values = preflight.settings(ROOT)
+    if values.get('MAS_MODE') == 'external':
+        external_mas_probe(values)
     if values.get('MEDIA_MODE') == 's3':
         try:
             media_transfer.client(values).head_bucket(Bucket=values['S3_BUCKET'])
@@ -703,7 +908,16 @@ def up():
     state_store.write_json(ROOT / 'installation.json', metadata)
     wait(
         lambda: postgres(
-            'psql', '-d', 'mas', '-X', '-A', '-t', '-v', 'ON_ERROR_STOP=1', '-c', 'SELECT 1'
+            'psql',
+            '-d',
+            'synapse' if external_mas() else 'mas',
+            '-X',
+            '-A',
+            '-t',
+            '-v',
+            'ON_ERROR_STOP=1',
+            '-c',
+            'SELECT 1',
         ).strip()
         == '1',
         service='postgres-client' if external_database() else 'postgres',
@@ -721,18 +935,30 @@ def up():
         metadata['s3_identity'] = media_transfer.identity(preflight.settings(ROOT))
     metadata['storage_committed'] = True
     state_store.write_json(ROOT / 'installation.json', metadata)
-    dc('up', '-d', 'synapse', 'mas')
-    probe = "import urllib.request; urllib.request.urlopen('http://mas:8080/health',timeout=3).read(); urllib.request.urlopen('http://synapse:8008/_matrix/client/versions',timeout=3).read()"
+    dc('up', '-d', *owned_databases())
+    probe = "import urllib.request; urllib.request.urlopen('http://synapse:8008/_matrix/client/versions',timeout=3).read()"
+    if not external_mas():
+        probe += "; urllib.request.urlopen('http://mas:8080/health',timeout=3).read()"
     wait(
         lambda: dc('exec', '-T', 'synapse', 'python', '-c', probe) is not None,
-        service='synapse mas',
+        service=' '.join(owned_databases()),
     )
+    if external_mas():
+        # MAS must call the public homeserver while creating users/devices.
+        # Publish HTTPS before provisioning; otherwise both sides wait on each other.
+        dc('up', '-d', 'caddy', 'tls-router')
+        cert, key = certificate_paths('matrix.' + state()['domain'])
+        wait(lambda: cert.is_file() and key.is_file(), attempts=150, service='caddy tls-router')
+        run(['openssl', 'x509', '-in', str(cert), '-checkend', '86400', '-noout'])
     metadata = state()
     if not (ROOT / 'data/synapse' / (metadata['domain'] + '.signing.key')).is_file():
         raise RuntimeError('Synapse has not generated its signing key')
     metadata['synapse_signing_key_created'] = True
     state_store.write_json(ROOT / 'installation.json', metadata)
     create_admin()
+    if external_mas() and state().get('referral_provisioned'):
+        verify_external_mas_state()
+        verify_external_bot_tokens()
     dc('up', '-d', 'referral-control')
     wait(
         lambda: dc(
@@ -807,10 +1033,8 @@ def up():
             row['State'] == 'running' and row.get('Health', '') in ('', 'healthy')
             for row in service_rows()
         )
-        and len(service_rows()) == (11 if external_database() else 12),
-        service='postgres-client synapse mas referral-control referral-bot jwt web admin caddy tls-router livekit'
-        if external_database()
-        else 'postgres synapse mas referral-control referral-bot jwt web admin caddy tls-router livekit',
+        and {row['Service'] for row in service_rows()} == expected_services(),
+        service=' '.join(sorted(expected_services())),
     )
     check()
     release = json.loads((ROOT / 'release.json').read_text())
@@ -1038,26 +1262,10 @@ def check():
     rows = service_rows()
     for row in rows:
         emit('service', name=row['Service'], state=row['State'], health=row.get('Health', ''))
-    expected = (10 if external_database() else 11) + (1 if state().get('federation_seeded') else 0)
-    services_ready = len(rows) == expected and all(
+    required = expected_services()
+    services_ready = {row['Service'] for row in rows} == required and all(
         row['State'] == 'running' and row.get('Health', '') in ('', 'healthy') for row in rows
     )
-    required = {
-        'synapse',
-        'mas',
-        'jwt',
-        'livekit',
-        'web',
-        'admin',
-        'caddy',
-        'tls-router',
-        'referral-control',
-        'referral-bot',
-    }
-    if not external_database():
-        required.add('postgres')
-    if state().get('federation_seeded'):
-        required.add('federation-bot')
     missing = sorted(required - {row['Service'] for row in rows})
     emit('service_inventory', passed=services_ready and not missing, missing=missing)
     if result.returncode:
@@ -1157,7 +1365,7 @@ def backup(leave_stopped=False):
     target.mkdir(mode=0o700)
     referral.validate_saved(ROOT, state())
     with paused_writers(leave_stopped):
-        for database in ['synapse', 'mas']:
+        for database in owned_databases():
             with (target / (database + '.dump')).open('wb') as output:
                 result = subprocess.run(
                     postgres_command('pg_dump', *backup_dump_arguments(database)),
@@ -1170,7 +1378,7 @@ def backup(leave_stopped=False):
                     raise RuntimeError('Database dump failed')
         (target / 'roles.sql').write_text(
             '-- Dedicated roles are recreated from config/init-db.sql.\n'
-            if external_database()
+            if external_database() or external_mas()
             else postgres('pg_dumpall', '--globals-only')
         )
         with tarfile.open(target / 'files.tar.gz', 'w:gz') as tar:
@@ -1217,14 +1425,29 @@ def backup(leave_stopped=False):
             ]:
                 if (ROOT / name).exists() or (ROOT / name).is_symlink():
                     backup_archive.add_tree(tar, ROOT / name, name)
-        (target / 'mode.txt').write_text('consistent\n')
+        (target / 'mode.txt').write_text(
+            'consistent-synapse-only\n' if external_mas() else 'consistent\n'
+        )
         metadata = state()
-        inventory = {database: database_inventory(database) for database in ('synapse', 'mas')}
+        inventory = {database: database_inventory(database) for database in owned_databases()}
         state_store.write_json(
             target / 'backup-format.json',
             {
-                'format': 2,
+                'format': 3 if external_mas() else 2,
                 'family': 'misbot-matrix-portable',
+                'mas_mode': metadata.get('mas_mode', 'local'),
+                **(
+                    {
+                        'external_mas': {
+                            'issuer': metadata['mas_issuer'],
+                            'server_name': metadata['domain'],
+                            'snapshot': 'not-included',
+                            'admin_user_id': metadata.get('external_mas_admin_id'),
+                        }
+                    }
+                    if external_mas()
+                    else {}
+                ),
                 'server_name': metadata['domain'],
                 'database_mode': metadata.get('database_mode', 'local'),
                 'media_mode': metadata.get('media_mode', 'local'),
@@ -1232,11 +1455,11 @@ def backup(leave_stopped=False):
                 'synapse_one_time_keys': 'excluded',
             },
         )
-        digests = {
-            p.name: hashlib.file_digest(p.open('rb'), 'sha256').hexdigest()
-            for p in target.iterdir()
-            if p.is_file()
-        }
+        digests = {}
+        for path in target.iterdir():
+            if path.is_file():
+                with path.open('rb') as source:
+                    digests[path.name] = hashlib.file_digest(source, 'sha256').hexdigest()
         (target / 'SHA256.json').write_text(json.dumps(digests, indent=2) + '\n')
         archive = directory / ('matrix-' + stamp + '.tar.gz')
         temporary = archive.with_name(archive.name + '.partial')
@@ -1247,10 +1470,20 @@ def backup(leave_stopped=False):
         link = directory / ('latest-' + uuid.uuid4().hex)
         link.symlink_to(archive.name)
         os.replace(link, latest)
+        with archive.open('rb') as source:
+            archive_digest = hashlib.file_digest(source, 'sha256').hexdigest()
         emit(
             'consistent_backup',
             archive=str(archive),
-            sha256=hashlib.file_digest(archive.open('rb'), 'sha256').hexdigest(),
+            sha256=archive_digest,
+            **(
+                {
+                    'authentication': 'external-MAS-not-included',
+                    'next_action': 'Сохраните отдельную копию внешнего MAS; эта копия содержит только Synapse и локальные файлы.',
+                }
+                if external_mas()
+                else {}
+            ),
         )
         shutil.rmtree(target)
         return archive
@@ -1275,8 +1508,7 @@ def move_export():
         *(['federation-bot'] if state().get('federation_seeded') else []),
         'referral-bot',
         'referral-control',
-        'synapse',
-        'mas',
+        *owned_databases(),
         'jwt',
     )
     if state().get('federation_seeded'):
@@ -1345,8 +1577,11 @@ def restore_check():
         snapshot = backup_archive.verify_snapshot(temp)
         referral.verify_archive(snapshot / 'files.tar.gz')
         __import__('federation_runtime').verify_archive(snapshot / 'files.tar.gz')
+        with tarfile.open(snapshot / 'files.tar.gz', 'r:gz') as tar:
+            saved_metadata = json.load(tar.extractfile('installation.json'))
+        databases = backup_archive.validate_authentication_boundary(snapshot, saved_metadata)
         emit('referral_backup_crypto_restore', passed=True)
-        for database in ['synapse', 'mas']:
+        for database in databases:
             target = 'restorecheck_' + database + '_' + uuid.uuid4().hex[:8]
             postgres('createdb', '-T', 'template0', target)
             try:
@@ -1390,7 +1625,7 @@ def re_safe_basename(value):
     return isinstance(value, str) and Path(value).name == value and value not in ('', '..', '.')
 
 
-def restore_activate():
+def restore_activate(external_mas_confirm=None):
     marker = ROOT / 'restore-journal.json'
     if not marker.is_file() or json.loads(marker.read_text()).get('stage') != 'ready':
         raise RuntimeError('Restore has not completed; repeat the original restore command')
@@ -1400,6 +1635,17 @@ def restore_activate():
             'This restore target was already activated; use install.sh status/check. '
             'To restore another archive use an empty directory; existing data was not changed'
         )
+    if metadata.get('mas_mode') == 'external':
+        if external_mas_confirm != 'preserved-state':
+            raise RuntimeError(
+                'В копии нет базы и ключей внешнего MAS. Сохраните или восстановите '
+                'его прежних пользователей и устройства отдельно, затем подтвердите: '
+                'sudo misbot backup activate --confirm source-stopped '
+                '--external-mas-confirm preserved-state. Сервер остаётся выключенным.'
+            )
+        verify_external_mas_state()
+    elif external_mas_confirm is not None:
+        raise RuntimeError('Подтверждение внешнего MAS применяется только к внешнему MAS.')
     if any(
         row['Service']
         in ('synapse', 'mas', 'jwt', 'referral-bot', 'referral-control', 'federation-bot')
@@ -1468,6 +1714,7 @@ def main():
             'cert-renew',
         ],
     )
+    parser.add_argument('--external-mas-confirm', choices=('preserved-state',))
     parser.add_argument('--check-up-only', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--register-command', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--remove-command', action='store_true', help=argparse.SUPPRESS)
@@ -1509,7 +1756,7 @@ def main():
                 'backup': backup,
                 'backup-recover': backup_recover,
                 'restore-check': restore_check,
-                'restore-activate': restore_activate,
+                'restore-activate': lambda: restore_activate(args.external_mas_confirm),
                 'move-export': move_export,
                 'move-abort': move_abort,
                 'cert-renew': cert_renew,

@@ -1,5 +1,6 @@
 """One private loader and recoverable publication for legacy/split configuration."""
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -213,8 +214,38 @@ def export_text(root):
 def assert_auth_identity(root, model, metadata):
     if not any(
         metadata.get(key)
-        for key in ('databases_initialized', 'storage_committed', 'restore_pending')
+        for key in (
+            'databases_initialized',
+            'storage_committed',
+            'network_committed',
+            'restore_pending',
+        )
     ):
+        return
+    if metadata.get('mas_mode', 'local') != model.get('MAS_MODE', 'local'):
+        raise RuntimeError(
+            'После первого запуска нельзя менять локальный MAS на внешний или наоборот.'
+        )
+    if model.get('MAS_MODE') == 'external':
+        expected_identity = metadata.get('mas_identity')
+        identity = {
+            'issuer': 'https://' + schema.mas_host(model) + '/',
+            'shared_secret_sha256': hashlib.sha256(model['MAS_SHARED_SECRET'].encode()).hexdigest(),
+            'client_id': model['MAS_CLIENT_ID'],
+        }
+        if expected_identity != identity:
+            raise RuntimeError(
+                'Адрес, общий ключ и управляющее приложение внешнего MAS менять нельзя; восстановите сохранённые настройки.'
+            )
+        client = read_private_json(Path(root) / 'secrets/referral-client.json')
+        if client != {
+            'mas_url': schema.mas_api_base(model),
+            'client_id': model['MAS_CLIENT_ID'],
+            'client_secret': model['MAS_CLIENT_SECRET'],
+        }:
+            raise RuntimeError(
+                'Реквизиты внешнего MAS отличаются от сохранённых; восстановите прежние значения.'
+            )
         return
     expected = metadata.get('mas_issuer')
     path = Path(root) / 'config/mas.yaml'

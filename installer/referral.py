@@ -66,12 +66,32 @@ def configure(root, metadata, settings, preview=False):
     validate_saved(root, metadata)
     domain = metadata['domain']
     path = root / 'secrets/referral-client.json'
+    external = settings.get('MAS_MODE', 'local') == 'external'
+    requested = (
+        {
+            'client_id': settings.get('MAS_CLIENT_ID', ''),
+            'client_secret': settings.get('MAS_CLIENT_SECRET', ''),
+            'mas_url': configuration_schema.mas_api_base(settings),
+        }
+        if external
+        else None
+    )
+    if path.exists() and external:
+        saved_client = json.loads(path.read_text())
+        if saved_client != requested:
+            if metadata.get('databases_initialized') or metadata.get('referral_provisioned'):
+                raise RuntimeError(
+                    'Saved external MAS client differs; restore its original private credentials'
+                )
+            private(path, requested)
     if not path.exists():
         if metadata.get('referral_seeded'):
             raise RuntimeError('Saved referral service credential is missing; restore from backup')
         private(
             path,
-            {
+            requested
+            if external
+            else {
                 'client_id': CLIENT_ID,
                 'client_secret': 'REDACTED_REFERRAL_SECRET'
                 if preview
@@ -79,7 +99,12 @@ def configure(root, metadata, settings, preview=False):
             },
         )
     client = json.loads(path.read_text())
-    if client['client_id'] != CLIENT_ID or not client.get('client_secret'):
+    if (
+        not client.get('client_secret')
+        or not client.get('client_id')
+        or (not external and client['client_id'] != CLIENT_ID)
+        or (not external and client.get('mas_url', 'http://mas:8080') != 'http://mas:8080')
+    ):
         raise RuntimeError('Invalid referral service credentials')
     metadata['referral_seeded'] = True
     policy = {
@@ -105,7 +130,7 @@ def configure(root, metadata, settings, preview=False):
         {
             'servers': {
                 domain: {
-                    'mas_url': 'http://mas:8080',
+                    'mas_url': configuration_schema.mas_api_base(settings),
                     'synapse_url': 'http://synapse:8008',
                     'client_id': client['client_id'],
                     'client_secret': client['client_secret'],

@@ -19,7 +19,10 @@ class MAS:
 
     def request(self, path, method='GET', data=None, params=None):
         url = urljoin(self.base + '/', path)
-        if urlsplit(url).netloc != urlsplit(self.base).netloc:
+        if (
+            urlsplit(url).netloc != urlsplit(self.base).netloc
+            or urlsplit(url).scheme != urlsplit(self.base).scheme
+        ):
             raise BotError(
                 'Адрес MAS не соответствует подключённой службе. Обратитесь к администратору.'
             )

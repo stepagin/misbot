@@ -5,6 +5,7 @@ from pathlib import Path
 import uuid
 
 import preflight
+import configuration_schema
 import state_store
 
 
@@ -39,6 +40,8 @@ def initialize(root, postgres):
     metadata = json.loads((root / 'installation.json').read_text())
     identity = {k: values[k] for k in ('POSTGRES_HOST', 'POSTGRES_PORT')}
     identity['server_name'] = metadata['domain']
+    names = configuration_schema.owned_databases(values)
+    scope = ','.join(literal(name) for name in names)
     checkpoint = root / 'config/external-postgres-owner.json'
     if checkpoint.exists():
         saved = json.loads(checkpoint.read_text())
@@ -69,12 +72,12 @@ def initialize(root, postgres):
     marker = 'matrix-installer:' + saved['owner']
     # Inspect both names before creating anything: a foreign second role must
     # not leave an avoidable first role behind.
-    query = """SELECT json_build_object('roles',
+    query = f"""SELECT json_build_object('roles',
       (SELECT coalesce(json_agg(json_build_object('name',rolname,'marker',
-        shobj_description(oid,'pg_authid'))),'[]') FROM pg_roles WHERE rolname IN ('synapse','mas')),
+        shobj_description(oid,'pg_authid'))),'[]') FROM pg_roles WHERE rolname IN ({scope})),
       'databases',(SELECT coalesce(json_agg(json_build_object('name',datname,
         'owner',pg_get_userbyid(datdba),'encoding',pg_encoding_to_char(encoding),
-        'collate',datcollate,'ctype',datctype)),'[]') FROM pg_database WHERE datname IN ('synapse','mas')));"""
+        'collate',datcollate,'ctype',datctype)),'[]') FROM pg_database WHERE datname IN ({scope})));"""
 
     def inspect():
         return json.loads(
@@ -102,7 +105,7 @@ def initialize(root, postgres):
 
     observed = inspect()
     validate(observed)
-    for name in ('synapse', 'mas'):
+    for name in names:
         password = (root / 'secrets' / ('db_' + name)).read_text().strip()
         # Role creation and its ownership comment commit together. A lost
         # response can be retried without changing an existing password.
@@ -148,4 +151,4 @@ COMMIT;
                 + " ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C' TEMPLATE template0",
             )
     validate(inspect())
-    return {'installer_owned_roles': 2, 'installer_owned_databases': 2}
+    return {'installer_owned_roles': len(names), 'installer_owned_databases': len(names)}

@@ -36,10 +36,11 @@ class WizardRevisionTests(unittest.TestCase):
         self.interface.reader = lambda *_: next(values)
 
     def test_mas_prompt_uses_actual_domain_and_empty_keeps_automatic_value(self):
-        self.answers([''])
+        prompts = []
+        self.interface.reader = lambda prompt, secret: prompts.append(prompt) or ''
         self.interface.field('MAS_DOMAIN')
-        self.assertIn('mas.example.org', self.output.getvalue())
-        self.assertNotIn('<DOMAIN>', self.output.getvalue())
+        self.assertIn('[mas.example.org]', prompts[0])
+        self.assertNotIn('пусто', prompts[0])
         self.assertEqual(self.interface.model['MAS_DOMAIN'], '')
 
     def test_authorization_step_does_not_ask_for_invitation_lifetime(self):
@@ -74,7 +75,15 @@ class WizardRevisionTests(unittest.TestCase):
             key
             for key, value in model.items()
             if key
-            in ('DOMAIN', 'MAS_DOMAIN', 'PUBLIC_IP', 'ACME_EMAIL', 'MEDIA_MODE', 'POSTGRES_MODE')
+            in (
+                'DOMAIN',
+                'MAS_MODE',
+                'MAS_DOMAIN',
+                'PUBLIC_IP',
+                'ACME_EMAIL',
+                'MEDIA_MODE',
+                'POSTGRES_MODE',
+            )
             or (value and value != schema.FIELDS[key].default)
         ]
         number = str(fields.index('ACME_EMAIL') + 1)

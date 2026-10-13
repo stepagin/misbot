@@ -3,6 +3,7 @@
 
 import argparse
 import atexit
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -137,6 +138,9 @@ except configuration_schema.InvalidConfiguration as error:
 if domain_name(settings.get('DOMAIN', '')) != domain:
     fail('Changing DOMAIN is not supported; create a new installation')
 mas_domain = configuration_schema.mas_host(settings)
+mas_mode = settings.get('MAS_MODE', 'local')
+if mas_mode not in ('local', 'external'):
+    fail('MAS_MODE must be local or external')
 try:
     configuration.assert_auth_identity(root, settings, state)
 except RuntimeError as error:
@@ -285,8 +289,18 @@ if state.get('network_committed') and state.get('subnet') and state['subnet'] !=
     fail('Changing the installed Docker subnet is not supported')
 vault_cache.mark_dirty(root)
 state.update(
-    domain=domain, subnet=subnet, preview=args.preview, mas_issuer='https://' + mas_domain + '/'
+    domain=domain,
+    subnet=subnet,
+    preview=args.preview,
+    mas_issuer='https://' + mas_domain + '/',
+    mas_mode=mas_mode,
 )
+if mas_mode == 'external':
+    state['mas_identity'] = {
+        'issuer': 'https://' + mas_domain + '/',
+        'shared_secret_sha256': hashlib.sha256(settings['MAS_SHARED_SECRET'].encode()).hexdigest(),
+        'client_id': settings['MAS_CLIENT_ID'],
+    }
 save_state()
 lock = json.loads((Path(__file__).parent / 'versions.json').read_text())
 images, resolved = lock['tags'], lock['digests']
@@ -345,12 +359,34 @@ seed_names = [
     'synapse_form',
     'mas_encryption',
 ]
+if mas_mode == 'external':
+    seed_names = [
+        name for name in seed_names if name not in ('db_mas', 'mas_shared', 'mas_encryption')
+    ]
+    # Default config init seeds local-only placeholders before the wizard chooses its MAS.
+    # These are unused before first database creation and have no external counterpart.
+    if not state.get('databases_initialized'):
+        for relative in (
+            'secrets/db_mas',
+            'secrets/mas_shared',
+            'secrets/mas_encryption',
+            'config/mas-signing.pem',
+            'config/mas.yaml',
+            'config/mas-defaults.yaml',
+            'mas-proxy.env',
+        ):
+            path = root / relative
+            if path.is_symlink():
+                fail('Unexpected symbolic link in unused local MAS configuration')
+            if path.exists():
+                path.unlink()
+        state.pop('defaults_created', None)
 for name in seed_names:
     secret(name)
 referral_client, referral_policy = referral.configure(root, state, settings, preview=args.preview)
 if not args.preview:
     signing = config / 'mas-signing.pem'
-    if not signing.exists():
+    if mas_mode == 'local' and not signing.exists():
         if state.get('seeded'):
             fail('Missing MAS signing key; restore it from backup')
         try:
@@ -411,9 +447,14 @@ except ValueError:
 acme_email = settings.get('ACME_EMAIL', '')
 if acme_email and not re.fullmatch(r'[^\s@{}]+@[^\s@{}]+\.[^\s@{}]+', acme_email):
     fail('Invalid ACME_EMAIL')
-db_synapse, db_mas = secret('db_synapse'), secret('db_mas')
+db_synapse = secret('db_synapse')
+db_mas = secret('db_mas') if mas_mode == 'local' else None
 secret('db_admin')
-mas_shared = secret('mas_shared')
+mas_shared = (
+    ('REDACTED_MAS_SHARED_SECRET' if args.preview else settings['MAS_SHARED_SECRET'])
+    if mas_mode == 'external'
+    else secret('mas_shared')
+)
 as_token, hs_token = secret('rtc_as_token'), secret('rtc_hs_token')
 lk_key, lk_secret = 'matrix-livekit', secret('livekit_secret')
 
@@ -452,7 +493,7 @@ synapse = {
     'form_secret': secret('synapse_form'),
     'matrix_authentication_service': {
         'enabled': True,
-        'endpoint': 'http://mas:8080/',
+        'endpoint': configuration_schema.mas_api_base(settings) + '/',
         'secret': mas_shared,
     },
     'encryption_enabled_by_default_for_room_type': 'all',
@@ -560,204 +601,212 @@ dump(
     },
 )
 
-if not args.preview:
-    if not (config / 'mas-signing.pem').exists():
-        fail(
-            'MAS signing key disappeared during generation; keep existing data and restore its saved key'
-        )
-    os.chown(config / 'mas-signing.pem', 65532, 65532)
-
-mas = {
-    'http': {
-        'public_base': f'https://{mas_domain}/',
-        'issuer': f'https://{mas_domain}/',
-        'listeners': [
-            {
-                'name': 'web',
-                'resources': [
-                    {'name': r}
-                    for r in [
-                        'discovery',
-                        'human',
-                        'oauth',
-                        'graphql',
-                        'assets',
-                        'adminapi',
-                        'health',
-                    ]
-                ],
-                'binds': [{'host': '0.0.0.0', 'port': 8080}],
-            }
-        ],
-    },
-    'database': {
-        'host': database_host if database_mode == 'external' else 'postgres',
-        'port': int(database_port) if database_mode == 'external' else 5432,
-        'username': 'mas',
-        'password': db_mas,
-        'database': 'mas',
-        'ssl_mode': database_ssl if database_mode == 'external' else 'disable',
-        'min_connections': 1,
-        'max_connections': 3,
-    },
-    'matrix': {
-        'kind': 'synapse',
-        'homeserver': f'{domain}',
-        'endpoint': 'http://synapse:8008',
-        'secret': mas_shared,
-    },
-    'secrets': {
-        'encryption': secret('mas_encryption'),
-        'keys': [{'key_file': '/config/mas-signing.pem'}],
-    },
-    'passwords': {'enabled': True},
-    'account': {
-        'password_registration_enabled': True,
-        'password_registration_email_required': False,
-        'password_recovery_enabled': False,
-    },
-    'branding': {'service_name': 'Matrix'},
-    'email': {'from': f'Matrix <noreply@{domain}>', 'transport': 'blackhole'},
-    'telemetry': {'tracing': {'exporter': 'none'}, 'metrics': {'exporter': 'none'}},
-    'policy': {'data': {'client_registration': {'allow_host_mismatch': True}}},
-}
-if database_mode == 'external':
-    mas['database']['connect_timeout'] = 10
-    if database_ssl == 'verify-full':
-        mas['database']['ssl_ca_file'] = '/config/postgres-ca.pem'
-mas['clients'] = [
-    {
-        'client_id': referral_client['client_id'],
-        'client_auth_method': 'client_secret_basic',
-        'client_secret': referral_client['client_secret'],
-    }
-]
-mas['policy']['data']['admin_clients'] = [referral_client['client_id']]
-google = (
-    {'GOOGLE_CLIENT_ID': 'REDACTED_CLIENT_ID', 'GOOGLE_CLIENT_SECRET': 'REDACTED_CLIENT_SECRET'}
-    if args.preview and settings.get('GOOGLE_CLIENT_ID')
-    else settings
-)
 providers = []
-if google.get('GOOGLE_CLIENT_ID') and google.get('GOOGLE_CLIENT_SECRET'):
-    providers.append(
-        {
-            'id': '01K5WZ00000000000000000001',
-            'human_name': 'Google',
-            'brand_name': 'google',
-            'issuer': 'https://accounts.google.com',
-            'token_endpoint_auth_method': 'client_secret_post',
-            'client_id': google['GOOGLE_CLIENT_ID'],
-            'client_secret': google['GOOGLE_CLIENT_SECRET'],
-            'scope': 'openid profile email',
-            'claims_imports': {
-                'localpart': {'action': 'ignore'},
-                'displayname': {'action': 'suggest', 'template': '{{ user.name }}'},
-                'email': {'action': 'suggest', 'template': '{{ user.email }}'},
-                'account_name': {'template': '{{ user.email }}'},
-            },
-        }
-    )
-telegram = (
-    {'TELEGRAM_CLIENT_ID': 'REDACTED_CLIENT_ID', 'TELEGRAM_CLIENT_SECRET': 'REDACTED_CLIENT_SECRET'}
-    if args.preview and settings.get('TELEGRAM_CLIENT_ID')
-    else settings
-)
-if telegram.get('TELEGRAM_CLIENT_ID') and telegram.get('TELEGRAM_CLIENT_SECRET'):
-    providers.append(
-        {
-            'id': '01K5WZ00000000000000000002',
-            'human_name': 'Telegram',
-            'enabled': True,
-            'issuer': 'https://oauth.telegram.org',
-            'token_endpoint_auth_method': 'client_secret_basic',
-            # Telegram gzips the bare JWKS URI without content negotiation; MAS lacks gzip decoding.
-            # This query returns the same live keys as plain JSON over the official HTTPS endpoint.
-            'jwks_uri': 'https://oauth.telegram.org/.well-known/jwks.json?format=json',
-            'client_id': telegram['TELEGRAM_CLIENT_ID'],
-            'client_secret': telegram['TELEGRAM_CLIENT_SECRET'],
-            'pkce_method': 'always',
-            'fetch_userinfo': False,
-            'scope': 'openid profile',
-            'claims_imports': {
-                'localpart': {'action': 'ignore', 'on_conflict': 'fail'},
-                'displayname': {'action': 'suggest', 'template': '{{ user.name }}'},
-            },
-        }
-    )
-if providers:
-    mas['upstream_oauth2'] = {'providers': providers}
-proxy = (
-    {'SOCKS5_CONFIG': 'socks5h://REDACTED_USER:REDACTED_PASSWORD@proxy.invalid:1080'}
-    if args.preview and settings.get('SOCKS5_CONFIG')
-    else settings
-)
-has_proxy = bool(proxy.get('SOCKS5_CONFIG'))
-if has_proxy:
-    proxy_url = proxy['SOCKS5_CONFIG']
-    parsed_proxy = urlsplit(proxy_url)
-    if (
-        parsed_proxy.scheme not in ('socks5', 'socks5h')
-        or not parsed_proxy.hostname
-        or not parsed_proxy.port
-    ):
-        raise ValueError('SOCKS5_CONFIG must specify a SOCKS5 host and port')
-    proxy_url = 'socks5h://' + proxy_url.split('://', 1)[1]
-    if '\n' in proxy_url or '\r' in proxy_url:
-        raise ValueError('SOCKS5_CONFIG must be a single line')
-    bypass = f'localhost,127.0.0.1,::1,synapse,mas,postgres,jwt,livekit,caddy,{domain},.{domain},{mas_domain},google.com,.google.com,googleapis.com,.googleapis.com,googleusercontent.com,.googleusercontent.com'
-    proxy_file = root / 'mas-proxy.env'
-    state_store.write_text(proxy_file, f'HTTPS_PROXY={proxy_url}\nNO_PROXY={bypass}\n')
-    proxy_file.chmod(0o600)
-elif (root / 'mas-proxy.env').exists():
-    (root / 'mas-proxy.env').unlink()
-if not args.preview:
-    defaults = config / 'mas-defaults.yaml'
-    if not defaults.exists():
-        if state.get('defaults_created'):
-            fail('Missing MAS password defaults; restore them from backup')
-        try:
-            generated_defaults = subprocess.check_output(
-                [
-                    'docker',
-                    'run',
-                    '--rm',
-                    '--network',
-                    'none',
-                    resolved['mas'],
-                    'config',
-                    'generate',
-                ],
-                text=True,
-                stdin=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                **state_store.child_process_options(),
-            )
-        except subprocess.SubprocessError:
+has_proxy = False
+if mas_mode == 'local':
+    if not args.preview:
+        if not (config / 'mas-signing.pem').exists():
             fail(
-                'MAS defaults generation failed. Check Docker, the locked MAS image and available resources, keep existing files, then retry generate/up'
+                'MAS signing key disappeared during generation; keep existing data and restore its saved key'
             )
-        state_store.write_text(defaults, generated_defaults)
-        defaults.chmod(0o600)
-    state['defaults_created'] = True
-    save_state()
-    try:
-        base = yaml.safe_load(defaults.read_text())
-    except yaml.YAMLError:
-        fail(
-            'MAS defaults YAML is invalid. Restore config/mas-defaults.yaml from this installation backup, then retry generate/up; credentials are not regenerated'
+        os.chown(config / 'mas-signing.pem', 65532, 65532)
+
+    mas = {
+        'http': {
+            'public_base': f'https://{mas_domain}/',
+            'issuer': f'https://{mas_domain}/',
+            'listeners': [
+                {
+                    'name': 'web',
+                    'resources': [
+                        {'name': r}
+                        for r in [
+                            'discovery',
+                            'human',
+                            'oauth',
+                            'graphql',
+                            'assets',
+                            'adminapi',
+                            'health',
+                        ]
+                    ],
+                    'binds': [{'host': '0.0.0.0', 'port': 8080}],
+                }
+            ],
+        },
+        'database': {
+            'host': database_host if database_mode == 'external' else 'postgres',
+            'port': int(database_port) if database_mode == 'external' else 5432,
+            'username': 'mas',
+            'password': db_mas,
+            'database': 'mas',
+            'ssl_mode': database_ssl if database_mode == 'external' else 'disable',
+            'min_connections': 1,
+            'max_connections': 3,
+        },
+        'matrix': {
+            'kind': 'synapse',
+            'homeserver': f'{domain}',
+            'endpoint': 'http://synapse:8008',
+            'secret': mas_shared,
+        },
+        'secrets': {
+            'encryption': secret('mas_encryption'),
+            'keys': [{'key_file': '/config/mas-signing.pem'}],
+        },
+        'passwords': {'enabled': True},
+        'account': {
+            'password_registration_enabled': True,
+            'password_registration_email_required': False,
+            'password_recovery_enabled': False,
+        },
+        'branding': {'service_name': 'Matrix'},
+        'email': {'from': f'Matrix <noreply@{domain}>', 'transport': 'blackhole'},
+        'telemetry': {'tracing': {'exporter': 'none'}, 'metrics': {'exporter': 'none'}},
+        'policy': {'data': {'client_registration': {'allow_host_mismatch': True}}},
+    }
+    if database_mode == 'external':
+        mas['database']['connect_timeout'] = 10
+        if database_ssl == 'verify-full':
+            mas['database']['ssl_ca_file'] = '/config/postgres-ca.pem'
+    mas['clients'] = [
+        {
+            'client_id': referral_client['client_id'],
+            'client_auth_method': 'client_secret_basic',
+            'client_secret': referral_client['client_secret'],
+        }
+    ]
+    mas['policy']['data']['admin_clients'] = [referral_client['client_id']]
+    google = (
+        {'GOOGLE_CLIENT_ID': 'REDACTED_CLIENT_ID', 'GOOGLE_CLIENT_SECRET': 'REDACTED_CLIENT_SECRET'}
+        if args.preview and settings.get('GOOGLE_CLIENT_ID')
+        else settings
+    )
+    providers = []
+    if google.get('GOOGLE_CLIENT_ID') and google.get('GOOGLE_CLIENT_SECRET'):
+        providers.append(
+            {
+                'id': '01K5WZ00000000000000000001',
+                'human_name': 'Google',
+                'brand_name': 'google',
+                'issuer': 'https://accounts.google.com',
+                'token_endpoint_auth_method': 'client_secret_post',
+                'client_id': google['GOOGLE_CLIENT_ID'],
+                'client_secret': google['GOOGLE_CLIENT_SECRET'],
+                'scope': 'openid profile email',
+                'claims_imports': {
+                    'localpart': {'action': 'ignore'},
+                    'displayname': {'action': 'suggest', 'template': '{{ user.name }}'},
+                    'email': {'action': 'suggest', 'template': '{{ user.email }}'},
+                    'account_name': {'template': '{{ user.email }}'},
+                },
+            }
         )
-    if not isinstance(base, dict):
-        fail(
-            'MAS defaults must contain a YAML mapping; restore its saved file, then retry generate/up'
+    telegram = (
+        {
+            'TELEGRAM_CLIENT_ID': 'REDACTED_CLIENT_ID',
+            'TELEGRAM_CLIENT_SECRET': 'REDACTED_CLIENT_SECRET',
+        }
+        if args.preview and settings.get('TELEGRAM_CLIENT_ID')
+        else settings
+    )
+    if telegram.get('TELEGRAM_CLIENT_ID') and telegram.get('TELEGRAM_CLIENT_SECRET'):
+        providers.append(
+            {
+                'id': '01K5WZ00000000000000000002',
+                'human_name': 'Telegram',
+                'enabled': True,
+                'issuer': 'https://oauth.telegram.org',
+                'token_endpoint_auth_method': 'client_secret_basic',
+                # Telegram gzips the bare JWKS URI without content negotiation; MAS lacks gzip decoding.
+                # This query returns the same live keys as plain JSON over the official HTTPS endpoint.
+                'jwks_uri': 'https://oauth.telegram.org/.well-known/jwks.json?format=json',
+                'client_id': telegram['TELEGRAM_CLIENT_ID'],
+                'client_secret': telegram['TELEGRAM_CLIENT_SECRET'],
+                'pkce_method': 'always',
+                'fetch_userinfo': False,
+                'scope': 'openid profile',
+                'claims_imports': {
+                    'localpart': {'action': 'ignore', 'on_conflict': 'fail'},
+                    'displayname': {'action': 'suggest', 'template': '{{ user.name }}'},
+                },
+            }
         )
-    base.pop('database', None)
-    mas = merge(base, mas)
-mas['account']['password_registration_enabled'] = registration == 'true'
-mas['account']['password_registration_token_required'] = referral_policy['registration_required']
-for provider in mas.get('upstream_oauth2', {}).get('providers', []):
-    provider['registration_token_required'] = referral_policy['registration_required']
-dump('mas.yaml', mas)
+    if providers:
+        mas['upstream_oauth2'] = {'providers': providers}
+    proxy = (
+        {'SOCKS5_CONFIG': 'socks5h://REDACTED_USER:REDACTED_PASSWORD@proxy.invalid:1080'}
+        if args.preview and settings.get('SOCKS5_CONFIG')
+        else settings
+    )
+    has_proxy = bool(proxy.get('SOCKS5_CONFIG'))
+    if has_proxy:
+        proxy_url = proxy['SOCKS5_CONFIG']
+        parsed_proxy = urlsplit(proxy_url)
+        if (
+            parsed_proxy.scheme not in ('socks5', 'socks5h')
+            or not parsed_proxy.hostname
+            or not parsed_proxy.port
+        ):
+            raise ValueError('SOCKS5_CONFIG must specify a SOCKS5 host and port')
+        proxy_url = 'socks5h://' + proxy_url.split('://', 1)[1]
+        if '\n' in proxy_url or '\r' in proxy_url:
+            raise ValueError('SOCKS5_CONFIG must be a single line')
+        bypass = f'localhost,127.0.0.1,::1,synapse,mas,postgres,jwt,livekit,caddy,{domain},.{domain},{mas_domain},google.com,.google.com,googleapis.com,.googleapis.com,googleusercontent.com,.googleusercontent.com'
+        proxy_file = root / 'mas-proxy.env'
+        state_store.write_text(proxy_file, f'HTTPS_PROXY={proxy_url}\nNO_PROXY={bypass}\n')
+        proxy_file.chmod(0o600)
+    elif (root / 'mas-proxy.env').exists():
+        (root / 'mas-proxy.env').unlink()
+    if not args.preview:
+        defaults = config / 'mas-defaults.yaml'
+        if not defaults.exists():
+            if state.get('defaults_created'):
+                fail('Missing MAS password defaults; restore them from backup')
+            try:
+                generated_defaults = subprocess.check_output(
+                    [
+                        'docker',
+                        'run',
+                        '--rm',
+                        '--network',
+                        'none',
+                        resolved['mas'],
+                        'config',
+                        'generate',
+                    ],
+                    text=True,
+                    stdin=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    **state_store.child_process_options(),
+                )
+            except subprocess.SubprocessError:
+                fail(
+                    'MAS defaults generation failed. Check Docker, the locked MAS image and available resources, keep existing files, then retry generate/up'
+                )
+            state_store.write_text(defaults, generated_defaults)
+            defaults.chmod(0o600)
+        state['defaults_created'] = True
+        save_state()
+        try:
+            base = yaml.safe_load(defaults.read_text())
+        except yaml.YAMLError:
+            fail(
+                'MAS defaults YAML is invalid. Restore config/mas-defaults.yaml from this installation backup, then retry generate/up; credentials are not regenerated'
+            )
+        if not isinstance(base, dict):
+            fail(
+                'MAS defaults must contain a YAML mapping; restore its saved file, then retry generate/up'
+            )
+        base.pop('database', None)
+        mas = merge(base, mas)
+    mas['account']['password_registration_enabled'] = registration == 'true'
+    mas['account']['password_registration_token_required'] = referral_policy[
+        'registration_required'
+    ]
+    for provider in mas.get('upstream_oauth2', {}).get('providers', []):
+        provider['registration_token_required'] = referral_policy['registration_required']
+    dump('mas.yaml', mas)
 
 dump(
     'livekit.yaml',
@@ -780,13 +829,18 @@ dump(
     },
 )
 
-(config / 'init-db.sql').write_text(
+init_sql = (
     postgres_setup.PRIVATE_ROLE_LOGGING_SQL
     + f"CREATE ROLE synapse LOGIN PASSWORD '{db_synapse}';\n"
     "CREATE DATABASE synapse OWNER synapse ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C' TEMPLATE template0;\n"
-    f"CREATE ROLE mas LOGIN PASSWORD '{db_mas}';\n"
-    "CREATE DATABASE mas OWNER mas ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C' TEMPLATE template0;\n"
 )
+if mas_mode == 'local':
+    init_sql += (
+        f"CREATE ROLE mas LOGIN PASSWORD '{db_mas}';\n"
+        "CREATE DATABASE mas OWNER mas ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C' TEMPLATE template0;\n"
+    )
+(config / 'init-db.sql').write_text(init_sql)
+
 
 discovery = {
     'm.homeserver': {'base_url': f'https://matrix.{domain}'},
@@ -821,7 +875,7 @@ web = {
 
 mas_site = (
     ''
-    if mas_domain in (domain, 'matrix.' + domain)
+    if mas_mode == 'external' or mas_domain in (domain, 'matrix.' + domain)
     else mas_domain + ' {\n    reverse_proxy mas:8080\n}\n'
 )
 matrix_routes = (
@@ -1071,9 +1125,11 @@ services = {
         depends_on=['caddy'],
     ),
 }
+if mas_mode == 'external':
+    del services['mas']
 if database_mode == 'external':
     del services['postgres']
-    for role in ('synapse', 'mas'):
+    for role in configuration_schema.owned_databases(settings):
         services[role].pop('depends_on', None)
     admin_user = settings.get('POSTGRES_ADMIN_USER', 'postgres')
     admin_password = 'REDACTED_PASSWORD' if args.preview else settings['POSTGRES_ADMIN_PASSWORD']
@@ -1105,7 +1161,7 @@ if database_mode == 'external':
         services['postgres-client']['volumes'].append(
             './config/postgres-ca.pem:/config/postgres-ca.pem:ro'
         )
-        for role in ('synapse', 'mas'):
+        for role in configuration_schema.owned_databases(settings):
             services[role]['volumes'].append('./config/postgres-ca.pem:/config/postgres-ca.pem:ro')
     if not args.preview:
         os.chown(pgpass, 999, 999)
@@ -1152,8 +1208,9 @@ if not args.preview:
     for name in ['homeserver.yaml', 'synapse-log.yaml', 'rtc-appservice.yaml']:
         os.chown(config / name, 991, 991)
         (config / name).chmod(0o600)
-    os.chown(config / 'mas.yaml', 65532, 65532)
-    (config / 'mas.yaml').chmod(0o600)
+    if mas_mode == 'local':
+        os.chown(config / 'mas.yaml', 65532, 65532)
+        (config / 'mas.yaml').chmod(0o600)
     for name in ['Caddyfile', 'haproxy.cfg']:
         (config / name).chmod(0o644)
     for path in public.iterdir():
