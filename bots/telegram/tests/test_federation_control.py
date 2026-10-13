@@ -194,6 +194,7 @@ class FederationControlTests(unittest.TestCase):
                 'private_key': 'FICTIONAL_SECRET',
             },
         }
+        self.bridge.db.commit()
         result = self.call('fed_read', operation='operation', target=OPERATION)
         self.assertEqual(result['result']['safe_error'], 'timeout')
         self.assertNotIn('FICTIONAL_SECRET', json.dumps(result))
@@ -224,6 +225,20 @@ class FederationControlTests(unittest.TestCase):
         self.assertEqual(self.call('federation_notifications')['notifications'], [])
         rows = self.bridge.db.execute('SELECT state FROM telegram_notifications').fetchall()
         self.assertTrue(all(row['state'] == 'dismissed' for row in rows))
+
+    def test_notification_feed_revalidates_earlier_recipient_after_later_network_call(self):
+        self.request()
+        api = self.bridge.apis['example.org']
+        original = api.active_user
+
+        def revoke_earlier(user_id):
+            if user_id == 'MAS-USER-11':
+                self.call('logout', uid=10)
+            return original(user_id)
+
+        with patch.object(api, 'active_user', side_effect=revoke_earlier):
+            result = self.call('federation_notifications')['notifications']
+        self.assertEqual([item['uid'] for item in result], [11])
 
     def test_notifications_never_deliver_to_revoked_administrator(self):
         self.request()

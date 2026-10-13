@@ -3,6 +3,8 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor
 import time
 import unittest
 from unittest.mock import patch
@@ -58,6 +60,26 @@ class ManagementTests(unittest.TestCase):
 
     def call(self, action, uid=10, **extras):
         return self.bridge.handle({'action': action, 'server': 'example.org', 'uid': uid, **extras})
+
+    def test_management_read_releases_lock_and_rechecks_authorization(self):
+        started, release = threading.Event(), threading.Event()
+
+        def slow(*args, **kwargs):
+            started.set()
+            if not release.wait(3):
+                raise TimeoutError()
+            return {'ok': True}
+
+        with patch('bridge.run_control', side_effect=slow), ThreadPoolExecutor(2) as pool:
+            result = pool.submit(self.call, 'manage_read', operation='status')
+            try:
+                self.assertTrue(started.wait(1))
+                self.assertTrue(pool.submit(self.call, 'logout').result(timeout=1))
+                self.assertIn('example.org', self.bridge.handle({'action': 'servers'}))
+            finally:
+                release.set()
+            with self.assertRaises(BotError):
+                result.result(timeout=1)
 
     def test_current_mas_admin_role_required_for_reads_and_writes(self):
         self.api.admin = False

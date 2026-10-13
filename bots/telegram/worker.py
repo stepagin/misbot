@@ -9,6 +9,7 @@ import logging
 import os
 from pathlib import Path
 import sqlite3
+import secrets
 import threading
 import time
 
@@ -20,10 +21,12 @@ LOG = logging.getLogger('worker')
 
 
 class TelegramError(BotError):
-    def __init__(self, code, description):
+    def __init__(self, code, description, retry_after=0):
         super().__init__('Telegram не подтвердил запрос. Повторите позже.')
+        self.retry_after = retry_after if isinstance(retry_after, (int, float)) else 0
         self.code = code
         self.unchanged = 'message is not modified' in description.lower()
+        self.permanent = code in (400, 403, 404)
         self.uneditable = code == 400 and any(
             reason in description.lower()
             for reason in (
@@ -111,7 +114,11 @@ class Bot:
         )
         data = r.json()
         if r.status_code != 200 or not data.get('ok'):
-            raise TelegramError(data.get('error_code', r.status_code), data.get('description', ''))
+            raise TelegramError(
+                data.get('error_code', r.status_code),
+                data.get('description', ''),
+                data.get('parameters', {}).get('retry_after', 0),
+            )
         return data['result']
 
     @property
@@ -157,7 +164,7 @@ class Bot:
             payload['parse_mode'] = parse_mode
         if buttons:
             payload['reply_markup'] = {'inline_keyboard': buttons}
-        response = self.telegram('sendMessage', payload)
+        response = self.deliver('sendMessage', payload)
         code_count = sum(x.get('type') == 'code' for x in response.get('entities', []))
         LOG.info('Telegram reply accepted code_entities=%s', code_count)
         return response
@@ -185,24 +192,105 @@ class Bot:
         }
         if parse_mode:
             payload['parse_mode'] = parse_mode
+        delivery_key = 'delivery:screen:' + key
+        self.delete_state(delivery_key)
         if current and current['payload'] == payload and not force_refresh:
             return {'message_id': current['message_id']}
+        method = 'editMessageText' if current else 'sendMessage'
         if current:
-            try:
-                result = self.telegram(
-                    'editMessageText', {**payload, 'message_id': current['message_id']}
+            payload['message_id'] = current['message_id']
+        return self.deliver(method, payload, navigation=key, identifier=delivery_key)
+
+    def delete_state(self, key):
+        with self.db_lock:
+            self.db.execute('DELETE FROM state WHERE key=?', (key,))
+            self.db.commit()
+
+    def finish_delivery(self, key, item):
+        if key.startswith('delivery:notification:'):
+            self.state(key, item)
+        else:
+            if item['status'] == 'failed':
+                failures = self.state('delivery_failures') or []
+                failures.append(
+                    {
+                        'chat': item['payload'].get('chat_id'),
+                        'time': time.time(),
+                        'attempts': item['attempts'],
+                        'error': item['error'],
+                    }
                 )
-                self.state(key, {'message_id': current['message_id'], 'payload': payload})
-                return result
+                self.state('delivery_failures', failures[-100:])
+            self.delete_state(key)
+
+    def deliver(self, method, payload, navigation=None, identifier=None, timeout=25):
+        """Persist delivery before I/O; transport failures never replay the command."""
+        key = identifier or 'delivery:' + secrets.token_hex(16)
+        item = self.state(key)
+        if item is None:
+            item = {
+                'method': method,
+                'payload': payload,
+                'navigation': navigation,
+                'status': 'pending',
+                'attempts': 0,
+                'next_attempt': 0,
+            }
+            self.state(key, item)
+        return self.deliver_pending(key, item, timeout=timeout)
+
+    def deliver_pending(self, key, item, timeout=25):
+        if item['status'] != 'pending' or item['next_attempt'] > time.time():
+            return item.get('response', {})
+        item['attempts'] += 1
+        try:
+            try:
+                response = self.telegram(item['method'], item['payload'], timeout=timeout)
             except TelegramError as error:
-                if error.unchanged:
-                    self.state(key, {'message_id': current['message_id'], 'payload': payload})
-                    return {'message_id': current['message_id']}
-                if not error.uneditable:
+                if error.unchanged and item['method'] == 'editMessageText':
+                    response = {'message_id': item['payload']['message_id']}
+                elif error.uneditable and item['method'] == 'editMessageText':
+                    item['method'] = 'sendMessage'
+                    item['payload'].pop('message_id', None)
+                    self.state(key, item)
+                    response = self.telegram(item['method'], item['payload'], timeout=timeout)
+                else:
                     raise
-        result = self.telegram('sendMessage', payload)
-        self.state(key, {'message_id': result['message_id'], 'payload': payload})
-        return result
+        except (TelegramError, requests.RequestException, ValueError) as error:
+            permanent = isinstance(error, TelegramError) and error.permanent
+            item['status'] = 'failed' if permanent or item['attempts'] >= 8 else 'pending'
+            retry_after = error.retry_after if isinstance(error, TelegramError) else 0
+            item['next_attempt'] = time.time() + max(
+                retry_after, min(3600, 5 * 2 ** (item['attempts'] - 1))
+            )
+            item['error'] = type(error).__name__
+            if item['status'] == 'failed':
+                self.finish_delivery(key, item)
+            else:
+                self.state(key, item)
+            LOG.warning('Telegram delivery status=%s type=%s', item['status'], item['error'])
+            return {}
+        item['status'] = 'sent'
+        item['response'] = {'message_id': response.get('message_id')}
+        self.finish_delivery(key, item)
+        if item.get('navigation') and response.get('message_id'):
+            payload = {k: v for k, v in item['payload'].items() if k != 'message_id'}
+            self.state(
+                item['navigation'], {'message_id': response['message_id'], 'payload': payload}
+            )
+        return response
+
+    def retry_deliveries(self):
+        # Limit each pass so offline recipients cannot monopolize long polling.
+        with self.db_lock:
+            rows = self.db.execute(
+                "SELECT key,value FROM state WHERE key LIKE 'delivery:%' "
+                "AND key NOT LIKE 'delivery:notification:%' "
+                "AND json_extract(value, '$.next_attempt')<=? ORDER BY rowid LIMIT 2",
+                (time.time(),),
+            ).fetchall()
+        for key, value in rows:
+            self.deliver_pending(key, json.loads(value), timeout=5)
 
     def back(self, action='menu', title='Назад'):
         return [self.button(title, action)]
@@ -868,7 +956,7 @@ class Bot:
         if callback:
             try:
                 self.telegram('answerCallbackQuery', {'callback_query_id': callback['id']})
-            except BotError:
+            except (BotError, requests.RequestException, ValueError):
                 pass
         text = callback.get('data', '') if callback else message.get('text', '').strip()
         command, _, argument = text.partition(' ')
@@ -1027,28 +1115,57 @@ class Bot:
             )
 
     def notifications(self):
-        """Acknowledge only accepted Telegram messages; retry acknowledgements without resending."""
+        """Acknowledge terminal delivery outcomes; retry acknowledgements without resending."""
         self.servers()
         name = self.server_name
         feed = bridge_call({'action': 'federation_notifications', 'server': name})
+        attempted = 0
         for item in feed['notifications']:
             key = 'notification:' + str(item['uid']) + ':' + item['id']
-            if not self.state(key):
-                action, title = (
-                    ('federation', 'Открыть федерацию')
-                    if item.get('request_id')
-                    else ('menu', 'Открыть меню')
+            delivery_key = 'delivery:' + key
+            try:
+                if not self.state(key):
+                    saved = self.state(delivery_key)
+                    due = saved is None or (
+                        saved['status'] == 'pending' and saved['next_attempt'] <= time.time()
+                    )
+                    if due:
+                        if attempted >= 4:
+                            continue
+                        attempted += 1
+                    action, title = (
+                        ('federation', 'Открыть федерацию')
+                        if item.get('request_id')
+                        else ('menu', 'Открыть меню')
+                    )
+                    self.deliver(
+                        'sendMessage',
+                        {
+                            'chat_id': item['uid'],
+                            'text': item['message'],
+                            'reply_markup': {'inline_keyboard': [self.back(action, title)]},
+                            'link_preview_options': {'is_disabled': True},
+                        },
+                        identifier=delivery_key,
+                        timeout=5,
+                    )
+                    delivery = self.state(delivery_key)
+                    if delivery['status'] == 'pending':
+                        continue
+                    self.state(key, {'status': delivery['status'], **delivery.get('response', {})})
+                bridge_call(
+                    {
+                        'action': 'federation_notifications_ack',
+                        'server': name,
+                        'uid': item['uid'],
+                        'id': item['id'],
+                        'delivery_status': self.state(key).get('status', 'sent'),
+                    }
                 )
-                response = self.send(item['uid'], item['message'], [self.back(action, title)])
-                self.state(key, {'message_id': response['message_id']})
-            bridge_call(
-                {
-                    'action': 'federation_notifications_ack',
-                    'server': name,
-                    'uid': item['uid'],
-                    'id': item['id'],
-                }
-            )
+                self.delete_state(delivery_key)
+                self.delete_state(key)
+            except (BotError, OSError, ValueError) as error:
+                LOG.warning('notification delivery failed type=%s', type(error).__name__)
 
     def polling(self):
         while True:
@@ -1086,7 +1203,6 @@ class Bot:
                     },
                     timeout=40,
                 )
-                self.last_poll_success = time.monotonic()
                 for update in updates:
                     self.process(update)
                     offset = update['update_id'] + 1
@@ -1095,6 +1211,8 @@ class Bot:
                             "INSERT OR REPLACE INTO state VALUES ('offset',?)", (str(offset),)
                         )
                         self.db.commit()
+                self.last_poll_success = time.monotonic()
+                self.retry_deliveries()
                 try:
                     self.notifications()
                 except Exception as error:
