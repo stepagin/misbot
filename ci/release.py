@@ -17,8 +17,6 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 VERSION = r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)'
-BUILD_VERSION = VERSION + r'(?:-build\.(0|[1-9][0-9]*))?'
-VERSION_FILES = ('installer/release.json', 'installer/SHA256SUMS')
 
 
 class Error(RuntimeError):
@@ -79,13 +77,12 @@ class GitHub:
 
 def release_version(branch='', root=ROOT):
     number = json.loads((root / 'installer/release.json').read_text())['version']
-    if not isinstance(number, str) or not re.fullmatch(BUILD_VERSION, number):
-        raise Error('release.json must contain major.minor.patch or major.minor.patch-build.N')
-    base = number.split('-build.', 1)[0]
-    if branch.startswith('release/') and branch != 'release/' + base:
-        raise Error('Release branch must be release/' + base + ' to match release.json')
+    if not isinstance(number, str) or not re.fullmatch(VERSION, number):
+        raise Error('release.json must contain the owner-selected stable major.minor.patch version')
+    if branch.startswith('release/') and branch != 'release/' + number:
+        raise Error('Release branch must be release/' + number + ' to match release.json')
     notes = (root / 'installer/release-notes.md').read_text()
-    if not notes.splitlines() or notes.splitlines()[0] != '# Misbot ' + base:
+    if not notes.splitlines() or notes.splitlines()[0] != '# Misbot ' + number:
         raise Error('Release notes must describe the version in release.json')
     return number
 
@@ -115,9 +112,9 @@ def open_pr(api, branch, sha, number):
             'and deterministic release archive.\n\n'
             'Data migrations run automatically after a verified backup. '
             'Review compatibility and recovery before merging.\n\n'
-            'Build versions use `' + number + '-build.N`. After merging, GitHub Actions '
-            'commits the stable version `' + number + '`, tags that commit, '
-            'and publishes its verified installer and checksum.'
+            'After merging, GitHub Actions tags the validated merge commit as `' + number + '` '
+            'and publishes its verified installer and checksum. The version in release.json '
+            'is preserved unchanged.'
         )
         try:
             result = api.call(
@@ -179,16 +176,11 @@ def merged_release(api, branch, sha, number):
     return True
 
 
-def publish_tag(api, branch, sha, number, original_sha=None):
+def publish_tag(api, branch, sha, number):
     if not re.fullmatch(VERSION, number):
         raise Error('Only stable versions can be tagged')
-    if not merged_release(api, branch, original_sha or sha, number):
+    if not merged_release(api, branch, sha, number):
         return None
-    if original_sha and original_sha != sha:
-        base = api.call('')['default_branch']
-        comparison = api.call('/compare/' + sha + '...' + urllib.parse.quote(base, safe=''))
-        if comparison['status'] not in ('identical', 'ahead'):
-            raise Error('Prepared release commit is no longer on the GitHub default branch')
     current = tag_target(api, number)
     if current is not None:
         if current != sha:
@@ -221,123 +213,41 @@ def clean_checkout(root):
         raise Error('Release automation requires a clean tracked checkout')
 
 
-def prepare_version(root, sha, number):
-    """Create the same local commit on every retry of the original event."""
-    clean_checkout(root)
-    if git(root, 'rev-parse', 'HEAD') != sha:
-        raise Error('Checkout must match the original event commit')
-    subprocess.run([sys.executable, 'installer/build.py', '--check'], cwd=root, check=True)
-    path = root / VERSION_FILES[0]
-    metadata = json.loads(path.read_text())
-    if metadata['version'] == number:
-        return sha
-    metadata['version'] = number
-    path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + '\n')
-    subprocess.run([sys.executable, 'installer/build.py'], cwd=root, check=True)
-    changed = set(git(root, 'diff', '--name-only').splitlines())
-    if not changed <= set(VERSION_FILES):
-        raise Error('Version preparation changed unexpected tracked files')
-    git(root, 'add', '--', *VERSION_FILES)
-    staged = set(git(root, 'diff', '--cached', '--name-only').splitlines())
-    if not staged or not staged <= set(VERSION_FILES):
-        raise Error('Version commit contains unexpected files')
-    git(root, 'diff', '--cached', '--check')
-    date = git(root, 'show', '-s', '--format=%cI', sha)
-    environment = dict(os.environ)
-    environment.update(
-        GIT_AUTHOR_NAME='github-actions[bot]',
-        GIT_COMMITTER_NAME='github-actions[bot]',
-        GIT_AUTHOR_EMAIL='41898282+github-actions[bot]@users.noreply.github.com',
-        GIT_COMMITTER_EMAIL='41898282+github-actions[bot]@users.noreply.github.com',
-        GIT_AUTHOR_DATE=date,
-        GIT_COMMITTER_DATE=date,
-    )
-    git(
-        root,
-        '-c',
-        'commit.gpgsign=false',
-        'commit',
-        '-m',
-        'chore: version ' + number,
-        env=environment,
-    )
-    clean_checkout(root)
-    return git(root, 'rev-parse', 'HEAD')
-
-
-def prepare(api, branch, sha, run_number, event, ref_type, root=ROOT):
+def prepare(api, branch, sha, event, ref_type, root=ROOT):
     number = release_version(branch if ref_type == 'branch' else '', root)
-    base = number.split('-build.', 1)[0]
-    state = dict(kind='check', branch=branch, original=sha, prepared=sha, version=number)
+    state = dict(kind='check', branch=branch, original=sha, version=number)
     clean_checkout(root)
     if git(root, 'rev-parse', 'HEAD') != sha:
         raise Error('Checkout must match the original event commit')
     if ref_type == 'tag':
-        if number != base or branch.removeprefix('v') != number:
-            raise Error('Release tag must match a stable version in release.json')
+        if branch.removeprefix('v') != number:
+            raise Error('Release tag must match the stable version in release.json')
         state['kind'] = 'tag'
     elif event == 'push' and branch.startswith('release/'):
-        if not re.fullmatch(r'[1-9][0-9]*', run_number):
-            raise Error('GITHUB_RUN_NUMBER must be a positive integer')
-        previous = int(number.split('-build.')[1]) if '-build.' in number else 0
-        number = base + '-build.' + str(max(previous + 1, int(run_number)))
-        state['kind'] = 'build'
+        state['kind'] = 'pr'
     elif event == 'push' and branch == api.call('')['default_branch']:
-        if merged_release(api, branch, sha, base):
-            number = base
-            state['kind'] = 'stable'
-    if state['kind'] in ('build', 'stable'):
-        state['prepared'] = prepare_version(root, sha, number)
-        state['version'] = number
+        if merged_release(api, branch, sha, number):
+            state['kind'] = 'release'
     return state
-
-
-def push_prepared(root, branch, original, prepared, allow_descendant=False):
-    ref = 'refs/heads/' + branch
-    remote = git(root, 'ls-remote', '--refs', 'origin', ref).split()
-    if not remote:
-        raise Error('Release branch no longer exists')
-    if remote[0] == prepared:
-        return
-    if remote[0] != original:
-        if allow_descendant:
-            # A stable retry may finish tagging an already-pushed commit after
-            # newer work landed. Fetch and prove ancestry without changing the ref.
-            git(root, 'fetch', '--no-tags', 'origin', ref)
-            current = git(root, 'rev-parse', 'FETCH_HEAD')
-            if git(root, 'merge-base', prepared, current) == prepared:
-                return
-        raise Error('Release branch advanced; refusing to overwrite newer commits')
-    # A normal push also rejects a concurrent change after ls-remote.
-    git(root, 'push', 'origin', prepared + ':' + ref)
 
 
 def finalize(api, state, root=ROOT):
     clean_checkout(root)
-    if git(root, 'rev-parse', 'HEAD') != state['prepared']:
-        raise Error('Validated checkout differs from the prepared release commit')
+    sha = state['original']
+    if git(root, 'rev-parse', 'HEAD') != sha:
+        raise Error('Validated checkout differs from the original event commit')
     if release_version(root=root) != state['version']:
-        raise Error('Validated release metadata differs from the prepared version')
-    kind = state['kind']
+        raise Error('Validated release metadata differs from the original version')
+    kind, branch, number = (state[key] for key in ('kind', 'branch', 'version'))
     if kind == 'tag':
-        return state['branch']
-    if kind not in ('build', 'stable'):
-        return None
-    branch, original, prepared = (state[key] for key in ('branch', 'original', 'prepared'))
-    if prepared != original and git(root, 'rev-parse', 'HEAD^') != original:
-        raise Error('Prepared commit must be a direct child of the original event')
-    base = state['version'].split('-build.', 1)[0]
-    if kind == 'stable':
-        if not merged_release(api, branch, original, base):
-            raise Error('The original commit is no longer an authorized release merge')
-        current = tag_target(api, base)
-        if current is not None and current != prepared:
-            raise Error('Release tag already points to another commit; it will not be moved')
-    push_prepared(root, branch, original, prepared, allow_descendant=kind == 'stable')
-    if kind == 'build':
-        open_pr(api, branch, prepared, base)
-        return None
-    return publish_tag(api, branch, prepared, base, original_sha=original)
+        if tag_target(api, branch) != sha:
+            raise Error('Release tag no longer points to the validated event commit')
+        return branch
+    if kind == 'pr':
+        open_pr(api, branch, sha, number)
+    elif kind == 'release':
+        return publish_tag(api, branch, sha, number)
+    return None
 
 
 def main():
@@ -356,12 +266,14 @@ def main():
             api,
             branch,
             sha,
-            os.environ.get('GITHUB_RUN_NUMBER', ''),
             os.environ.get('GITHUB_EVENT_NAME', ''),
             os.environ.get('GITHUB_REF_TYPE', ''),
         )
         state_path.write_text(json.dumps(state))
-        print('Prepared Misbot version', state['version'])
+        print('Validated Misbot version', state['version'])
+        if os.environ.get('GITHUB_OUTPUT'):
+            with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+                output.write('version=' + state['version'] + '\n')
     else:
         state = json.loads(state_path.read_text())
         if state['original'] != sha or state['branch'] != branch:

@@ -73,7 +73,7 @@ try:
     assert os.geteuid() == 0
     if not (BUNDLE / 'referral-bot').is_dir():
         archive_path = ROOT.parent / 'matrix-installer.tar.gz'
-        run(['python3', str(BUNDLE / 'build.py'), '--output', str(archive_path)])
+        run(['python3', str(BUNDLE / 'build.py'), '--release', '--output', str(archive_path)])
         with tarfile.open(archive_path) as archive:
             for member in archive:
                 parts = Path(member.name).parts

@@ -20,6 +20,7 @@ class DistributionTests(unittest.TestCase):
                 [
                     sys.executable,
                     str(ROOT / 'installer/build.py'),
+                    '--release',
                     '--output',
                     str(base / 'matrix-installer.tar.gz'),
                 ],

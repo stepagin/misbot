@@ -155,7 +155,7 @@ def verify_compact_archive(path: Path) -> str:
 
 
 def build_checks() -> None:
-    run('build archive and checksums', [sys.executable, 'installer/build.py'])
+    run('build archive and checksums', [sys.executable, 'installer/build.py', '--release'])
     first = verify_archive(ROOT / 'dist/matrix-installer.tar.gz')
     import json
 
@@ -164,7 +164,10 @@ def build_checks() -> None:
     compact_first = verify_compact_archive(ROOT / 'dist' / compact_name)
     with tempfile.TemporaryDirectory(prefix='misbot-rebuild-') as folder:
         second = Path(folder) / 'matrix-installer.tar.gz'
-        run('reproducible build', [sys.executable, 'installer/build.py', '--output', str(second)])
+        run(
+            'reproducible build',
+            [sys.executable, 'installer/build.py', '--release', '--output', str(second)],
+        )
         if verify_archive(second) != first:
             raise CheckError('Repeated builds produced different archives')
         if verify_compact_archive(second.with_name(compact_name)) != compact_first:

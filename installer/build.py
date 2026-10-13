@@ -2,11 +2,14 @@
 """Build a deterministic source-only archive, using an explicit allowlist."""
 
 import argparse
+from contextlib import contextmanager
 import gzip
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
+import re
 import tarfile
 
 root = Path(__file__).resolve().parent
@@ -15,7 +18,63 @@ parser.add_argument('--output', type=Path, default=root.parent / 'dist/matrix-in
 parser.add_argument(
     '--check', action='store_true', help='verify that SHA256SUMS matches the current source files'
 )
+parser.add_argument(
+    '--release',
+    action='store_true',
+    help='build the specified stable version without a local counter',
+)
 args = parser.parse_args()
+
+
+@contextmanager
+def build_version(version):
+    if not re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', version):
+        parser.error('release.json must contain the owner-specified major.minor.patch version')
+    if args.release or any(
+        os.environ.get(name, '').lower() not in ('', '0', 'false')
+        for name in ('CI', 'GITHUB_ACTIONS')
+    ):
+        yield version
+        return
+    state_dir = root.parent / 'dist'
+    state_dir.mkdir(parents=True, exist_ok=True)
+    lock = state_dir / '.local-build.lock'
+    try:
+        lock_file = lock.open('x')
+    except FileExistsError:
+        parser.error('Local build is locked; check running builds before removing ' + str(lock))
+    try:
+        with lock_file:
+            lock_file.write(str(os.getpid()) + '\n')
+        state_path = state_dir / '.local-build.json'
+        counters = json.loads(state_path.read_text()) if state_path.exists() else {}
+        if not isinstance(counters, dict) or any(
+            type(number) is not int or number < 0 for number in counters.values()
+        ):
+            parser.error('Invalid local build counter: ' + str(state_path))
+        previous = counters.get(version, 0)
+        # Preserve numbering when adopting archives built before the local counter existed.
+        for path in state_dir.glob('misbot-setup-' + version + '-build.*.tar.gz'):
+            match = re.fullmatch(
+                re.escape('misbot-setup-' + version) + r'-build\.([0-9]+)\.tar\.gz', path.name
+            )
+            if match:
+                previous = max(previous, int(match[1]))
+        counters[version] = previous + 1
+        temporary = state_path.with_suffix('.tmp')
+        temporary.write_text(json.dumps(counters, indent=2) + '\n')
+        temporary.replace(state_path)
+        yield version + '-build.' + str(counters[version])
+    finally:
+        lock.unlink()
+
+
+def manifest_for(files):
+    return ''.join(
+        hashlib.sha256(data).hexdigest() + '  ' + name + '\n' for name, data in files.items()
+    ).encode()
+
+
 names = [
     'LICENSE',
     'third-party-licenses.md',
@@ -174,16 +233,13 @@ for name in (
         / name
     )
 payloads = {name: sources[name].read_bytes() for name in names}
-manifest = ''.join(
-    hashlib.sha256(payloads[name]).hexdigest() + '  ' + name + '\n' for name in names
-).encode()
+manifest = manifest_for(payloads)
 if args.check:
     if not (root / 'SHA256SUMS').is_file() or (root / 'SHA256SUMS').read_bytes() != manifest:
         parser.exit(1, 'SHA256SUMS is stale; run python3 installer/build.py\n')
     print('SHA256SUMS matches the current source files')
     raise SystemExit(0)
 (root / 'SHA256SUMS').write_bytes(manifest)
-payloads['SHA256SUMS'] = manifest
 
 
 def write_archive(path, files):
@@ -205,28 +261,35 @@ def write_archive(path, files):
     print('SHA256 ' + digest)
 
 
-# Preserve the established release asset/layout for existing update clients.
-write_archive(args.output, payloads)
-compact = {'.misbot/' + name: data for name, data in payloads.items()}
-compact['misbot.py'] = (root / 'launch.py').read_bytes()
-product_version = json.loads(payloads['release.json'])['version']
-compact['README.md'] = (
-    '# Misbot ' + product_version + '\n\n'
-    'Запуск: `sudo python3 misbot.py ui`. Служебные исходники и документация '
-    'находятся в `.misbot/`. Установка по умолчанию: `/opt/matrix-stack`.\n\n'
-    'Черновик хранится приватно в `~/.local/state/misbot/wizard/`, отдельно '
-    'от комплекта и данных сервера. Команды просмотра и сброса: '
-    '`sudo python3 misbot.py config draft show` и '
-    '`sudo python3 misbot.py config draft reset --confirm discard-draft`. '
-    'Параметр `--directory /абсолютный/путь` выбирает другой черновик.\n\n'
-    'Проверка комплекта: `sha256sum -c SHA256SUMS`. '
-    'Лицензия Misbot MIT: `.misbot/LICENSE`; '
-    'сторонние уведомления: `.misbot/third-party-licenses.md`.\n\n'
-    'Обновление существующего сервера: используйте совместимый '
-    '`matrix-installer.tar.gz` либо укажите `.misbot/` этого комплекта '
-    'как `--source`. Ключи и данные находятся в каталоге установки.\n'
-).encode()
-compact['SHA256SUMS'] = ''.join(
-    hashlib.sha256(data).hexdigest() + '  ' + name + '\n' for name, data in compact.items()
-).encode()
-write_archive(args.output.with_name('misbot-setup-' + product_version + '.tar.gz'), compact)
+metadata = json.loads(payloads['release.json'])
+with build_version(metadata['version']) as product_version:
+    if metadata['version'] != product_version:
+        metadata['version'] = product_version
+        payloads['release.json'] = (
+            json.dumps(metadata, ensure_ascii=False, indent=2) + '\n'
+        ).encode()
+    payloads['SHA256SUMS'] = manifest_for(payloads)
+    # Preserve the established release asset/layout for existing update clients.
+    write_archive(args.output, payloads)
+    compact = {'.misbot/' + name: data for name, data in payloads.items()}
+    compact['misbot.py'] = (root / 'launch.py').read_bytes()
+    compact['README.md'] = (
+        '# Misbot ' + product_version + '\n\n'
+        'Запуск: `sudo python3 misbot.py ui`. Служебные исходники и документация '
+        'находятся в `.misbot/`. Установка по умолчанию: `/opt/matrix-stack`.\n\n'
+        'Черновик хранится приватно в `~/.local/state/misbot/wizard/`, отдельно '
+        'от комплекта и данных сервера. Команды просмотра и сброса: '
+        '`sudo python3 misbot.py config draft show` и '
+        '`sudo python3 misbot.py config draft reset --confirm discard-draft`. '
+        'Параметр `--directory /абсолютный/путь` выбирает другой черновик.\n\n'
+        'Проверка комплекта: `sha256sum -c SHA256SUMS`. '
+        'Лицензия Misbot MIT: `.misbot/LICENSE`; '
+        'сторонние уведомления: `.misbot/third-party-licenses.md`.\n\n'
+        'Обновление существующего сервера: используйте совместимый '
+        '`matrix-installer.tar.gz` либо укажите `.misbot/` этого комплекта '
+        'как `--source`. Ключи и данные находятся в каталоге установки.\n'
+    ).encode()
+    compact['SHA256SUMS'] = ''.join(
+        hashlib.sha256(data).hexdigest() + '  ' + name + '\n' for name, data in compact.items()
+    ).encode()
+    write_archive(args.output.with_name('misbot-setup-' + product_version + '.tar.gz'), compact)

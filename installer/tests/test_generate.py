@@ -70,7 +70,7 @@ class GeneratorTests(unittest.TestCase):
     def test_build_keeps_all_shipped_document_links(self):
         package = Path(self.temp.name) / 'public.tar.gz'
         subprocess.run(
-            [sys.executable, str(BUNDLE / 'build.py'), '--output', str(package)],
+            [sys.executable, str(BUNDLE / 'build.py'), '--release', '--output', str(package)],
             check=True,
             stdout=subprocess.DEVNULL,
         )
@@ -188,7 +188,7 @@ class GeneratorTests(unittest.TestCase):
         self.initialize()
         package = Path(self.temp.name) / 'installer.tar.gz'
         subprocess.run(
-            [sys.executable, str(BUNDLE / 'build.py'), '--output', str(package)],
+            [sys.executable, str(BUNDLE / 'build.py'), '--release', '--output', str(package)],
             check=True,
             stdout=subprocess.DEVNULL,
         )
@@ -328,7 +328,7 @@ class GeneratorTests(unittest.TestCase):
         )
         archive_path = Path(self.temp.name) / 'matrix-installer.tar.gz'
         subprocess.run(
-            [sys.executable, str(BUNDLE / 'build.py'), '--output', str(archive_path)],
+            [sys.executable, str(BUNDLE / 'build.py'), '--release', '--output', str(archive_path)],
             check=True,
             capture_output=True,
             text=True,

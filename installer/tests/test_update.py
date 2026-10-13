@@ -330,7 +330,7 @@ class UpdateTests(unittest.TestCase):
         self.addCleanup(package_folder.cleanup)
         archive = Path(package_folder.name) / 'source.tar.gz'
         subprocess.run(
-            [sys.executable, str(bundle / 'build.py'), '--output', str(archive)],
+            [sys.executable, str(bundle / 'build.py'), '--release', '--output', str(archive)],
             check=True,
             stdout=subprocess.DEVNULL,
         )

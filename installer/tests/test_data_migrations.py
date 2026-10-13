@@ -394,6 +394,7 @@ class ReleaseDataMigrationTests(unittest.TestCase):
             [
                 sys.executable,
                 str(Path(__file__).resolve().parents[1] / 'build.py'),
+                '--release',
                 '--output',
                 str(archive),
             ],
