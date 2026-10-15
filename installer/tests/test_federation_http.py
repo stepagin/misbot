@@ -135,6 +135,8 @@ class RealHTTPS(unittest.TestCase):
             ports = {}
             roots = {}
             processes = []
+            # Keep listener startup independent of forkserver re-imports after test discovery.
+            context = multiprocessing.get_context('fork')
             for server in ('a.example', 'b.example'):
                 sock = socket.socket()
                 sock.bind(('127.0.0.1', 0))
@@ -155,8 +157,8 @@ class RealHTTPS(unittest.TestCase):
                 federation.setup(root, {'domain': server})
             try:
                 for server in roots:
-                    ready = multiprocessing.Event()
-                    process = multiprocessing.Process(
+                    ready = context.Event()
+                    process = context.Process(
                         target=listener, args=(roots[server], ports, cert, key, ready)
                     )
                     process.start()

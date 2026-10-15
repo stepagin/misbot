@@ -118,6 +118,23 @@ class StorageTests(unittest.TestCase):
                 self.backend.load()
         self.assertEqual(self.backend.path.read_bytes(), before)
 
+    def test_read_keeps_open_snapshot_when_writer_replaces_path(self):
+        path = self.backend.path
+        updated = {**self.initial, 'events': {'published': {'action': 'api-disable', 'time': 1}}}
+        replacement = path.with_name('replacement.json')
+        state_store.write_json(replacement, updated)
+        original_open = os.open
+
+        def open_then_replace(opened_path, flags):
+            fd = original_open(opened_path, flags)
+            os.replace(replacement, path)
+            self.assertEqual(os.fstat(fd).st_nlink, 0)
+            return fd
+
+        with patch.object(federation_store.os, 'open', side_effect=open_then_replace):
+            self.assertEqual(federation_store.read(path), self.initial)
+        self.assertEqual(federation_store.read(path), updated)
+
     def test_private_file_guards_preserved(self):
         path = self.backend.path
         original = path.read_bytes()
