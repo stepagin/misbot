@@ -26,6 +26,8 @@ import state_store
 
 class FederationTests(unittest.TestCase):
     def setUp(self):
+        # Signed envelopes and invitation deadlines share one controlled fixture clock.
+        self.enterContext(patch.object(time, 'time', return_value=int(time.time())))
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.backends = {}
