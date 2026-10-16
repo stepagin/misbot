@@ -593,10 +593,9 @@ dump(
         'sender_localpart': '_lk_jwt_service',
         'namespaces': {'users': [{'exclusive': False, 'regex': '.*'}]},
         'url': None,
-        'scopes': ['urn:matrix:client:rooms:is_joined'],
-        'io.element.msc4502.scope': ['urn:matrix:client:io.element.msc4502:rooms:is_joined'],
-        'proxy_prefix': 'rtc/livekit',
-        'proxy_url': 'http://jwt:8080',
+        'io.element.msc4502.scopes': ['urn:matrix:client:io.element.msc4502:rooms:is_joined'],
+        'io.element.msc4512.proxy_prefix': 'rtc/livekit',
+        'io.element.msc4512.proxy_url': 'http://jwt:8080',
         'rate_limited': False,
     },
 )
@@ -812,6 +811,7 @@ dump(
     'livekit.yaml',
     {
         'port': 7880,
+        'room': {'auto_create': False},
         'rtc': {'tcp_port': 7881, 'udp_port': 7882, 'use_external_ip': False, 'node_ip': public_ip},
         'keys': {lk_key: lk_secret},
         'turn': {
