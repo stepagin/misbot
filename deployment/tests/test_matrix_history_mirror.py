@@ -2,10 +2,11 @@ from contextlib import redirect_stderr, redirect_stdout
 import io
 import json
 import importlib.util
+import os
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / 'matrix-history-mirror.py'
@@ -13,6 +14,11 @@ SPEC = importlib.util.spec_from_file_location('matrix_history_mirror', SCRIPT)
 mirror = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(mirror)
 ROOM = '!room:old.example'
+
+
+class TerminalBuffer(io.StringIO):
+    def isatty(self):
+        return True
 
 
 class FakeClient:
@@ -37,11 +43,16 @@ class FailingOnceClient(FakeClient):
 
 
 class MirrorCommandTests(unittest.TestCase):
+    def setUp(self):
+        # Exercise argparse's terminal color detection even in non-TTY CI sessions.
+        self.enterContext(patch.dict(os.environ, {'TERM': 'xterm'}))
+        for name in ('NO_COLOR', 'FORCE_COLOR', 'PYTHON_COLORS'):
+            os.environ.pop(name, None)
+
     def test_interactive_start_collects_hidden_tokens_and_retains_them_on_failed_launch(self):
         with tempfile.TemporaryDirectory() as folder:
             state = Path(folder) / 'state'
-            stdin, stdout = Mock(), Mock()
-            stdin.isatty.return_value = stdout.isatty.return_value = True
+            stdin, stdout = TerminalBuffer(), TerminalBuffer()
             with (
                 patch('sys.argv', ['mirror', 'start', '--state-dir', str(state)]),
                 patch('sys.stdin', stdin),
@@ -72,7 +83,7 @@ class MirrorCommandTests(unittest.TestCase):
             self.assertEqual(saved['source_user'], '@alice:old.example')
             self.assertEqual(saved['interval'], 30)
             self.assertNotIn('FICTIONAL_SOURCE_TOKEN', (state / 'config.json').read_text())
-            self.assertNotIn('FICTIONAL_SOURCE_TOKEN', str(stdout.mock_calls))
+            self.assertNotIn('FICTIONAL_SOURCE_TOKEN', stdout.getvalue())
             for side in ('source', 'target'):
                 token = Path(saved[side + '_token_file'])
                 self.assertTrue(token.exists())
@@ -96,8 +107,7 @@ class MirrorCommandTests(unittest.TestCase):
                 token.chmod(0o600)
                 saved[side + '_token_file'] = str(token)
             mirror.write_private(state / 'config.json', saved)
-            stdin, stdout = Mock(), Mock()
-            stdin.isatty.return_value = stdout.isatty.return_value = True
+            stdin, stdout = TerminalBuffer(), TerminalBuffer()
             with (
                 patch(
                     'sys.argv', ['mirror', 'start', '--state-dir', str(state), '--interval', '91']
@@ -135,8 +145,7 @@ class MirrorCommandTests(unittest.TestCase):
                 path.chmod(0o600)
                 saved[side + '_token_file'] = str(path)
             mirror.write_private(state / 'config.json', saved)
-            stdin, stdout = Mock(), Mock()
-            stdin.isatty.return_value = stdout.isatty.return_value = True
+            stdin, stdout = TerminalBuffer(), TerminalBuffer()
             with (
                 patch(
                     'sys.argv',
@@ -176,8 +185,7 @@ class MirrorCommandTests(unittest.TestCase):
     def test_interrupt_after_config_publication_keeps_its_token_files(self):
         with tempfile.TemporaryDirectory() as folder:
             state = Path(folder)
-            stdin, stdout = Mock(), Mock()
-            stdin.isatty.return_value = stdout.isatty.return_value = True
+            stdin, stdout = TerminalBuffer(), TerminalBuffer()
             publish = mirror.write_private
 
             def interrupted(path, data):
@@ -232,8 +240,7 @@ class MirrorCommandTests(unittest.TestCase):
             state = Path(folder)
             keep = state / 'existing.txt'
             keep.write_text('retain')
-            stdin, stdout = Mock(), Mock()
-            stdin.isatty.return_value = stdout.isatty.return_value = True
+            stdin, stdout = TerminalBuffer(), TerminalBuffer()
             with (
                 patch('sys.argv', ['mirror', 'start', '--state-dir', str(state)]),
                 patch('sys.stdin', stdin),
