@@ -107,6 +107,7 @@ def configure(root, metadata, settings, preview=False):
     ):
         raise RuntimeError('Invalid referral service credentials')
     metadata['referral_seeded'] = True
+    endpoints = configuration_schema.public_endpoints({**settings, 'DOMAIN': domain})
     policy = {
         'invitation_lifetime_seconds': int(settings.get('INVITATION_LIFETIME_SECONDS', '604800')),
         'invitation_usage_limit': int(settings.get('INVITATION_USAGE_LIMIT', '1')),
@@ -115,8 +116,8 @@ def configure(root, metadata, settings, preview=False):
         'site_name': configuration_schema.field_value(
             'SITE_NAME', settings.get('SITE_NAME') or domain
         ),
-        'site_url': 'https://' + domain + '/',
-        'web_url': 'https://web.' + domain,
+        'site_url': 'https://' + endpoints['site'] + '/',
+        'web_url': 'https://' + endpoints['web'],
     }
     control = root / 'data/referral-control'
     for directory in [control, control / 'data', root / 'data/referral-bot']:

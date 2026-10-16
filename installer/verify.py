@@ -59,19 +59,32 @@ def main(argv=None):
 
     model = configuration.load(root, True)
     configuration.assert_auth_identity(root, model, metadata)
-    mas = 'https://' + configuration_schema.mas_host(model)
+    endpoints = configuration_schema.public_endpoints(model)
+    mas = 'https://' + endpoints['mas']
     tests = [
         ('discovery', 'https://' + domain + '/.well-known/matrix/client', 200),
         ('federation', 'https://' + domain + '/.well-known/matrix/server', 200),
-        ('synapse', 'https://matrix.' + domain + '/_matrix/client/versions', 200),
-        ('oauth_metadata', 'https://matrix.' + domain + '/_matrix/client/v1/auth_metadata', 200),
+        ('synapse', 'https://' + endpoints['matrix'] + '/_matrix/client/versions', 200),
+        (
+            'oauth_metadata',
+            'https://' + endpoints['matrix'] + '/_matrix/client/v1/auth_metadata',
+            200,
+        ),
         ('mas_discovery', mas + '/.well-known/openid-configuration', 200),
         ('mas_health', mas + '/health', 200),
-        ('web', 'https://web.' + domain + '/', 200),
-        ('admin', 'https://admin.' + domain + '/', 200),
-        ('rtc_jwt', 'https://rtc.' + domain + '/livekit/jwt/healthz', 200),
-        ('legacy_login_disabled', 'https://matrix.' + domain + '/_matrix/client/v3/login', 404),
-        ('synapse_admin_protected', 'https://matrix.' + domain + '/_synapse/admin/v2/users', 401),
+        ('web', 'https://' + endpoints['web'] + '/', 200),
+        ('admin', 'https://' + endpoints['admin'] + '/', 200),
+        ('rtc_jwt', 'https://' + endpoints['rtc'] + '/livekit/jwt/healthz', 200),
+        (
+            'legacy_login_disabled',
+            'https://' + endpoints['matrix'] + '/_matrix/client/v3/login',
+            404,
+        ),
+        (
+            'synapse_admin_protected',
+            'https://' + endpoints['matrix'] + '/_synapse/admin/v2/users',
+            401,
+        ),
         ('mas_admin_protected', mas + '/api/admin/v1/users', 401),
     ]
     if model.get('MAS_MODE') == 'external':
@@ -108,11 +121,11 @@ def main(argv=None):
             if name == 'discovery' and passed:
                 document = json.loads(body)
                 passed = (
-                    document['m.homeserver']['base_url'] == 'https://matrix.' + domain
+                    document['m.homeserver']['base_url'] == 'https://' + endpoints['matrix']
                     and document['org.matrix.msc2965.authentication']['issuer'] == mas + '/'
                 )
             if name == 'federation' and passed:
-                passed = json.loads(body)['m.server'] == 'matrix.' + domain + ':443'
+                passed = json.loads(body)['m.server'] == endpoints['matrix'] + ':443'
             print(
                 json.dumps(
                     {
@@ -141,7 +154,7 @@ def main(argv=None):
             )
             failed += 1
     try:
-        host = 'turn.' + domain
+        host = endpoints['turn']
         with socket.create_connection((host, 443), timeout=15) as raw:
             with ssl.create_default_context().wrap_socket(raw, server_hostname=host) as tls:
                 print(

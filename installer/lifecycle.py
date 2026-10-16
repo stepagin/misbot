@@ -19,6 +19,8 @@ import uuid
 from contextlib import contextmanager, nullcontext
 import referral
 import preflight
+import configuration
+import configuration_schema
 import state_store
 import startup_process
 import backup_archive
@@ -37,6 +39,7 @@ def emit(check, **values):
 
 
 GENERATION_ERRORS = {
+    'public_identity_changed': 'Public service addresses are immutable after first startup. Restore the original PUBLIC_DOMAIN, WEB_DOMAIN, SFU_DOMAIN and MAS_DOMAIN before retrying generate/up; existing identities and keys were not changed',
     'mas_identity_changed': 'MAS issuer is immutable after database initialization. Restore the original MAS_DOMAIN and the saved MAS configuration, then retry generate; existing identities and keys were not changed',
     'oauth_google_pair_incomplete': 'GOOGLE requires both GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET. Edit {SETTINGS} privately; fill both or clear both to disable Google. Then run: {GENERATE}. Existing data and keys were not changed',
     'oauth_telegram_pair_incomplete': 'TELEGRAM requires both TELEGRAM_CLIENT_ID and TELEGRAM_CLIENT_SECRET. Edit {SETTINGS} privately; fill both or clear both to disable Telegram. Then run: {GENERATE}. Existing data and keys were not changed',
@@ -440,8 +443,6 @@ def wait(check, attempts=60, service='service'):
 
 
 def dns_check():
-    import configuration_schema
-
     metadata = state()
     referral.validate_saved(ROOT, metadata)
     # Loading configuration can fail because it is busy or invalid, before DNS is tried.
@@ -455,13 +456,12 @@ def dns_check():
             mas_domain=mas_domain,
             mas_mode=mas_mode,
             mas_public_ip=values.get('MAS_PUBLIC_IP', ''),
+            model=values,
         )
     except (RuntimeError, OSError):
         emit('dns', passed=False, failure_code='dns_validation')
         raise
-    hosts = configuration_schema.public_hosts(
-        {'DOMAIN': metadata['domain'], 'MAS_DOMAIN': mas_domain, 'MAS_MODE': mas_mode}
-    )
+    hosts = configuration_schema.public_hosts(values)
     if mas_mode == 'external':
         hosts.append(mas_domain)
     emit('dns', hosts=len(set(hosts)), passed=True)
@@ -765,8 +765,14 @@ def create_admin():
     )
 
 
+def installation_endpoints():
+    model = preflight.settings(ROOT)
+    configuration.assert_auth_identity(ROOT, model, state())
+    return configuration_schema.public_endpoints(model)
+
+
 def certificate_paths(host=None):
-    host = host or 'turn.' + state()['domain']
+    host = host or installation_endpoints()['turn']
     path = ROOT / 'data/caddy/caddy/certificates/acme-v02.api.letsencrypt.org-directory' / host
     return path / (host + '.crt'), path / (host + '.key')
 
@@ -999,7 +1005,7 @@ def up():
         # MAS must call the public homeserver while creating users/devices.
         # Publish HTTPS before provisioning; otherwise both sides wait on each other.
         dc('up', '-d', 'caddy', 'tls-router')
-        cert, key = certificate_paths('matrix.' + state()['domain'])
+        cert, key = certificate_paths(installation_endpoints()['matrix'])
         wait(lambda: cert.is_file() and key.is_file(), attempts=150, service='caddy tls-router')
         run(['openssl', 'x509', '-in', str(cert), '-checkend', '86400', '-noout'])
     metadata = state()
@@ -1105,7 +1111,7 @@ def up():
     emit('startup_progress', completed=10, total=10, stage='complete')
     emit(
         'installation_running',
-        admin='https://admin.' + state()['domain'],
+        admin='https://' + installation_endpoints()['admin'],
         server_name=state()['domain'],
     )
 

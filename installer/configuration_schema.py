@@ -93,6 +93,27 @@ FIELDS: dict[str, Field] = {
         example='example.org',
         impact='После создания сервера домен менять нельзя.',
     ),
+    'PUBLIC_DOMAIN': Field(
+        'server',
+        'Домен сайта и основа публичных адресов; пусто — DOMAIN',
+        kind='domain',
+        example='example.org',
+        impact='Задаётся до первого запуска; Matrix server_name остаётся DOMAIN.',
+    ),
+    'WEB_DOMAIN': Field(
+        'server',
+        'Домен браузерного клиента; пусто — web.<PUBLIC_DOMAIN>',
+        kind='domain',
+        example='chat.example.org',
+        impact='После первого запуска публичные адреса менять нельзя.',
+    ),
+    'SFU_DOMAIN': Field(
+        'server',
+        'Дополнительный домен LiveKit SFU; пусто — отключён',
+        kind='domain',
+        example='live.example.org',
+        impact='Для сохранения существующего адреса SFU; задаётся до первого запуска.',
+    ),
     'MAS_MODE': Field(
         'server',
         'Сервер авторизации',
@@ -518,7 +539,23 @@ def field_value(
 
 
 def mas_host(values: Mapping[str, str]) -> str:
-    return values.get('MAS_DOMAIN') or 'mas.' + values['DOMAIN']
+    return public_endpoints(values)['mas']
+
+
+def public_endpoints(values: Mapping[str, str]) -> dict[str, str]:
+    """Resolve public hosts independently of the immutable Matrix server_name."""
+    base = values.get('PUBLIC_DOMAIN') or values['DOMAIN']
+    return {
+        'identity': values['DOMAIN'],
+        'site': base,
+        'matrix': 'matrix.' + base,
+        'mas': values.get('MAS_DOMAIN') or 'mas.' + base,
+        'admin': 'admin.' + base,
+        'web': values.get('WEB_DOMAIN') or 'web.' + base,
+        'rtc': 'rtc.' + base,
+        'turn': 'turn.' + base,
+        'sfu': values.get('SFU_DOMAIN', ''),
+    }
 
 
 def mas_api_base(values: Mapping[str, str]) -> str:
@@ -537,15 +574,12 @@ def owned_databases(values: Mapping[str, object]) -> tuple[str, ...]:
 
 
 def public_hosts(values: Mapping[str, str]) -> list[str]:
-    domain = values['DOMAIN']
+    endpoints = public_endpoints(values)
     return list(
         dict.fromkeys(
-            [
-                domain,
-                'matrix.' + domain,
-                *([mas_host(values)] if values.get('MAS_MODE', 'local') == 'local' else []),
-                *[prefix + '.' + domain for prefix in ('admin', 'web', 'rtc', 'turn')],
-            ]
+            host
+            for role, host in endpoints.items()
+            if host and (role != 'mas' or values.get('MAS_MODE', 'local') == 'local')
         )
     )
 
@@ -579,6 +613,31 @@ def validate(
 
     if not model['DOMAIN']:
         error('DOMAIN', 'обязательный hostname без схемы')
+    endpoints = public_endpoints(model)
+    # Identity, website and Matrix may share the local MAS host. Other services
+    # need their own origin, and the optional SFU alias must be unambiguous.
+    roles = [role for role in endpoints if endpoints[role]]
+    if model['MAS_MODE'] == 'external':
+        roles.remove('mas')
+    shared = {
+        frozenset(pair)
+        for pair in (
+            ('identity', 'site'),
+            ('identity', 'matrix'),
+            ('identity', 'mas'),
+            ('site', 'mas'),
+            ('matrix', 'mas'),
+        )
+    }
+    for index, role in enumerate(roles):
+        for other in roles[index + 1 :]:
+            if endpoints[role] == endpoints[other] and frozenset((role, other)) not in shared:
+                field = (
+                    'MAS_DOMAIN'
+                    if 'mas' in (role, other)
+                    else {'web': 'WEB_DOMAIN', 'sfu': 'SFU_DOMAIN'}.get(other, 'PUBLIC_DOMAIN')
+                )
+                error(field, 'публичный адрес занят другой службой', 'public_host_conflict')
     if model['MAS_MODE'] == 'external':
         for key in ('MAS_DOMAIN', 'MAS_SHARED_SECRET', 'MAS_CLIENT_ID', 'MAS_CLIENT_SECRET'):
             if not model[key]:
@@ -597,13 +656,6 @@ def validate(
                     key,
                     'способы входа настраиваются на внешнем MAS; удалите локальные OAuth-реквизиты',
                 )
-    if mas_host(model) in [
-        prefix + '.' + model['DOMAIN'] for prefix in ('web', 'admin', 'rtc', 'turn')
-    ]:
-        error(
-            'MAS_DOMAIN',
-            'домен занят другой службой; используйте отдельный домен, DOMAIN или matrix.<DOMAIN>',
-        )
     if model['HOMEPAGE_MODE'] == 'external':
         if not model['HOMEPAGE_URL']:
             error('HOMEPAGE_URL', 'обязательно при external')

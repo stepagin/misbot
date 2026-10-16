@@ -204,6 +204,8 @@ def _restore_locked(archive, root, digest, public_ip, local_postgres=False):
         backup_archive.extract(snapshot / 'files.tar.gz', files, owners=True)
         metadata = json.loads((files / 'installation.json').read_text())
         databases = backup_archive.validate_authentication_boundary(snapshot, metadata)
+        configuration = __import__('configuration')
+        configuration.assert_identity(files, configuration.load(files), metadata)
         source_database_mode = metadata.get('database_mode', 'local')
         validate_database_destination(metadata, local_postgres)
         update.validate_manifest(files)

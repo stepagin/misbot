@@ -26,12 +26,13 @@ END = '    # misbot homepage end\n'
 
 def links(model):
     # Element's own login/register routes start native OAuth and retain its callback.
-    web = 'https://web.' + model['DOMAIN'] + '/'
+    endpoints = schema.public_endpoints(model)
+    web = 'https://' + endpoints['web'] + '/'
     return {
         'client': web,
         'login': web + '#/login',
         'register': web + '#/register',
-        'homeserver': 'https://matrix.' + model['DOMAIN'],
+        'homeserver': 'https://' + endpoints['matrix'],
     }
 
 
@@ -110,7 +111,8 @@ def route(model):
     # Only root is the homepage. Never forward source URI/query to another site.
     fallback = (
         '        reverse_proxy mas:8080\n'
-        if schema.mas_host(model) == model['DOMAIN']
+        if model.get('MAS_MODE', 'local') == 'local'
+        and schema.mas_host(model) == schema.public_endpoints(model)['site']
         else '        respond "Not found" 404\n'
     )
     return (
@@ -130,7 +132,9 @@ def replace_route(text, model):
         start = text.index(BEGIN)
         end = text.index(END) + len(END)
         return text[:start] + route(model) + text[end:]
-    legacy = '    handle {\n        redir https://web.' + model['DOMAIN'] + '{uri} 302\n    }\n'
+    legacy = (
+        '    handle {\n        redir ' + links(model)['client'].rstrip('/') + '{uri} 302\n    }\n'
+    )
     if text.count(legacy) != 1:
         raise RuntimeError(
             'Неизвестная конфигурация прокси; сохраните её и выполните misbot homepage recover'
@@ -177,7 +181,8 @@ def probe(model, api_enabled=True):
                 raise ServiceUnavailable(response.code) from None
             return response.code, response.headers, response.read(65537)
 
-    origin = 'https://' + model['DOMAIN']
+    endpoints = schema.public_endpoints(model)
+    origin = 'https://' + endpoints['site']
     status, headers, body = get(origin + '/?misbot_route_check=1')
     if model['HOMEPAGE_MODE'] == 'landing':
         if status != 200 or b'name="misbot-homepage"' not in body:
@@ -197,20 +202,16 @@ def probe(model, api_enabled=True):
         document = json.loads(payload)
         if (
             path.endswith('/client')
-            and document.get('m.homeserver', {}).get('base_url')
-            != 'https://matrix.' + model['DOMAIN']
+            and document.get('m.homeserver', {}).get('base_url') != 'https://' + endpoints['matrix']
         ):
             raise RuntimeError('Matrix discovery указывает другой сервер')
-        if (
-            path.endswith('/server')
-            and document.get('m.server') != 'matrix.' + model['DOMAIN'] + ':443'
-        ):
+        if path.endswith('/server') and document.get('m.server') != endpoints['matrix'] + ':443':
             raise RuntimeError('Federation discovery изменён')
         if path.endswith('/misbot') and (
             document.get('server_name') != model['DOMAIN'] or document.get('protocol') != 1
         ):
             raise RuntimeError('Misbot discovery изменён')
-    code, _, payload = get('https://matrix.' + model['DOMAIN'] + '/_matrix/client/versions')
+    code, _, payload = get('https://' + endpoints['matrix'] + '/_matrix/client/versions')
     if code != 200 or 'versions' not in json.loads(payload):
         raise RuntimeError('Matrix client API не подтверждён')
     return {
@@ -439,9 +440,8 @@ class Backend:
         self.activate()
         # Recovery is complete only after real routes are verified.
         observed = dict(model)
-        if rollback and 'redir https://web.' + model['DOMAIN'] + '{uri} 302' in config.read_private(
-            stage / 'previous-caddy'
-        ):
+        legacy_redirect = 'redir ' + links(model)['client'].rstrip('/') + '{uri} 302'
+        if rollback and legacy_redirect in config.read_private(stage / 'previous-caddy'):
             observed['HOMEPAGE_MODE'] = 'element'
             observed['_legacy_homepage_redirect'] = True
         for attempt in range(self.attempts):

@@ -7,6 +7,7 @@ from pathlib import Path
 import stat
 import secrets
 import shlex
+from urllib.parse import urlsplit
 import configuration_schema as schema
 import state_store
 
@@ -222,6 +223,37 @@ def export_text(root):
     return serialize(load(root))
 
 
+class PublicIdentityChanged(RuntimeError):
+    """An operation attempted to change committed public service origins."""
+
+
+def assert_public_identity(model, metadata):
+    """Public origins are fixed once an installation owns network or data."""
+    if not any(
+        metadata.get(key)
+        for key in (
+            'databases_initialized',
+            'storage_committed',
+            'network_committed',
+            'restore_pending',
+        )
+    ):
+        return
+    expected = metadata.get('public_endpoints')
+    if expected is None:
+        # Older portable installations only supported the identity domain as
+        # their public base. Do not infer a new mapping from edited settings.
+        legacy = {'DOMAIN': metadata['domain']}
+        issuer = metadata.get('mas_issuer') or metadata.get('mas_identity', {}).get('issuer')
+        if issuer:
+            legacy['MAS_DOMAIN'] = urlsplit(issuer).hostname
+        expected = schema.public_endpoints(legacy)
+    if expected != schema.public_endpoints(model):
+        raise PublicIdentityChanged(
+            'Public service addresses are immutable after first startup; restore the original public domain settings'
+        )
+
+
 def assert_auth_identity(root, model, metadata):
     if not any(
         metadata.get(key)
@@ -257,6 +289,7 @@ def assert_auth_identity(root, model, metadata):
             raise RuntimeError(
                 'Реквизиты внешнего MAS отличаются от сохранённых; восстановите прежние значения.'
             )
+        assert_public_identity(model, metadata)
         return
     expected = metadata.get('mas_issuer')
     path = Path(root) / 'config/mas.yaml'
@@ -282,6 +315,7 @@ def assert_auth_identity(root, model, metadata):
         raise RuntimeError(
             'MAS issuer is immutable after database initialization; restore the original MAS_DOMAIN before applying'
         )
+    assert_public_identity(model, {**metadata, 'mas_issuer': expected})
 
 
 def assert_identity(root, model, metadata):
