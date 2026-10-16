@@ -10,6 +10,8 @@ import time
 import uuid
 
 import lifecycle
+import mas_admin
+import service_identity
 import state_store
 import vault_cache
 
@@ -77,6 +79,10 @@ def recover(root):
         raise RuntimeError('No interrupted administrator password change exists')
     folder = checkpoint(root, metadata)
     previous = private_json(folder / 'previous.json')
+    service_identity.administrator(root, metadata.get('domain'))
+    mas_admin.administrator_username(previous, domain=metadata.get('domain'))
+    if previous.get('password_managed') is False:
+        raise RuntimeError('Imported administrator password is not managed by Misbot')
     if previous.get('username') != 'matrix-admin':
         raise RuntimeError('Recovery checkpoint has an unexpected administrator identity')
     apply(root, previous)
@@ -107,6 +113,12 @@ def rotate(root, password_file):
             'Interrupted password change: run install.sh admin-password-recover before trying again'
         )
     previous = private_json(root / 'secrets/admin-access.json')
+    service_identity.administrator(root, metadata.get('domain'))
+    if previous.get('password_managed') is False:
+        raise RuntimeError(
+            'Misbot не хранит пароль импортированного администратора; измените его через MAS'
+        )
+    mas_admin.administrator_username(previous, domain=metadata.get('domain'))
     if previous.get('username') != 'matrix-admin':
         raise RuntimeError('Unexpected administrator identity; no password changed')
     if not previous.get('password'):

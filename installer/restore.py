@@ -24,6 +24,7 @@ import referral
 import state_store
 import update
 import vault_cache
+import service_identity
 
 
 def restore_path(root):
@@ -206,6 +207,7 @@ def _restore_locked(archive, root, digest, public_ip, local_postgres=False):
         databases = backup_archive.validate_authentication_boundary(snapshot, metadata)
         configuration = __import__('configuration')
         configuration.assert_identity(files, configuration.load(files), metadata)
+        service_identity.validate_installation(files, metadata)
         source_database_mode = metadata.get('database_mode', 'local')
         validate_database_destination(metadata, local_postgres)
         update.validate_manifest(files)

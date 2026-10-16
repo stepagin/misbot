@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import lifecycle
 import pg_credentials as operation
 import state_store
+import service_identity
 
 
 class DatabasePasswordTests(unittest.TestCase):
@@ -289,6 +290,7 @@ class DatabasePasswordTests(unittest.TestCase):
                 'state': {'seeded': True},
                 'fail': fail,
                 're': operation.re,
+                'service_identity': service_identity,
             }
             exec(
                 compile(

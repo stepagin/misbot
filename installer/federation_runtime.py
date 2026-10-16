@@ -14,6 +14,7 @@ import configuration
 import federation
 import federation_store
 import state_store
+import service_identity
 
 IMAGE = 'matrix-stack/federation-bot:1.0.0'
 DEVICE = 'MATRIX-FEDERATION-01'
@@ -33,7 +34,7 @@ def identity(root, metadata):
         admins = (
             configured.get('administrator_mxids')
             or existing.get('administrator_mxids')
-            or ['@matrix-admin:' + metadata['domain']]
+            or [service_identity.administrator(root, metadata['domain']).matrix_id]
         )
         if (
             not isinstance(admins, list)

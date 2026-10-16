@@ -728,6 +728,9 @@ def perform_update(source, root, action):
     candidate = release(source)
     installed = state(root, require_sources=action != 'seed')
     admit_release(root, installed, candidate)
+    import service_identity
+
+    service_identity.validate_installation(root, installed)
     if action == 'seed':
         if installed.get('applied_release_version'):
             fail('Seed is only for first initialization')

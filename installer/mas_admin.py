@@ -3,6 +3,7 @@
 import base64
 import json
 import os
+import re
 from pathlib import Path
 import sys
 import urllib.error
@@ -15,10 +16,57 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def bootstrap(request, credentials, checkpoint, retain_checkpoint=False):
-    username = credentials['username']
-    if username != 'matrix-admin':
+def administrator_username(credentials, domain=None):
+    username = credentials.get('username')
+    if not isinstance(username, str) or not re.fullmatch(r'[a-z0-9][a-z0-9._=-]{0,254}', username):
+        raise RuntimeError('Invalid saved administrator username')
+    if 'password_managed' in credentials and type(credentials['password_managed']) is not bool:
+        raise RuntimeError('Invalid administrator password management flag')
+    imported = credentials.get('password_managed') is False
+    if not imported and username != 'matrix-admin':
         raise RuntimeError('Unexpected bootstrap administrator username')
+    matrix_id = credentials.get('matrix_id')
+    if imported and (
+        not isinstance(credentials.get('mas_user_id'), str)
+        or not re.fullmatch(r'[0-7][0-9A-HJKMNP-TV-Z]{25}', credentials['mas_user_id'])
+        or 'password' in credentials
+        or not isinstance(matrix_id, str)
+    ):
+        raise RuntimeError(
+            'Imported administrator requires a saved identity without a managed password'
+        )
+    if matrix_id is not None and (
+        not isinstance(matrix_id, str)
+        or not matrix_id.startswith('@' + username + ':')
+        or not matrix_id.split(':', 1)[-1]
+        or (domain is not None and matrix_id != '@' + username + ':' + domain)
+    ):
+        raise RuntimeError('Saved administrator Matrix identity does not match this installation')
+    return username
+
+
+def inspect_administrator(request, credentials):
+    username = administrator_username(credentials)
+    status, response = request('/api/admin/v1/users/by-username/' + username)
+    if status != 200:
+        raise RuntimeError('Saved MAS administrator is unavailable')
+    user = response['data']
+    attributes = user['attributes']
+    if (
+        (credentials.get('mas_user_id') is not None and credentials['mas_user_id'] != user['id'])
+        or (attributes.get('username', username) != username)
+        or not attributes.get('admin', attributes.get('can_request_admin', False))
+        or attributes.get('locked_at')
+        or attributes.get('deactivated_at')
+    ):
+        raise RuntimeError('Saved MAS administrator identity or active privileges changed')
+    return {'user_id': user['id'], 'password_managed': False}
+
+
+def bootstrap(request, credentials, checkpoint, retain_checkpoint=False):
+    username = administrator_username(credentials)
+    if credentials.get('password_managed') is False:
+        return inspect_administrator(request, credentials)
     path = '/api/admin/v1/users/by-username/' + username
     status, response = request(path)
     if status == 404:
@@ -72,9 +120,10 @@ def bootstrap(request, credentials, checkpoint, retain_checkpoint=False):
 
 
 def set_password(request, credentials):
-    if credentials.get('username') != 'matrix-admin':
-        raise RuntimeError('Unexpected administrator username')
-    status, response = request('/api/admin/v1/users/by-username/matrix-admin')
+    username = administrator_username(credentials)
+    if credentials.get('password_managed') is False:
+        raise RuntimeError('Imported administrator password is not managed by Misbot')
+    status, response = request('/api/admin/v1/users/by-username/' + username)
     if status != 200:
         raise RuntimeError('Administrator is unavailable')
     user = response['data']
@@ -215,17 +264,7 @@ def main():
     elif payload.get('action') == 'verify-state':
         print(json.dumps(verify_state(request, payload['users'])))
     elif payload.get('action') == 'inspect':
-        status, response = request('/api/admin/v1/users/by-username/matrix-admin')
-        if (
-            status != 200
-            or not response['data']['attributes'].get(
-                'admin', response['data']['attributes'].get('can_request_admin', False)
-            )
-            or response['data']['attributes'].get('locked_at')
-            or response['data']['attributes'].get('deactivated_at')
-        ):
-            raise RuntimeError('Saved external MAS administrator is unavailable')
-        print(json.dumps({'user_id': response['data']['id']}))
+        print(json.dumps(inspect_administrator(request, payload['credentials'])))
     elif payload.get('action', 'bootstrap') == 'password':
         set_password(request, payload['credentials'])
     elif payload.get('action', 'bootstrap') == 'bootstrap':

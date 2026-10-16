@@ -1175,11 +1175,17 @@ class UI:
         return value
 
     def setup_admin_tag(self):
+        import service_identity
+
         def validate(value):
             localpart = value.removeprefix('@')
             if not re.fullmatch(r'[a-z0-9][a-z0-9._=-]{0,63}', localpart):
                 raise ValueError('Имя бота: строчные латинские буквы, цифры, точка, _ , = или -.')
-            if localpart in ('referral-bot', 'server-guide', 'matrix-admin'):
+            if localpart in (
+                'referral-bot',
+                'server-guide',
+                service_identity.administrator(self.root).username,
+            ):
                 raise ValueError('Это имя уже используется другим ботом или администратором.')
             return localpart
 
@@ -1711,6 +1717,7 @@ class UI:
 
     def finish(self):
         from registration import manage
+        import service_identity
 
         domain = self.installation()['domain']
         self.view.heading(
@@ -1719,7 +1726,7 @@ class UI:
         self.view.details(
             [
                 ('Клиент', 'https://' + schema.public_endpoints(self.model)['web']),
-                ('Администратор', '@matrix-admin:' + domain),
+                ('Администратор', service_identity.administrator(self.root, domain).matrix_id),
             ]
         )
         self.view.message('Пароль можно открыть кнопкой «Показать пароль администратора».')
@@ -2318,7 +2325,14 @@ class UI:
     def execute_password(self, item):
         import tempfile
         from configuration import directory
+        import service_identity
 
+        administrator = service_identity.administrator(self.root)
+        if item.path == 'credentials admin set' and not administrator.password_managed:
+            self.view.message(
+                'Пароль этого администратора задаётся через MAS; Misbot его не хранит.'
+            )
+            return 2
         self.view.heading(item.title)
         self.view.message('Введите новый пароль дважды. Ввод скрыт; файл создавать не нужно.')
         values = {}
@@ -2332,8 +2346,10 @@ class UI:
                     if not name.endswith(suffix):
                         raise ValueError('Укажите аккаунт на этом сервере: @имя:' + domain)
                     name = name[1 : -len(suffix)]
-                if name == 'matrix-admin':
-                    raise ValueError('Для matrix-admin выберите «Изменить пароль администратора».')
+                if name == administrator.username:
+                    raise ValueError(
+                        'Для первоначального администратора используйте управление аккаунтом MAS.'
+                    )
                 if not re.fullmatch(r'[a-z0-9][a-z0-9._=-]{0,254}', name):
                     raise ValueError('Введите имя существующего пользователя или @имя:' + domain)
                 return name
@@ -2341,7 +2357,7 @@ class UI:
             selected = terminal_navigation.account_selection(self)
             values['username'] = selected or self.input_value('Аккаунт пользователя', '', username)
         else:
-            values['username'] = 'matrix-admin'
+            values['username'] = administrator.username
         self.view.message('Пароль: от 16 до 1024 символов. Существующие сеансы сохранятся.')
 
         def password(value):

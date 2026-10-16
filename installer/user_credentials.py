@@ -11,6 +11,7 @@ import stat
 import credentials
 import lifecycle
 import state_store
+import service_identity
 import vault_cache
 
 
@@ -31,17 +32,17 @@ def private_json(path):
         return json.load(handle)
 
 
-def validate(values):
+def validate(values, administrator_username='matrix-admin'):
     if not isinstance(values, dict) or set(values) != {'username', 'password'}:
         raise RuntimeError('Private JSON must contain exactly username and password strings')
     name, password = values['username'], values['password']
     if (
         not isinstance(name, str)
         or not re.fullmatch(r'[a-z0-9][a-z0-9._=-]{0,254}', name)
-        or name == 'matrix-admin'
+        or name == administrator_username
     ):
         raise RuntimeError(
-            'Use an existing ordinary username without @ or domain; use admin-password for matrix-admin'
+            'Use an existing ordinary username; the initial administrator is protected'
         )
     if (
         not isinstance(password, str)
@@ -73,7 +74,14 @@ def api(root, action, values):
         'python',
         '-c',
         (root / 'user_password_api.py').read_text(),
-        stdin=json.dumps({'action': action, 'credentials': values, 'client': client}),
+        stdin=json.dumps(
+            {
+                'action': action,
+                'credentials': values,
+                'client': client,
+                'protected_username': service_identity.administrator(root).username,
+            }
+        ),
     )
     identity = json.loads(response)
     if (
@@ -103,7 +111,10 @@ def pending_values(root, path):
             'Invalid user password checkpoint; retain it for private administrator review'
         )
     values = saved['credentials']
-    validate({k: values[k] for k in ('username', 'password')})
+    validate(
+        {k: values[k] for k in ('username', 'password')},
+        service_identity.administrator(root).username,
+    )
     if not isinstance(values['user_id'], str) or not re.fullmatch(
         r'[A-Za-z0-9_-]{1,128}', values['user_id']
     ):
@@ -147,7 +158,7 @@ def reset(root, input_file):
             + ' user-password-recover before another reset'
         )
     values = private_json(input_file)
-    validate(values)
+    validate(values, service_identity.administrator(root).username)
     try:
         identity = api(root, 'inspect', {'username': values['username']})
     except Exception:

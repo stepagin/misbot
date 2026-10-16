@@ -11,6 +11,7 @@ import configuration
 import federation_runtime
 import lifecycle
 import state_store
+import service_identity
 
 
 def choose(root, tag, administrator=None):
@@ -32,6 +33,7 @@ def choose(root, tag, administrator=None):
     if mxid in (
         '@referral-bot:' + metadata['domain'],
         '@server-guide:' + metadata['domain'],
+        service_identity.administrator(root, metadata['domain']).matrix_id,
     ) or mxid in [administrator, *saved['administrator_mxids']]:
         raise ValueError('Bot identity must differ from other bots and the administrator')
     saved['user_id'] = mxid
@@ -154,7 +156,10 @@ def access(root, action, mxid=None):
         raise ValueError(
             'Введите полный адрес существующего местного аккаунта: @имя:' + metadata['domain']
         )
-    protected = {'@matrix-admin:' + metadata['domain'], saved['administrator_mxid']}
+    protected = {
+        service_identity.administrator(root, metadata['domain']).matrix_id,
+        saved['administrator_mxid'],
+    }
     bots = {
         saved['user_id'],
         '@server-guide:' + metadata['domain'],

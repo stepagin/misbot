@@ -151,6 +151,7 @@ names = [
     'cli.md',
     'install.sh',
     'generate.py',
+    'service_identity.py',
     'lifecycle.py',
     'operation_models.py',
     'database.py',

@@ -23,6 +23,7 @@ import configuration
 import configuration_schema
 import preflight
 import homepage
+import service_identity
 
 
 def merge(base, overlay):
@@ -105,6 +106,12 @@ secret_dir = root / 'secrets'
 secret_dir.mkdir(mode=0o700, exist_ok=True)
 secret_dir.chmod(0o700)
 state = json.loads(state_path.read_text()) if state_path.exists() else {}
+try:
+    preserved_identity, identity_fingerprint = service_identity.load(
+        root, state, preview=args.preview
+    )
+except RuntimeError as error:
+    fail(str(error))
 if state.get('config_format_version', 1) not in (1, 2):
     parser.error('Unsupported configuration format; use a compatible installer')
 
@@ -175,6 +182,12 @@ if mas_mode not in ('local', 'external'):
     fail('MAS_MODE must be local or external')
 try:
     configuration.assert_auth_identity(root, settings, state)
+    initial_admin = service_identity.administrator(root, domain)
+    saved_client_path = secret_dir / 'referral-client.json'
+    if saved_client_path.is_symlink():
+        raise RuntimeError('Unsafe saved referral service credentials')
+    if mas_mode == 'local' and saved_client_path.exists():
+        referral.validate_client(json.loads(saved_client_path.read_text()), external=False)
 except configuration.PublicIdentityChanged as error:
     fail(str(error), 'public_identity_changed')
 except RuntimeError as error:
@@ -321,6 +334,13 @@ except ValueError:
 subnet = str(network)
 if state.get('network_committed') and state.get('subnet') and state['subnet'] != subnet:
     fail('Changing the installed Docker subnet is not supported')
+state['administrator_identity'] = {
+    'username': initial_admin.username,
+    'matrix_id': initial_admin.matrix_id,
+    'mas_user_id': initial_admin.mas_user_id,
+}
+state['service_identity'] = preserved_identity
+state['service_identity_sha256'] = identity_fingerprint
 vault_cache.mark_dirty(root)
 state.update(
     domain=domain,
@@ -370,10 +390,10 @@ def secret(name):
             fail('Missing server secret; restore all secrets from backup instead of regenerating')
         state_store.write_text(path, secrets.token_hex(32) + '\n')
         path.chmod(0o600)
-    value = path.read_text().strip()
-    if not re.fullmatch('[a-f0-9]{64}', value):
-        fail('Invalid server secret file; restore it from backup')
-    return value
+    try:
+        return service_identity.secret_value(path, name)
+    except RuntimeError as error:
+        fail(str(error))
 
 
 def dump(name, value):
@@ -382,22 +402,8 @@ def dump(name, value):
     )
 
 
-seed_names = [
-    'db_synapse',
-    'db_mas',
-    'db_admin',
-    'mas_shared',
-    'rtc_as_token',
-    'rtc_hs_token',
-    'livekit_secret',
-    'synapse_macaroon',
-    'synapse_form',
-    'mas_encryption',
-]
+seed_names = service_identity.secret_names(preserved_identity, mas_mode)
 if mas_mode == 'external':
-    seed_names = [
-        name for name in seed_names if name not in ('db_mas', 'mas_shared', 'mas_encryption')
-    ]
     # Default config init seeds local-only placeholders before the wizard chooses its MAS.
     # These are unused before first database creation and have no external counterpart.
     if not state.get('databases_initialized'):
@@ -446,8 +452,13 @@ if not args.preview:
         )
         admin.chmod(0o600)
     access = configuration.read_private_json(admin)
-    access.update(admin_url='https://' + endpoints['admin'], web_url='https://' + endpoints['web'])
-    state_store.write_json(admin, access)
+    public_urls = {
+        'admin_url': 'https://' + endpoints['admin'],
+        'web_url': 'https://' + endpoints['web'],
+    }
+    if any(access.get(key) != value for key, value in public_urls.items()):
+        access.update(public_urls)
+        state_store.write_json(admin, access)
 state['seeded'] = True
 save_state()
 if args.initialize_env:
@@ -494,7 +505,7 @@ mas_shared = (
     else secret('mas_shared')
 )
 as_token, hs_token = secret('rtc_as_token'), secret('rtc_hs_token')
-lk_key, lk_secret = 'matrix-livekit', secret('livekit_secret')
+lk_key, lk_secret = preserved_identity['livekit_key'], secret('livekit_secret')
 
 synapse = {
     'server_name': f'{domain}',
@@ -528,7 +539,9 @@ synapse = {
     'media_store_path': '/data/media_store',
     'signing_key_path': f'/data/{domain}.signing.key',
     'macaroon_secret_key': secret('synapse_macaroon'),
-    'form_secret': secret('synapse_form'),
+    'form_secret': secret('synapse_form')
+    if preserved_identity['synapse_form_secret_enabled']
+    else None,
     'matrix_authentication_service': {
         'enabled': True,
         'endpoint': configuration_schema.mas_api_base(settings) + '/',
@@ -612,6 +625,8 @@ if media_mode == 's3':
         }
     ]
 merge(synapse, synapse_tuning)
+if preserved_identity['synapse_registration_shared_secret_enabled']:
+    synapse['registration_shared_secret'] = secret('synapse_registration_shared_secret')
 dump('homeserver.yaml', synapse)
 dump(
     'synapse-log.yaml',
@@ -691,7 +706,9 @@ if mas_mode == 'local':
         },
         'secrets': {
             'encryption': secret('mas_encryption'),
-            'keys': [{'key_file': '/config/mas-signing.pem'}],
+            'keys': [
+                {'key_file': '/config/mas-signing.pem', **preserved_identity['mas_signing_key']}
+            ],
         },
         'passwords': {'enabled': True},
         'account': {
@@ -876,12 +893,13 @@ dump(
 
 init_sql = (
     postgres_setup.PRIVATE_ROLE_LOGGING_SQL
-    + f"CREATE ROLE synapse LOGIN PASSWORD '{db_synapse}';\n"
+    + 'SET standard_conforming_strings=on;\n'
+    + f'CREATE ROLE synapse LOGIN PASSWORD {postgres_setup.literal(db_synapse)};\n'
     "CREATE DATABASE synapse OWNER synapse ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C' TEMPLATE template0;\n"
 )
 if mas_mode == 'local':
     init_sql += (
-        f"CREATE ROLE mas LOGIN PASSWORD '{db_mas}';\n"
+        f'CREATE ROLE mas LOGIN PASSWORD {postgres_setup.literal(db_mas)};\n'
         "CREATE DATABASE mas OWNER mas ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C' TEMPLATE template0;\n"
     )
 (config / 'init-db.sql').write_text(init_sql)

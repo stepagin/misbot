@@ -17,6 +17,7 @@ import stat
 import configuration
 import lifecycle
 import state_store
+import service_identity
 
 BASE = '/api/admin/v1/user-registration-tokens'
 
@@ -75,7 +76,7 @@ def invitation_issuers(root, domain):
                 'Первое приглашение относится к другой установке. Проверьте выбранный каталог; данные сохранены.'
             )
         if record.get('resource'):
-            result[record['resource']] = '@matrix-admin:' + domain
+            result[record['resource']] = service_identity.administrator(root, domain).matrix_id
     return result
 
 
@@ -435,14 +436,13 @@ def main():
             return 2
         if args.action == 'admin-show':
             record = configuration.read_private_json(args.directory / 'secrets/admin-access.json')
-            if record.get('username') != 'matrix-admin':
-                raise RuntimeError('Unexpected administrator identity')
+            administrator = service_identity.administrator(args.directory)
             if not record.get('password'):
                 print(
-                    'Пароль существующего администратора задаётся на внешнем MAS. Misbot его не менял и не сохранял.'
+                    'Пароль существующего администратора задаётся через MAS. Misbot его не менял и не сохранял.'
                 )
             else:
-                print('matrix-admin: ' + record['password'])
+                print(administrator.username + ': ' + record['password'])
             return 0
         result = manage(args.directory, args.action)
         if args.action == 'show':

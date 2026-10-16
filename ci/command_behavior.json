@@ -1982,6 +1982,143 @@
           "test": "ReleaseRecoveryTests.test_identity_or_public_address_edit_refuses_before_migration_backup_or_copy"
         }
       ]
+    },
+    {
+      "id": "identity.update-restore-admission",
+      "commands": [
+        "update apply",
+        "backup restore",
+        "backup restore-local"
+      ],
+      "surfaces": [
+        "cli"
+      ],
+      "axes": [
+        "failure",
+        "preconditions",
+        "state"
+      ],
+      "level": "backend",
+      "given": "saved portable identity fingerprint, signing key, secret or administrator is invalid",
+      "expected_output": "reject before backup, source replacement or restore target publication",
+      "expected_state": "preserve installed files and private credentials",
+      "tests": [
+        {
+          "file": "installer/tests/test_service_identity.py",
+          "test": "ServiceIdentityTests.test_native_update_and_restore_reject_bad_identity_before_publication"
+        },
+        {
+          "file": "installer/tests/test_service_identity.py",
+          "test": "ServiceIdentityTests.test_legacy_seeded_missing_administrator_fails_admission"
+        }
+      ]
+    },
+    {
+      "id": "identity.preserved-publication",
+      "commands": [
+        "update apply",
+        "backup restore"
+      ],
+      "surfaces": [
+        "cli"
+      ],
+      "axes": [
+        "success",
+        "state",
+        "interruption"
+      ],
+      "level": "backend",
+      "given": "valid imported single-key service identity and unmanaged administrator",
+      "expected_output": "source update and interrupted restore staging retain saved identity",
+      "expected_state": "private files byte-for-byte retained; staged restore remains pending; database restore itself requires integration evidence",
+      "tests": [
+        {
+          "file": "installer/tests/test_service_identity.py",
+          "test": "ServiceIdentityTests.test_native_source_update_preserves_imported_private_identity"
+        },
+        {
+          "file": "installer/tests/test_service_identity.py",
+          "test": "ServiceIdentityTests.test_restore_publication_keeps_imported_keys_and_identity"
+        }
+      ]
+    },
+    {
+      "id": "identity.unmanaged-password",
+      "commands": [
+        "credentials admin set",
+        "users password set"
+      ],
+      "surfaces": [
+        "ui"
+      ],
+      "axes": [
+        "failure",
+        "preconditions",
+        "state"
+      ],
+      "level": "interaction",
+      "given": "initial administrator has an imported unmanaged password",
+      "expected_output": "refuse admin password change before prompting; exclude initial administrator from ordinary password targets",
+      "expected_state": "no password command or mutation",
+      "tests": [
+        {
+          "file": "installer/tests/test_service_identity.py",
+          "test": "AdministratorConsumerTests.test_terminal_protects_imported_owner_and_does_not_request_unmanaged_password"
+        }
+      ]
+    },
+    {
+      "id": "identity.initial-admin-protection",
+      "commands": [
+        "admin access remove"
+      ],
+      "surfaces": [
+        "cli",
+        "ui"
+      ],
+      "axes": [
+        "failure",
+        "preconditions",
+        "state"
+      ],
+      "level": "backend",
+      "given": "initial imported administrator differs from explicitly configured panel admins",
+      "expected_output": "protect initial administrator and primary admin; retain explicitly added admins",
+      "expected_state": "no implicit replacement of administrator list",
+      "tests": [
+        {
+          "file": "installer/tests/test_service_identity.py",
+          "test": "AdministratorConsumerTests.test_explicit_admins_are_retained_and_initial_admin_is_protected"
+        },
+        {
+          "file": "installer/tests/test_service_identity.py",
+          "test": "AdministratorConsumerTests.test_terminal_protects_imported_owner_and_does_not_request_unmanaged_password"
+        }
+      ]
+    },
+    {
+      "id": "identity.unmanaged-admin-status",
+      "commands": [
+        "credentials admin show"
+      ],
+      "surfaces": [
+        "cli"
+      ],
+      "axes": [
+        "success",
+        "output",
+        "state"
+      ],
+      "level": "presentation",
+      "given": "saved administrator has a known MAS identity and no locally managed password",
+      "expected_output": "show unmanaged password status using the saved administrator",
+      "expected_state": "no bootstrap or password reset",
+      "tests": [
+        {
+          "file": "installer/tests/test_service_identity.py",
+          "test": "AdministratorConsumerTests.test_cli_can_show_unmanaged_admin_status_without_bootstrap_identity_error"
+        }
+      ]
     }
   ],
   "surface_requirements": {
