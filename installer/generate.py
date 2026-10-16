@@ -1261,6 +1261,10 @@ import telegram_runtime
 
 telegram_runtime.configure(root, state, args.preview)
 services.update(telegram_runtime.service(root, state))
+if telegram_runtime.enabled(state):
+    services['synapse']['ports'] = ['127.0.0.1:8008:8008']
+    if mas_mode == 'local':
+        services['mas']['ports'] = ['127.0.0.1:8080:8080']
 if has_proxy:
     services['mas']['env_file'] = [{'path': './mas-proxy.env', 'format': 'raw'}]
 runtime_config.apply(root, compose, preview=args.preview)

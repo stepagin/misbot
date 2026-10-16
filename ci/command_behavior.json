@@ -2219,6 +2219,14 @@
         },
         {
           "file": "installer/tests/test_telegram_runtime.py",
+          "test": "TelegramRuntimeTests.test_disabled_generator_keeps_matrix_and_mas_ports_private"
+        },
+        {
+          "file": "installer/tests/test_telegram_runtime.py",
+          "test": "TelegramRuntimeTests.test_external_mas_generator_only_publishes_synapse_loopback"
+        },
+        {
+          "file": "installer/tests/test_telegram_runtime.py",
           "test": "TelegramRuntimeTests.test_full_backup_archives_verified_sqlite_instead_of_live_wal"
         },
         {

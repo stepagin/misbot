@@ -50,7 +50,10 @@ control JSON должны совпадать с `installation.json.domain`.
 
 При генерации `stack_root` и локальные transport URLs control приводятся к
 текущему каталогу и localhost. Token, MAS client_id/client_secret, политика и
-SQLite не пересоздаются. Для внешнего MAS его URL сохраняется. Runtime требует
+SQLite не пересоздаются. Для host controller включённый runtime публикует
+Synapse на `127.0.0.1:8008`, локальный MAS на `127.0.0.1:8080`; эти порты
+должны быть свободны. Для внешнего MAS его URL сохраняется, локальный порт MAS
+не публикуется. Runtime требует
 host-пакет `python3-requests`; обычный запуск и активация восстановления через
 Misbot устанавливают его при включённом Telegram.
 

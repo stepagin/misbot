@@ -206,6 +206,21 @@ class TelegramRuntimeTests(unittest.TestCase):
             yaml.safe_dump({'services': runtime.service(self.root, self.state)}),
         )
 
+    def generate(self):
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(BUNDLE / 'generate.py'),
+                '--directory',
+                str(self.root),
+                '--preview',
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return yaml.safe_load((self.root / 'compose.yaml').read_text())['services']
+
     def source_manifest(self):
         (self.root / 'SHA256SUMS').write_text(
             ''.join(
@@ -234,21 +249,16 @@ class TelegramRuntimeTests(unittest.TestCase):
             for name in (runtime.WORKER_CONFIG, runtime.CONTROL_DB, runtime.WORKER_DB)
         }
         for _ in range(2):
-            result = subprocess.run(
-                [
-                    sys.executable,
-                    str(BUNDLE / 'generate.py'),
-                    '--directory',
-                    str(self.root),
-                    '--preview',
-                ],
-                capture_output=True,
-                text=True,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-        compose = yaml.safe_load((self.root / 'compose.yaml').read_text())
-        self.assertEqual(len(compose['services']), 13)
-        worker = compose['services']['telegram-worker']
+            services = self.generate()
+            self.assertEqual(services['synapse']['ports'], ['127.0.0.1:8008:8008'])
+            self.assertEqual(services['mas']['ports'], ['127.0.0.1:8080:8080'])
+        self.assertEqual(len(services), 13)
+        controller = configuration.read_private_json(
+            self.root / runtime.CONTROL / 'bot-config.json'
+        )['servers']['example.org']
+        self.assertEqual(controller['synapse_url'], 'http://127.0.0.1:8008')
+        self.assertEqual(controller['mas_url'], 'http://127.0.0.1:8080')
+        worker = services['telegram-worker']
         self.assertEqual(worker['user'], '10001:10001')
         self.assertTrue(worker['read_only'])
         self.assertEqual(len(worker['volumes']), 3)
@@ -256,6 +266,42 @@ class TelegramRuntimeTests(unittest.TestCase):
         self.assertNotIn('secrets', worker)
         for name, content in retained.items():
             self.assertEqual((self.root / name).read_bytes(), content)
+
+    def test_disabled_generator_keeps_matrix_and_mas_ports_private(self):
+        self.state.pop('telegram_runtime')
+        state_store.write_json(self.root / 'installation.json', self.state)
+        services = self.generate()
+        self.assertEqual(len(services), 12)
+        self.assertNotIn('telegram-worker', services)
+        self.assertNotIn('ports', services['synapse'])
+        self.assertNotIn('ports', services['mas'])
+
+    def test_external_mas_generator_only_publishes_synapse_loopback(self):
+        configuration.write_model(
+            self.root,
+            {
+                'DOMAIN': 'example.org',
+                'MAS_MODE': 'external',
+                'MAS_DOMAIN': 'auth.example.org',
+                'MAS_SHARED_SECRET': 'FICTIONAL_SHARED_SECRET',
+                'MAS_CLIENT_ID': '01K5WZ00000000000000000004',
+                'MAS_CLIENT_SECRET': 'FICTIONAL_CLIENT_SECRET',
+            },
+            preview=True,
+        )
+        for _ in range(2):
+            services = self.generate()
+            self.assertNotIn('mas', services)
+            self.assertEqual(services['synapse']['ports'], ['127.0.0.1:8008:8008'])
+            controller = configuration.read_private_json(
+                self.root / runtime.CONTROL / 'bot-config.json'
+            )['servers']['example.org']
+            self.assertEqual(controller['mas_url'], 'https://auth.example.org')
+            self.assertEqual(controller['synapse_url'], 'http://127.0.0.1:8008')
+            self.assertNotIn(
+                '127.0.0.1:8080:8080',
+                [port for service in services.values() for port in service.get('ports', [])],
+            )
 
     def test_repeat_and_relocation_preserve_credentials_policy_binding_offset_and_outbox(self):
         before = {
