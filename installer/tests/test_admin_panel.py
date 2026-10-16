@@ -317,7 +317,7 @@ class PanelTests(unittest.TestCase):
             self.pending()[0]['body'], 'Сообщение от администратора сервера example.org:\n\nНовости'
         )
 
-    def test_latest_minor_only_once_and_three_day_interval(self):
+    def test_latest_release_only_once_and_three_day_interval(self):
         release = {
             'version': '1.3.2',
             'notes': 'Нововведения',
@@ -339,22 +339,93 @@ class PanelTests(unittest.TestCase):
             self.panel.check_releases()
             self.assertEqual(len(self.pending()), 2)
 
-    def test_patch_silent_but_manual_comparison_reports_it(self):
-        release = {'version': '1.1.9', 'notes': 'fix', 'url': 'example', 'assets': []}
+    def test_patch_notification_matches_manual_comparison(self):
+        state_store.write_json(
+            self.root / 'installation.json',
+            {'domain': 'example.org', 'applied_release_version': '1.2.0'},
+        )
+        release = {'version': '1.2.1', 'notes': 'fix', 'url': 'https://example.org', 'assets': []}
         with patch.object(releases, 'latest', return_value=release):
             result = self.panel.handle('panel-version', None, '$v')
         self.assertTrue(result['update_available'])
-        self.assertEqual(self.pending(), [])
+        self.assertEqual(len(self.pending()), 1)
+        self.assertIn('Misbot 1.2.1. Установлена 1.2.0.', self.pending()[0]['body'])
+        self.assertIn('`sudo misbot update latest`', self.pending()[0]['body'])
+
+    def test_stable_release_after_installed_build_is_notified(self):
+        state_store.write_json(
+            self.root / 'installation.json',
+            {'domain': 'example.org', 'applied_release_version': '1.2.0-build.123'},
+        )
+        release = {'version': '1.2.0', 'notes': 'stable', 'url': 'https://example.org'}
+        with patch.object(releases, 'latest', return_value=release):
+            self.panel.check_releases()
+        self.assertEqual(len(self.pending()), 1)
+        self.assertIn('Misbot 1.2.0. Установлена 1.2.0-build.123.', self.pending()[0]['body'])
+
+    def test_major_release_notification_matches_manual_comparison(self):
+        release = {'version': '2.0.0', 'notes': 'major', 'url': 'https://example.org'}
+        with patch.object(releases, 'latest', return_value=release):
+            result = self.panel.handle('panel-version', None, '$v')
+        self.assertTrue(result['update_available'])
+        self.assertEqual(len(self.pending()), 1)
+        self.assertIn('Misbot 2.0.0. Установлена 1.1.0.', self.pending()[0]['body'])
+
+    def test_equal_older_or_missing_release_is_not_notified(self):
+        for candidate in ('1.1.0', '1.0.9', None):
+            with self.subTest(candidate=candidate):
+                release = (
+                    {'version': candidate, 'notes': '', 'url': 'https://example.org'}
+                    if candidate
+                    else None
+                )
+                with patch.object(releases, 'latest', return_value=release):
+                    result = self.panel.handle('panel-version', None, '$v')
+                self.assertFalse(result['update_available'])
+                self.assertEqual(self.pending(), [])
+        self.assertNotIn('notified_version', self.panel.settings())
+
+    def test_release_notification_survives_restart_without_duplicate_after_ack(self):
+        release = {'version': '1.1.2', 'notes': 'fix', 'url': 'https://example.org'}
+        with patch.object(releases, 'latest', return_value=release) as fetch:
+            self.panel.check_releases()
+            item = self.pending()[0]
+            self.panel = admin_panel.Panel(self.root, lambda: self.now)
+            self.panel.check_releases(True)
+            self.assertEqual(self.pending(), [item])
+            self.panel.handle('panel-ack', {'id': item['id'], 'delivered': True}, None)
+            self.panel = admin_panel.Panel(self.root, lambda: self.now)
+            self.now += releases.INTERVAL
+            self.panel.check_releases()
+            self.assertEqual(self.pending(), [])
+            self.assertEqual(self.panel.settings()['notified_version'], '1.1.2')
+            fetch.return_value = {**release, 'version': '1.1.1'}
+            self.panel.check_releases(True)
+            self.assertEqual(self.pending(), [])
+            fetch.return_value = {**release, 'version': '1.1.3'}
+            self.panel.check_releases(True)
+            self.assertEqual(len(self.pending()), 1)
+            self.assertIn('Misbot 1.1.3.', self.pending()[0]['body'])
 
     def test_disabled_notifications_and_release_fetch_failure_are_durable(self):
         self.panel.handle('panel-preferences', {'key': 'updates', 'enabled': False}, '$p')
         with patch.object(
             releases,
             'latest',
-            return_value={'version': '1.3.0', 'notes': 'notes', 'url': 'example', 'assets': []},
-        ):
-            self.panel.check_releases(True)
-        self.assertEqual(self.pending(), [])
+            return_value={'version': '1.1.1', 'notes': 'fix', 'url': 'https://example.org'},
+        ) as fetch:
+            self.panel.maintenance()
+            fetch.assert_not_called()
+            result = self.panel.handle('panel-version', None, '$v')
+            self.assertTrue(result['update_available'])
+            self.assertEqual(self.pending(), [])
+            self.assertNotIn('notified_version', self.panel.settings())
+            self.panel.handle('panel-preferences', {'key': 'updates', 'enabled': True}, '$on')
+            self.now += releases.INTERVAL
+            self.panel.maintenance()
+            self.assertEqual(len(self.pending()), 1)
+            self.panel.handle('panel-preferences', {'key': 'updates', 'enabled': False}, '$off')
+            self.assertEqual(self.pending(), [])
         with patch.object(releases, 'latest', side_effect=RuntimeError('offline')) as fetch:
             with self.assertRaises(RuntimeError):
                 self.panel.check_releases(True)

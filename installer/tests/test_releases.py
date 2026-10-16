@@ -33,7 +33,7 @@ class ReleasesTests(unittest.TestCase):
         )
         self.assertEqual(result['version'], '1.10.1')
 
-    def test_pagination_and_minor_semantics(self):
+    def test_pagination(self):
         calls = []
 
         def fetch(url, limit):
@@ -44,16 +44,10 @@ class ReleasesTests(unittest.TestCase):
 
         self.assertEqual(releases.latest(fetch)['version'], '1.9.0')
         self.assertEqual(len(calls), 2)
-        self.assertTrue(releases.minor_update('1.1.9', '1.2.0'))
-        self.assertFalse(releases.minor_update('1.1.0', '1.1.9'))
-        self.assertFalse(releases.minor_update('1.1.0', '2.0.0'))
 
     def test_build_versions_are_ordered_numerically_below_stable(self):
         ordered = ('1.1.9', '1.2.0-build.9', '1.2.0-build.123', '1.2.0', '1.2.1-build.1')
         self.assertEqual(sorted(reversed(ordered), key=releases.product_version), list(ordered))
-        self.assertTrue(releases.minor_update('1.1.0-build.2', '1.2.0'))
-        self.assertTrue(releases.minor_update('v1.1.0', 'v1.2.0'))
-        self.assertFalse(releases.minor_update('1.2.0-build.2', '1.2.0'))
         for invalid in (
             '1.2.0-build.-1',
             '1.2.0-build.01',

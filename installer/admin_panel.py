@@ -259,12 +259,13 @@ class Panel:
         with self.database() as db:
             self.set(db, 'release_checked_at', now)
         release = releases.latest()
+        comparison = releases.comparison(self.root, release)
         with self.database() as db:
             self.set(db, 'release', release)
             if (
                 release
                 and settings['updates']
-                and releases.minor_update(releases.installed(self.root), release['version'])
+                and comparison['update_available']
                 and releases.version(release['version'])
                 > releases.version(settings.get('notified_version', '0.0.0'))
             ):
@@ -274,17 +275,17 @@ class Panel:
                     'Доступна новая версия Misbot '
                     + release['version']
                     + '. Установлена '
-                    + releases.installed(self.root)
+                    + comparison['installed']
                     + '.\n'
                     + release['notes']
                     + '\n'
                     + release['url']
                     + '\nОбновление: `'
-                    + releases.comparison(self.root, release)['command']
+                    + comparison['command']
                     + '`'
                     + (
                         ' или команда «`обновить`» в этом чате.'
-                        if releases.comparison(self.root, release)['update_supported']
+                        if comparison['update_supported']
                         else '.'
                     ),
                 )

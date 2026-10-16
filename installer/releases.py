@@ -121,14 +121,6 @@ def latest(fetch=https):
     }
 
 
-def minor_update(installed, candidate):
-    old, new = (
-        product_version(value.removeprefix('v') if isinstance(value, str) else value)
-        for value in (installed, candidate)
-    )
-    return new[0] == old[0] and new[1] > old[1]
-
-
 def installed(root):
     root = Path(root)
     metadata = json.loads((root / 'installation.json').read_text())
