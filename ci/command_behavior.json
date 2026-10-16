@@ -1943,6 +1943,84 @@
           "test": "safe check detail and unknown storage remain readable without leaking raw errors"
         }
       ]
+    },
+    {
+      "id": "runtime.native-telegram",
+      "commands": [
+        "config generate",
+        "start",
+        "stop",
+        "backup create",
+        "backup verify",
+        "backup restore",
+        "backup activate",
+        "update apply"
+      ],
+      "surfaces": [
+        "cli"
+      ],
+      "axes": [
+        "success",
+        "failure",
+        "permissions",
+        "preconditions",
+        "retry",
+        "state"
+      ],
+      "level": "backend",
+      "given": "native installation explicitly enables an existing Telegram worker/control pair with preserved identity and separate SQLite",
+      "expected_output": "optional worker/controller participate in lifecycle; snapshots are consistent and staged/frozen controller start is refused",
+      "expected_state": "repeat and relocation retain credentials, binding, offset and pending delivery; source rollback restores accepted image but retains newer SQLite; backup preserves live job state and prior writer set",
+      "tests": [
+        {
+          "file": "installer/tests/test_telegram_runtime.py",
+          "test": "TelegramRuntimeTests.test_actual_generator_adds_only_the_optional_worker_and_keeps_private_state"
+        },
+        {
+          "file": "installer/tests/test_telegram_runtime.py",
+          "test": "TelegramRuntimeTests.test_full_backup_archives_verified_sqlite_instead_of_live_wal"
+        },
+        {
+          "file": "installer/tests/test_telegram_runtime.py",
+          "test": "TelegramRuntimeTests.test_source_rebuild_and_rollback_restore_pin_but_keep_newer_sqlite"
+        },
+        {
+          "file": "installer/tests/test_telegram_runtime.py",
+          "test": "TelegramRuntimeTests.test_controller_refuses_staged_or_foreign_unit_and_preserves_bind_directory"
+        },
+        {
+          "file": "installer/tests/test_telegram_runtime.py",
+          "test": "TelegramRuntimeTests.test_activation_refuses_live_controller_and_failures_disable_it_again"
+        },
+        {
+          "file": "installer/tests/test_update.py",
+          "test": "UpdateTests.test_component_rollback_disables_native_controller_and_checks_worker_stopped"
+        },
+        {
+          "file": "installer/tests/test_database.py",
+          "test": "DatabaseTests.test_native_telegram_recovery_restores_previously_recorded_writer_state"
+        },
+        {
+          "file": "installer/tests/test_database.py",
+          "test": "DatabaseTests.test_native_telegram_stopped_writer_refuses_database_move_before_freeze"
+        },
+        {
+          "file": "installer/tests/test_backup_writers.py",
+          "test": "BackupWriterTests.test_native_telegram_pause_failure_and_frozen_recovery_preserve_prior_writer_set"
+        },
+        {
+          "file": "bots/telegram/tests/test_control.py",
+          "test": "ControlTests.test_snapshot_preserves_live_running_job_and_uses_fixed_private_output"
+        },
+        {
+          "file": "bots/telegram/tests/test_control.py",
+          "test": "IntegrationTests.test_snapshot_rpc_requires_root_not_worker_or_matrix_uid"
+        },
+        {
+          "file": "bots/telegram/tests/test_control.py",
+          "test": "ControlTests.test_root_snapshot_normalizes_group_despite_controller_worker_group"
+        }
+      ]
     }
   ],
   "surface_requirements": {

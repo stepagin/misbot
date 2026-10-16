@@ -196,7 +196,55 @@ class UpdateTests(unittest.TestCase):
         )
         (before / 'versions.json').write_text(json.dumps(older))
         (after / 'versions.json').write_text(json.dumps(newer))
+        for root in (before, after):
+            (root / 'installation.json').write_text('{"domain":"example.org"}')
         return before, after
+
+    def test_component_rollback_disables_native_controller_and_checks_worker_stopped(self):
+        import lifecycle
+        import telegram_runtime
+
+        with tempfile.TemporaryDirectory() as temporary:
+            before, after = self.component_folders(Path(temporary))
+            plan = update.component_plan(before, after)
+            (after / 'installation.json').write_text(
+                json.dumps(
+                    {
+                        'domain': 'example.org',
+                        'telegram_runtime': {'format': 1, 'server_name': 'example.org'},
+                    }
+                )
+            )
+            for running in (True, False):
+                with (
+                    self.subTest(running=running),
+                    patch.object(lifecycle, 'configure'),
+                    patch.object(lifecycle, 'dc') as compose,
+                    patch.object(
+                        lifecycle,
+                        'service_rows',
+                        side_effect=[
+                            [],
+                            [
+                                {
+                                    'Service': 'telegram-worker',
+                                    'State': 'running' if running else 'exited',
+                                },
+                            ],
+                        ],
+                    ),
+                    patch.object(telegram_runtime, 'controller') as controller,
+                    patch.object(update, 'component_schema') as schema,
+                ):
+                    if running:
+                        with self.assertRaisesRegex(RuntimeError, 'writers did not stop'):
+                            update.component_rollback_guard(after, before, plan)
+                        schema.assert_not_called()
+                    else:
+                        update.component_rollback_guard(after, before, plan)
+                        schema.assert_called_once_with(after)
+                    self.assertIn('telegram-worker', compose.call_args.args)
+                    controller.assert_called_once_with(after, lifecycle.run, start=False)
 
     def test_only_complete_approved_component_pair_is_admitted(self):
         with tempfile.TemporaryDirectory() as temp:

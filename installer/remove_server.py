@@ -551,6 +551,8 @@ def stop_services(root):
             path.unlink(missing_ok=True)
         lifecycle.run(['systemctl', 'daemon-reload'])
     federation_runtime.controller(root, lifecycle.run, False, remove=True)
+    if __import__('telegram_runtime').enabled(lifecycle.state()):
+        __import__('telegram_runtime').controller(root, lifecycle.run, False, remove=True)
     stop_turn(root)
     metadata = configuration.read_private_json(Path(root) / 'installation.json')
     if shutil.which('docker'):

@@ -38,6 +38,16 @@ FIELDS = {
 WRITERS = ('referral-bot', 'referral-control', 'synapse', 'mas', 'jwt')
 
 
+def managed_writers(metadata):
+    import telegram_runtime
+
+    return (
+        WRITERS
+        + (('federation-bot',) if metadata.get('federation_seeded') else ())
+        + (('telegram-worker',) if telegram_runtime.enabled(metadata) else ())
+    )
+
+
 def settings(path):
     values = preflight.private_settings_file(path)
     if set(values) - FIELDS or any(any(ord(c) < 32 for c in v) for v in values.values()):
@@ -337,7 +347,7 @@ def external(root, settings_path):
     running = {
         r['Service'] for r in lifecycle.service_rows() if r['State'] in ('running', 'restarting')
     }
-    writers = WRITERS + (('federation-bot',) if metadata.get('federation_seeded') else ())
+    writers = managed_writers(metadata)
     if any(name not in running for name in writers):
         raise RuntimeError(
             'Start and verify all Matrix writers with install.sh up/check before database-external; migration of an intentionally partially stopped installation is not supported yet'
@@ -543,7 +553,9 @@ def resume(root, record):
         record['phase'] = 'activating'
         save(root, record)
     lifecycle.up()
-    stopped = [name for name in WRITERS if name not in record['writers']]
+    stopped = [
+        name for name in managed_writers(migration_metadata(root)) if name not in record['writers']
+    ]
     if stopped:
         lifecycle.dc('stop', '-t', '30', *stopped)
     if record['writers']:

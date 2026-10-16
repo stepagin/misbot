@@ -178,6 +178,7 @@ class LifecycleTests(unittest.TestCase):
                         'referral-bot',
                         'referral-control',
                         'federation-bot',
+                        'telegram-worker',
                     )
                     for state in ('running', 'restarting', 'paused')
                 ),

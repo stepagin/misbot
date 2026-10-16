@@ -78,6 +78,41 @@ class FakeMAS:
 
 
 class ControlTests(unittest.TestCase):
+    def test_snapshot_preserves_live_running_job_and_uses_fixed_private_output(self):
+        self.bridge.db.execute('PRAGMA journal_mode=WAL')
+        self.bridge.db.execute(
+            'INSERT INTO management_jobs VALUES (?,?,?,?,?,?)',
+            ('live-job', 'misbot.ru', 10, 'backup', 'running', None),
+        )
+        self.bridge.db.commit()
+        response = self.bridge.handle({'action': 'backup_snapshot'})
+        saved = self.root / 'data/backup.sqlite3'
+        import hashlib
+
+        self.assertEqual(response, {'sha256': hashlib.sha256(saved.read_bytes()).hexdigest()})
+        self.assertEqual(saved.stat().st_mode & 0o777, 0o600)
+        with sqlite3.connect(saved) as connection:
+            self.assertEqual(
+                connection.execute(
+                    'SELECT state FROM management_jobs WHERE id=?', ('live-job',)
+                ).fetchone()[0],
+                'running',
+            )
+        self.assertEqual(
+            self.bridge.db.execute(
+                'SELECT state FROM management_jobs WHERE id=?', ('live-job',)
+            ).fetchone()[0],
+            'running',
+        )
+        with self.assertRaises(BotError):
+            self.bridge.handle({'action': 'backup_snapshot', 'output': '/tmp/forbidden'})
+
+    def test_root_snapshot_normalizes_group_despite_controller_worker_group(self):
+        with patch('bridge.os.geteuid', return_value=0), patch('bridge.os.fchown') as chown:
+            self.bridge.handle({'action': 'backup_snapshot'})
+        self.assertEqual(chown.call_count, 1)
+        self.assertEqual(chown.call_args.args[1:], (0, 0))
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
@@ -646,6 +681,12 @@ class ControlTests(unittest.TestCase):
 
 
 class IntegrationTests(unittest.TestCase):
+    def test_snapshot_rpc_requires_root_not_worker_or_matrix_uid(self):
+        check_peer(0, 'backup_snapshot')
+        for uid in (10001, 10002, 10003):
+            with self.subTest(uid=uid), self.assertRaises(BotError):
+                check_peer(uid, 'backup_snapshot')
+
     def test_matrix_process_cannot_use_telegram_admin_channel(self):
         for action in [
             'servers',

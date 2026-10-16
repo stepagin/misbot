@@ -1221,6 +1221,10 @@ import federation_runtime
 
 federation_runtime.configure(root, state, args.preview)
 services['federation-bot'] = federation_runtime.service()
+import telegram_runtime
+
+telegram_runtime.configure(root, state, args.preview)
+services.update(telegram_runtime.service(root, state))
 if has_proxy:
     services['mas']['env_file'] = [{'path': './mas-proxy.env', 'format': 'raw'}]
 (root / 'compose.yaml').write_text(yaml.safe_dump(compose, sort_keys=False))
