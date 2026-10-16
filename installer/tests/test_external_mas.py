@@ -389,7 +389,12 @@ class ExternalMASTests(unittest.TestCase):
         (self.root / 'secrets').mkdir(mode=0o700)
         state_store.write_json(
             self.root / 'secrets/admin-access.json',
-            {'username': 'matrix-admin', 'password_managed': False},
+            {
+                'username': 'matrix-admin',
+                'matrix_id': '@matrix-admin:example.org',
+                'mas_user_id': '01ARZ3NDEKTSV4RRFFQ69G5FAV',
+                'password_managed': False,
+            },
         )
         input_file = self.base / 'password.json'
         state_store.write_json(input_file, {'password': 'FICTIONAL_NEW_PASSWORD_123'})

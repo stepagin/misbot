@@ -57,6 +57,7 @@ class BootstrapTests(unittest.TestCase):
             root = Path(folder)
             (root / 'secrets').mkdir()
             (root / 'secrets/admin-access.json').write_text(json.dumps(self.credentials))
+            (root / 'secrets/admin-access.json').chmod(0o600)
             client = {
                 'client_id': 'EXAMPLE_CLIENT',
                 'client_secret': 'EXAMPLE_PRIVATE_CLIENT_SECRET',

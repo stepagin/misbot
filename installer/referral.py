@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import secrets
 import sqlite3
@@ -61,6 +62,28 @@ def validate_saved(root, metadata):
             raise RuntimeError('Saved referral crypto store is missing; restore from backup')
 
 
+def validate_client(client, *, external):
+    if not isinstance(client, dict):
+        raise RuntimeError('Invalid referral service credentials')
+    if (
+        not isinstance(client.get('client_secret'), str)
+        or not 1 <= len(client['client_secret']) <= 4096
+        or not client['client_secret'].isprintable()
+        or not isinstance(client.get('client_id'), str)
+        or not 1 <= len(client['client_id']) <= 4096
+        or not client['client_id'].isprintable()
+        or (
+            not external
+            and (
+                not isinstance(client['client_id'], str)
+                or not re.fullmatch(r'[0-7][0-9A-HJKMNP-TV-Z]{25}', client['client_id'])
+            )
+        )
+        or (not external and client.get('mas_url', 'http://mas:8080') != 'http://mas:8080')
+    ):
+        raise RuntimeError('Invalid referral service credentials')
+
+
 def configure(root, metadata, settings, preview=False):
     root = Path(root)
     validate_saved(root, metadata)
@@ -99,13 +122,7 @@ def configure(root, metadata, settings, preview=False):
             },
         )
     client = json.loads(path.read_text())
-    if (
-        not client.get('client_secret')
-        or not client.get('client_id')
-        or (not external and client['client_id'] != CLIENT_ID)
-        or (not external and client.get('mas_url', 'http://mas:8080') != 'http://mas:8080')
-    ):
-        raise RuntimeError('Invalid referral service credentials')
+    validate_client(client, external=external)
     metadata['referral_seeded'] = True
     policy = {
         'invitation_lifetime_seconds': int(settings.get('INVITATION_LIFETIME_SECONDS', '604800')),

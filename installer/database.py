@@ -19,6 +19,7 @@ import media
 import postgres_setup
 import preflight
 import state_store
+import service_identity
 import configuration
 import vault_cache
 
@@ -126,7 +127,12 @@ class Client:
         for role in ('synapse', 'mas'):
             password_file = folder / 'secrets' / ('db_' + role)
             if password_file.exists():
-                lines.append(prefix + role + ':' + escape(password_file.read_text().strip()))
+                lines.append(
+                    prefix
+                    + role
+                    + ':'
+                    + escape(service_identity.secret_value(password_file, 'db_' + role))
+                )
         state_store.write_text(self.passfile, '\n'.join(lines) + '\n')
 
     def command(self, tool, arguments, user=None):

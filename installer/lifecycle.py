@@ -177,9 +177,14 @@ def verify_external_mas_state():
     import configuration
 
     metadata = state()
+    initial_admin = __import__('service_identity').administrator(ROOT, metadata['domain'])
+    if initial_admin.mas_user_id is not None and initial_admin.mas_user_id != metadata.get(
+        'external_mas_admin_id'
+    ):
+        raise RuntimeError('Saved external MAS administrator identity changed')
     users = [
         {
-            'username': 'matrix-admin',
+            'username': initial_admin.username,
             'user_id': metadata.get('external_mas_admin_id'),
             'admin': True,
         }
@@ -676,6 +681,40 @@ def prepare_host():
 
 def create_admin():
     credentials = json.loads((ROOT / 'secrets/admin-access.json').read_text())
+    __import__('service_identity').administrator(
+        ROOT, domain=state()['domain'] if credentials.get('matrix_id') is not None else None
+    )
+    if credentials.get('password_managed') is False:
+        payload = {
+            'action': 'inspect',
+            'credentials': credentials,
+            'client': json.loads((ROOT / 'secrets/referral-client.json').read_text()),
+        }
+        try:
+            result = json.loads(
+                dc(
+                    'exec',
+                    '-T',
+                    'synapse',
+                    'python',
+                    '-c',
+                    (ROOT / 'mas_admin.py').read_text(),
+                    stdin=json.dumps(payload),
+                )
+            )
+            if result.get('user_id') != credentials['mas_user_id']:
+                raise ValueError()
+        except (OSError, RuntimeError, ValueError, TypeError):
+            raise RuntimeError(
+                'Saved MAS administrator was not confirmed; preserve its account and credentials'
+            ) from None
+        emit(
+            'administrator_ready',
+            credential_file=str(ROOT / 'secrets/admin-access.json'),
+            password_omitted=True,
+            password_managed=False,
+        )
+        return
     if external_mas():
         metadata = state()
         expected = metadata.get('external_mas_admin_id')

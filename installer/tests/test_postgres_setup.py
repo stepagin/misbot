@@ -61,6 +61,20 @@ class PostgresSetupTests(unittest.TestCase):
             )
         return Cluster(root)
 
+    def test_role_setup_preserves_opaque_password_boundary_spaces(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            cluster = self.fixture(root)
+            password = " fictional-'\\-пароль "
+            for name in ('synapse', 'mas'):
+                state_store.write_text(root / 'secrets' / ('db_' + name), password + '\n')
+            postgres_setup.initialize(root, cluster)
+            statements = [sql for _, sql in cluster.statements if sql and 'CREATE ROLE ' in sql]
+            self.assertEqual(len(statements), 2)
+            for sql in statements:
+                self.assertIn('SET standard_conforming_strings=on;', sql)
+                self.assertIn("PASSWORD ' fictional-''\\-пароль '", sql)
+
     def test_lost_role_commit_can_resume_with_same_ownership_and_no_secret_argv(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

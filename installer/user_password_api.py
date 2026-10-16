@@ -9,12 +9,12 @@ import urllib.parse
 import urllib.request
 
 
-def inspect_user(request, credentials):
+def inspect_user(request, credentials, protected_username='matrix-admin'):
     username = credentials.get('username')
     if (
         not isinstance(username, str)
         or not re.fullmatch(r'[a-z0-9][a-z0-9._=-]{0,254}', username)
-        or username == 'matrix-admin'
+        or username == protected_username
     ):
         raise RuntimeError('Use an existing ordinary username without @ or domain')
     status, response = request(
@@ -42,8 +42,8 @@ def inspect_user(request, credentials):
     return {'username': username, 'user_id': user_id}
 
 
-def set_password(request, credentials):
-    identity = inspect_user(request, credentials)
+def set_password(request, credentials, protected_username='matrix-admin'):
+    identity = inspect_user(request, credentials, protected_username)
     password = credentials.get('password')
     if (
         not isinstance(password, str)
@@ -117,7 +117,7 @@ def main():
             return response.status, json.loads(content) if content else None
 
     result = (inspect_user if payload['action'] == 'inspect' else set_password)(
-        send, payload['credentials']
+        send, payload['credentials'], payload.get('protected_username', 'matrix-admin')
     )
     print(json.dumps(result))  # Public account identity only; never a token or password.
 

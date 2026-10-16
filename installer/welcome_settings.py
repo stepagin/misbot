@@ -6,6 +6,7 @@ from typing import cast
 
 import configuration
 import configuration_schema
+import service_identity
 from welcome_message import DEFAULT_WELCOME, WelcomeContext
 
 
@@ -19,8 +20,7 @@ def owner(root: Path) -> str:
         admins = json.loads(config.read_text()).get('administrator_mxids')
         if admins:
             return cast(str, admins[0])
-    domain = cast(str, configuration.read_private_json(root / 'installation.json')['domain'])
-    return '@matrix-admin:' + domain
+    return service_identity.administrator(root).matrix_id
 
 
 def administrators(root: Path) -> list[str]:

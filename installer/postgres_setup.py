@@ -7,6 +7,7 @@ import uuid
 import preflight
 import configuration_schema
 import state_store
+import service_identity
 
 
 # Apply in the same session BEFORE any statement containing a role password.
@@ -106,7 +107,7 @@ def initialize(root, postgres):
     observed = inspect()
     validate(observed)
     for name in names:
-        password = (root / 'secrets' / ('db_' + name)).read_text().strip()
+        password = service_identity.secret_value(root / 'secrets' / ('db_' + name), 'db_' + name)
         # Role creation and its ownership comment commit together. A lost
         # response can be retried without changing an existing password.
         delimiter = '$matrix_' + uuid.uuid4().hex + '$'

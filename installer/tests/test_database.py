@@ -333,6 +333,26 @@ class DatabaseTests(unittest.TestCase):
             database.role_access(client)
         self.assertNotIn('EXAMPLE_SECRET_ERROR_MUST_NOT_ECHO', str(error.exception))
 
+    def test_pgpass_preserves_opaque_application_password_boundary_spaces(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'config').mkdir()
+            (root / 'secrets').mkdir()
+            state_store.write_json(
+                root / 'versions.json', {'digests': {'postgres': 'fictional-image'}}
+            )
+            state_store.write_text(
+                root / 'settings.env',
+                'POSTGRES_HOST=db.example.invalid\nPOSTGRES_PORT=5432\n'
+                'POSTGRES_ADMIN_USER=postgres\nPOSTGRES_ADMIN_PASSWORD=fictional\n',
+            )
+            state_store.write_text(root / 'secrets/db_synapse', ' fictional:pass\\word \n')
+            client = database.Client(root, root)
+            self.assertIn(
+                'db.example.invalid:5432:*:synapse: fictional\\:pass\\\\word \n',
+                client.passfile.read_text(),
+            )
+
     def test_client_uses_private_passfile_stdin_and_static_error(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

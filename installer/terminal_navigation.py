@@ -6,6 +6,7 @@ import re
 import stat
 
 import ui_actions
+import service_identity
 
 
 def pending_actions(ui):
@@ -158,7 +159,10 @@ def operation_selection(ui, command, key):
             raise Back()
         rows = []
         for record in ui.operation_records:
-            protected = {record.get('primary'), '@matrix-admin:' + ui.installation()['domain']}
+            protected = {
+                record.get('primary'),
+                service_identity.administrator(ui.root, ui.installation()['domain']).matrix_id,
+            }
             rows.extend(
                 (mxid, mxid, '')
                 for mxid in record.get('administrators', [])
@@ -179,7 +183,12 @@ def account_selection(ui, administrators=False):
     except (OSError, RuntimeError, ValueError, KeyError):
         ui.view.message('Список аккаунтов пока недоступен. Можно ввести локальное имя.')
         return None
-    protected = {'matrix-admin', 'referral-bot', 'server-guide', ui.saved_admin_tag()}
+    protected = {
+        service_identity.administrator(ui.root).username,
+        'referral-bot',
+        'server-guide',
+        ui.saved_admin_tag(),
+    }
     rows = [
         (item['mxid'] if administrators else item['username'], item['mxid'], '')
         for item in accounts
