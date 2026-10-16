@@ -424,3 +424,27 @@ POST. Прерванную явную замену продолжайте чер
 через раздел SSH-меню **Главная страница** или `sudo misbot homepage apply`.
 [Поля, значения по умолчанию, проверка и восстановление](homepage.md) описаны отдельно.
 Сгенерированные `public/site/` и Caddyfile вручную не редактируют.
+
+## Дополнительные настройки Synapse
+
+Файл `config/synapse-tuning.yaml` сохраняет настройки приложения при повторной
+генерации, обновлении и восстановлении копии. Допустимы только поля
+`allow_guest_access`, `auto_join_rooms`, `caches`, `default_room_version`,
+`max_image_pixels`, `rc_login`, `rc_message`, `rc_registration`,
+`room_prejoin_state`, `server_admins`, `suppress_key_server_warning` и
+`trusted_key_servers`. Значения имеют формат конфигурации закреплённой версии
+Synapse. Файл должен быть обычным YAML-словарём не больше 64 KiB.
+
+Например, для настройки кеша:
+
+```yaml
+caches:
+  global_factor: 1.0
+```
+
+Эти поля накладываются на настройки генератора. Базы данных, ключи, адреса,
+listeners, регистрация аккаунтов и MatrixRTC через этот файл не изменяются;
+неизвестное поле останавливает генерацию. Перед применением сохраните копию,
+выполните `sudo misbot config generate`, затем штатный запуск и проверку.
+Предел загрузки файлов задаётся полем `MAX_UPLOAD_SIZE_MIB` в настройках Misbot.
+Существующая подпись сервиса MAS из `config/mas-defaults.yaml` также сохраняется.
