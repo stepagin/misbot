@@ -98,6 +98,8 @@ names = [
     'misbot_s3_provider.py',
     'existing-compose.md',
     'telegram_backup.py',
+    'telegram_runtime.py',
+    'telegram.md',
     'existing_proxy.py',
     'telegram_container.py',
     'homepage.py',

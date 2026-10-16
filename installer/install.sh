@@ -180,15 +180,22 @@ bounded() {
 }
 
 host_dependencies() {
+  local task_python_imports='import yaml, rich'
+  local task_optional_packages=()
+  if [[ -f "$task_root/installation.json" ]] &&
+     python3 -c 'import json,sys; sys.exit("telegram_runtime" not in json.load(open(sys.argv[1])))' "$task_root/installation.json"; then
+    task_python_imports='import yaml, rich, requests'
+    task_optional_packages=(python3-requests)
+  fi
   command -v apt-get >/dev/null || die 'Supported hosts: Ubuntu 24.04/26.04 or Debian 12/13.'
   if command -v curl >/dev/null && command -v openssl >/dev/null &&
      command -v python3 >/dev/null && command -v ip >/dev/null &&
      command -v swapon >/dev/null && command -v dig >/dev/null && [[ -s /etc/ssl/certs/ca-certificates.crt ]] &&
-     python3 -c 'import yaml, rich' >/dev/null 2>&1; then
+     python3 -c "$task_python_imports" >/dev/null 2>&1; then
     return
   fi
   bounded 600 apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=60 update -qq
-  bounded 900 apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=60 install -y --no-install-recommends ca-certificates curl openssl python3 python3-yaml python3-rich util-linux iproute2 dnsutils
+  bounded 900 apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=60 install -y --no-install-recommends ca-certificates curl openssl python3 python3-yaml python3-rich util-linux iproute2 dnsutils "${task_optional_packages[@]}"
 }
 
 docker_dependencies() {
@@ -336,6 +343,7 @@ case "$task_action" in
     ;;
   restore-activate|move-abort)
     [[ -f "$task_root/installation.json" ]] || die 'Restore into an empty target first.'
+    host_dependencies
     task_command_args=()
     [[ "$task_action" != restore-activate ]] || task_command_args=(--register-command)
     if [[ "$task_action" == restore-activate && -n "$task_external_mas_confirm" ]]; then

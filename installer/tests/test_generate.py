@@ -697,7 +697,13 @@ class GeneratorTests(unittest.TestCase):
         shutil.copytree(BUNDLE, source, ignore=shutil.ignore_patterns('__pycache__', 'tests'))
         (source / 'misbot_s3_provider.py').chmod(0o600)
         result = subprocess.run(
-            [sys.executable, str(source / 'generate.py'), '--directory', str(self.root), '--preview'],
+            [
+                sys.executable,
+                str(source / 'generate.py'),
+                '--directory',
+                str(self.root),
+                '--preview',
+            ],
             capture_output=True,
             text=True,
         )

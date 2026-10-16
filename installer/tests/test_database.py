@@ -18,6 +18,59 @@ import state_store
 
 
 class DatabaseTests(unittest.TestCase):
+    def test_native_telegram_stopped_writer_refuses_database_move_before_freeze(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            metadata = {
+                'domain': 'example.invalid',
+                'databases_initialized': True,
+                'storage_committed': True,
+                'telegram_runtime': {'format': 1, 'server_name': 'example.invalid'},
+            }
+            state_store.write_json(root / 'installation.json', metadata)
+            rows = [{'Service': name, 'State': 'running'} for name in database.WRITERS]
+            rows.append({'Service': 'telegram-worker', 'State': 'exited'})
+            with (
+                patch.object(lifecycle, 'service_rows', return_value=rows),
+                patch.object(database, 'target') as target,
+                patch.object(lifecycle, 'backup') as backup,
+            ):
+                with self.assertRaisesRegex(RuntimeError, 'partially stopped'):
+                    database.external(root, root / 'unused.env')
+                target.assert_not_called()
+                backup.assert_not_called()
+            self.assertFalse((root / 'database-transition.json').exists())
+
+    def test_native_telegram_recovery_restores_previously_recorded_writer_state(self):
+        for was_running in (False, True):
+            with self.subTest(was_running=was_running), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                record = self.fixture(root)
+                record.update(activated=True, phase='activating')
+                if was_running:
+                    record['writers'].append('telegram-worker')
+                state_store.write_json(
+                    root / 'installation.json',
+                    {
+                        'domain': 'example.invalid',
+                        'telegram_runtime': {'format': 1, 'server_name': 'example.invalid'},
+                    },
+                )
+                (root / 'config').mkdir()
+                with (
+                    patch.object(database, 'Client'),
+                    patch.object(database, 'version_check'),
+                    patch.object(database, 'role_access'),
+                    patch.object(lifecycle, 'up'),
+                    patch.object(lifecycle, 'dc') as compose,
+                    patch.object(lifecycle, 'wait_writers') as wait,
+                    patch.object(lifecycle, 'emit'),
+                ):
+                    database.resume(root, record)
+                    stopped = compose.call_args.args[3:]
+                    self.assertEqual('telegram-worker' in stopped, not was_running)
+                    self.assertEqual('telegram-worker' in wait.call_args.args[0], was_running)
+
     def test_legacy_import_cleanup_refuses_live_destination_and_keeps_checkpoint(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

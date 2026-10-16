@@ -13,6 +13,39 @@ import state_store
 
 
 class BackupWriterTests(unittest.TestCase):
+    def test_native_telegram_pause_failure_and_frozen_recovery_preserve_prior_writer_set(self):
+        from dataclasses import replace
+
+        writers = backup_writers.BackupWriters(
+            replace(
+                self.runtime,
+                services=lambda: [
+                    {'Service': 'telegram-worker', 'State': 'running'},
+                    {'Service': 'synapse', 'State': 'running'},
+                    {'Service': 'mas', 'State': 'exited'},
+                ],
+            )
+        )
+        with self.assertRaisesRegex(RuntimeError, 'snapshot failure'):
+            with writers.pause():
+                self.assertEqual(
+                    state_store.backup_pause_record(self.root)['writers'],
+                    ['telegram-worker', 'synapse'],
+                )
+                raise RuntimeError('snapshot failure')
+        self.assertEqual(
+            [call.args for call in self.compose.call_args_list],
+            [
+                ('stop', '-t', '30', 'telegram-worker', 'synapse'),
+                ('up', '-d', 'telegram-worker', 'synapse'),
+            ],
+        )
+        self.compose.reset_mock()
+        self.record(writers=['telegram-worker', 'synapse'], keep_stopped=True)
+        with patch.object(state_store, 'process_identity', side_effect=FileNotFoundError):
+            writers.recover()
+        self.compose.assert_called_once_with('stop', '-t', '30', 'telegram-worker', 'synapse')
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)

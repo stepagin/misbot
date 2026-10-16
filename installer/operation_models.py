@@ -4,7 +4,15 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Literal, NotRequired, Required, TypedDict
 
-BACKUP_WRITERS = ('federation-bot', 'referral-bot', 'referral-control', 'synapse', 'mas', 'jwt')
+BACKUP_WRITERS = (
+    'telegram-worker',
+    'federation-bot',
+    'referral-bot',
+    'referral-control',
+    'synapse',
+    'mas',
+    'jwt',
+)
 
 
 class InstallationState(TypedDict, total=False):

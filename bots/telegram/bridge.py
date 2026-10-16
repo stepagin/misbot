@@ -5,6 +5,7 @@ MAS device authorization and current MAS privileges are checked here, not in the
 """
 
 import argparse
+from contextlib import closing
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -20,6 +21,7 @@ import subprocess
 import struct
 import sys
 import threading
+import tempfile
 import time
 
 import requests
@@ -33,6 +35,8 @@ LOG = logging.getLogger('bridge')
 
 
 def check_peer(uid, action):
+    if action == 'backup_snapshot' and uid != 0:
+        raise BotError('Снимок состояния доступен только локальному администратору.')
     matrix_actions = {
         'servers',
         'matrix_identity',
@@ -984,6 +988,32 @@ class Bridge:
 
     def handle(self, request):
         action = request.get('action')
+        if action == 'backup_snapshot':
+            if set(request) != {'action'}:
+                raise BotError('Параметры снимка не поддерживаются.')
+            with self.lock:
+                if self.db.in_transaction:
+                    raise BotError('Состояние занято; повторите резервное копирование.')
+                destination = self.root / 'data/backup.sqlite3'
+                if destination.is_symlink():
+                    raise BotError('Небезопасный путь снимка.')
+                descriptor, temporary = tempfile.mkstemp(
+                    prefix='.backup-', suffix='.sqlite3', dir=self.root / 'data'
+                )
+                try:
+                    if os.geteuid() == 0:
+                        os.fchown(descriptor, 0, 0)
+                finally:
+                    os.close(descriptor)
+                try:
+                    with closing(sqlite3.connect(temporary)) as saved:
+                        self.db.backup(saved)
+                        if saved.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
+                            raise BotError('Целостность снимка не подтверждена.')
+                    os.replace(temporary, destination)
+                finally:
+                    Path(temporary).unlink(missing_ok=True)
+                return {'sha256': hashlib.sha256(destination.read_bytes()).hexdigest()}
         if action == 'servers':
             return {
                 name: {

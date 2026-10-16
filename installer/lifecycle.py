@@ -25,6 +25,7 @@ import state_store
 import startup_process
 import backup_archive
 import backup_writers
+import telegram_runtime
 from operation_models import OperationError
 import media_transfer
 import media_snapshot
@@ -150,6 +151,8 @@ def expected_services(metadata=None):
         names.add('postgres')
     if metadata.get('federation_seeded'):
         names.add('federation-bot')
+    if telegram_runtime.enabled(metadata):
+        names.add('telegram-worker')
     return names
 
 
@@ -392,6 +395,8 @@ def down():
             )
     if state().get('federation_seeded'):
         __import__('federation_runtime').controller(ROOT, run, False, remove=True)
+    if telegram_runtime.enabled(state()):
+        telegram_runtime.controller(ROOT, run, False, remove=True)
     dc('down')  # No volumes, orphan removal, images, files or checkpoint deletion.
     emit(
         'installation_down',
@@ -552,6 +557,7 @@ def generate():
     metadata = state()
     referral.validate_saved(ROOT, metadata)
     __import__('federation_runtime').validate(ROOT, metadata)
+    telegram_runtime.validate(ROOT, metadata)
     if (
         metadata.get('synapse_signing_key_created')
         and not (ROOT / 'data/synapse' / (metadata['domain'] + '.signing.key')).is_file()
@@ -605,6 +611,7 @@ def generate():
         compose.write_text(yaml.safe_dump(value, sort_keys=False))
     referral.prepare_images(ROOT, run, emit)
     __import__('federation_runtime').prepare_image(ROOT, run)
+    telegram_runtime.prepare_image(ROOT, run)
     dc('config', '--quiet')
     isolated = ['docker', 'run', '--rm', '--network', 'none', '--memory', '144m', '--cpus', '0.5']
 
@@ -1130,6 +1137,13 @@ def up():
     wait(lambda: cert.is_file() and key.is_file(), attempts=150, service='caddy')
     run(['openssl', 'x509', '-in', str(cert), '-checkend', '86400', '-noout'])
     dc('up', '-d', 'livekit')
+    if telegram_runtime.enabled(state()):
+        telegram_runtime.controller(ROOT, run)
+        wait(
+            lambda: telegram_runtime.rpc(ROOT, {'action': 'servers'}) is not None,
+            service='telegram-controller',
+        )
+        dc('up', '-d', 'telegram-worker')
     certificate_watch()
     wait(
         lambda: all(
@@ -1368,6 +1382,7 @@ def check():
             time.sleep(min(2, remaining))
     referral.validate_saved(ROOT, state())
     __import__('federation_runtime').validate(ROOT, state())
+    telegram_runtime.check(ROOT, state())
     emit('public_checks', passed=True)
 
 
@@ -1567,6 +1582,7 @@ def backup(leave_stopped=False):
                 'images.lock.json',
                 'referral-images.lock.json',
                 'federation-images.lock.json',
+                'telegram-images.lock.json',
                 'data/federation',
                 'data/federation-bot',
                 'federation-transition.json',
@@ -1584,6 +1600,7 @@ def backup(leave_stopped=False):
             ]:
                 if (ROOT / name).exists() or (ROOT / name).is_symlink():
                     backup_archive.add_tree(tar, ROOT / name, name)
+            telegram_runtime.add_backup(tar, ROOT, state(), run)
         (target / 'mode.txt').write_text(
             'consistent-synapse-only\n' if external_mas() else 'consistent\n'
         )
@@ -1665,6 +1682,7 @@ def move_export():
         '-t',
         '30',
         *(['federation-bot'] if state().get('federation_seeded') else []),
+        *(['telegram-worker'] if telegram_runtime.enabled(metadata) else []),
         'referral-bot',
         'referral-control',
         *owned_databases(),
@@ -1672,10 +1690,20 @@ def move_export():
     )
     if state().get('federation_seeded'):
         __import__('federation_runtime').controller(ROOT, run, False)
+    if telegram_runtime.enabled(metadata):
+        telegram_runtime.controller(ROOT, run, False)
     if metadata.get('media_mode', 'local') == 's3':
         if any(
             row['Service']
-            in ('federation-bot', 'referral-bot', 'referral-control', 'synapse', 'mas', 'jwt')
+            in (
+                'telegram-worker',
+                'federation-bot',
+                'referral-bot',
+                'referral-control',
+                'synapse',
+                'mas',
+                'jwt',
+            )
             and row['State'] in ('running', 'restarting')
             for row in service_rows()
         ):
@@ -1722,7 +1750,10 @@ def move_abort():
         metadata = state()
         metadata['migration_frozen'] = True
         state_store.write_json(ROOT / 'installation.json', metadata)
-        dc('stop')
+        try:
+            telegram_runtime.controller(ROOT, run, start=False)
+        finally:
+            dc('stop')
         raise
 
 
@@ -1738,6 +1769,8 @@ def restore_check():
         __import__('federation_runtime').verify_archive(snapshot / 'files.tar.gz')
         with tarfile.open(snapshot / 'files.tar.gz', 'r:gz') as tar:
             saved_metadata = json.load(tar.extractfile('installation.json'))
+        if telegram_runtime.enabled(saved_metadata):
+            telegram_runtime.verify_archive(snapshot / 'files.tar.gz')
         databases = backup_archive.validate_authentication_boundary(snapshot, saved_metadata)
         emit('referral_backup_crypto_restore', passed=True)
         for database in databases:
@@ -1807,7 +1840,15 @@ def restore_activate(external_mas_confirm=None):
         raise RuntimeError('Подтверждение внешнего MAS применяется только к внешнему MAS.')
     if any(
         row['Service']
-        in ('synapse', 'mas', 'jwt', 'referral-bot', 'referral-control', 'federation-bot')
+        in (
+            'synapse',
+            'mas',
+            'jwt',
+            'referral-bot',
+            'referral-control',
+            'federation-bot',
+            'telegram-worker',
+        )
         and row['State'] in ('running', 'restarting', 'paused')
         for row in service_rows()
     ):
@@ -1815,6 +1856,7 @@ def restore_activate(external_mas_confirm=None):
             'Staged target writers are still active (running, restarting or paused); stop them with install.sh down, '
             'then repeat restore-activate after stopping the source; no keys were cleared'
         )
+    telegram_runtime.assert_stopped(ROOT, run, metadata)
     preflight.check(ROOT)
     # Also covers ready journals produced by older installers. Repeat after a
     # failed activation is safe because target writers are stopped below.
@@ -1827,7 +1869,10 @@ def restore_activate(external_mas_confirm=None):
         metadata = state()
         metadata['restore_pending'] = True
         state_store.write_json(ROOT / 'installation.json', metadata)
-        dc('stop')
+        try:
+            telegram_runtime.controller(ROOT, run, start=False)
+        finally:
+            dc('stop')
         raise
 
 

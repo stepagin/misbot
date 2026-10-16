@@ -94,6 +94,9 @@ SNAPSHOT_FILES = (
     'images.lock.json',
     'referral-images.lock.json',
     'federation-images.lock.json',
+    'telegram-images.lock.json',
+    'data/telegram-control/bot-config.json',
+    'data/telegram-control/bot-policy.json',
     'synapse-s3-image.lock.json',
     'installation.json',
     'mas-proxy.env',
@@ -218,6 +221,11 @@ def component_rollback_guard(root, folder, plan):
         *(['mas'] if 'mas' in application_databases(root) else []),
         'jwt',
     )
+    import telegram_runtime
+
+    if telegram_runtime.enabled(state(root, require_sources=False)):
+        writers = ('telegram-worker', *writers)
+        telegram_runtime.controller(root, lifecycle.run, start=False)
     if any(row['Service'] == 'federation-bot' for row in lifecycle.service_rows()):
         writers = ('federation-bot', *writers)
     lifecycle.dc('stop', '-t', '30', *writers)
@@ -739,6 +747,14 @@ def perform_update(source, root, action):
         return
     if not installed.get('databases_initialized'):
         fail('Run install.sh up once before applying release updates')
+    if installed.get('telegram_runtime') and not {
+        'telegram_runtime.py',
+        *(
+            'telegram-bot/' + name
+            for name in ('Dockerfile', 'requirements.txt', 'worker.py', 'common.py')
+        ),
+    }.issubset(entries):
+        fail('Candidate release lacks the enabled native Telegram runtime; installed data retained')
     transition = component_plan(root, source)
     if transition:
         component_schema(root)
