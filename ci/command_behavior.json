@@ -2119,6 +2119,67 @@
           "test": "AdministratorConsumerTests.test_cli_can_show_unmanaged_admin_status_without_bootstrap_identity_error"
         }
       ]
+    },
+    {
+      "id": "runtime.changed-inputs",
+      "commands": [
+        "start",
+        "update apply"
+      ],
+      "surfaces": [
+        "cli"
+      ],
+      "axes": [
+        "success",
+        "retry",
+        "state"
+      ],
+      "level": "backend",
+      "given": "owned runtime configuration or S3 adapter bytes change while pinned images remain unchanged",
+      "expected_output": "Compose service labels change only for consumers of changed inputs",
+      "expected_state": "identical regeneration keeps labels stable; live data and TLS churn excluded; restored configuration restores prior digest",
+      "tests": [
+        {
+          "file": "installer/tests/test_runtime_config.py",
+          "test": "RuntimeConfigTests.test_generated_labels_are_stable_and_ignore_live_data"
+        },
+        {
+          "file": "installer/tests/test_runtime_config.py",
+          "test": "RuntimeConfigTests.test_atomic_replacement_changes_only_consumers_and_rollback_restores_digest"
+        },
+        {
+          "file": "installer/tests/test_runtime_config.py",
+          "test": "RuntimeConfigTests.test_regeneration_adopts_old_rtc_and_livekit_configuration"
+        },
+        {
+          "file": "installer/tests/test_runtime_config.py",
+          "test": "RuntimeConfigTests.test_s3_adapter_source_update_changes_synapse_without_image_change"
+        }
+      ]
+    },
+    {
+      "id": "runtime.provisioned-bots",
+      "commands": [
+        "start",
+        "update apply"
+      ],
+      "surfaces": [
+        "cli"
+      ],
+      "axes": [
+        "success",
+        "state"
+      ],
+      "level": "backend",
+      "given": "bot provisioning writes final credential configuration after initial generation",
+      "expected_output": "current content fingerprint reaches Compose before each bot up command",
+      "expected_state": "repeating refresh without content changes leaves Compose bytes unchanged",
+      "tests": [
+        {
+          "file": "installer/tests/test_runtime_config.py",
+          "test": "RuntimeConfigTests.test_startup_fingerprints_provisioned_bot_files_before_compose_up"
+        }
+      ]
     }
   ],
   "surface_requirements": {

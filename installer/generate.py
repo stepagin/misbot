@@ -24,6 +24,7 @@ import configuration_schema
 import preflight
 import homepage
 import service_identity
+import runtime_config
 
 
 def merge(base, overlay):
@@ -1258,6 +1259,7 @@ federation_runtime.configure(root, state, args.preview)
 services['federation-bot'] = federation_runtime.service()
 if has_proxy:
     services['mas']['env_file'] = [{'path': './mas-proxy.env', 'format': 'raw'}]
+runtime_config.apply(root, compose, preview=args.preview)
 (root / 'compose.yaml').write_text(yaml.safe_dump(compose, sort_keys=False))
 if not args.preview:
     for name in (['postgres'] if database_mode == 'local' else []) + [

@@ -152,6 +152,7 @@ names = [
     'install.sh',
     'generate.py',
     'service_identity.py',
+    'runtime_config.py',
     'lifecycle.py',
     'operation_models.py',
     'database.py',

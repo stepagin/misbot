@@ -1075,6 +1075,7 @@ def up():
     if not metadata.get('referral_provisioned'):
         referral.provision(ROOT, dc, metadata)
         state_store.write_json(ROOT / 'installation.json', metadata)
+    __import__('runtime_config').refresh(ROOT, ('referral-bot',))
     dc('up', '-d', 'referral-bot')
     wait(
         lambda: dc(
@@ -1104,6 +1105,7 @@ def up():
     federation_runtime.provision(ROOT, dc, metadata)
     state_store.write_json(ROOT / 'installation.json', metadata)
     federation_runtime.controller(ROOT, run)
+    __import__('runtime_config').refresh(ROOT, ('federation-bot',))
     dc('up', '-d', 'federation-bot')
     wait(
         lambda: dc(
