@@ -498,10 +498,24 @@ def rpc(root, request):
         client.settimeout(60)
         client.connect(str(socket_directory(root) / 'control.sock'))
         client.sendall(json.dumps(request).encode() + b'\n')
-        answer = json.loads(client.makefile('rb').readline(32769))
+        with client.makefile('rb') as response:
+            answer = json.loads(response.readline(32769))
     if not answer.get('ok'):
         raise RuntimeError('Telegram controller did not confirm its snapshot/readiness')
     return answer['result']
+
+
+def ready(root):
+    try:
+        return rpc(root, {'action': 'servers'}) is not None
+    except (
+        FileNotFoundError,
+        ConnectionRefusedError,
+        ConnectionResetError,
+        BrokenPipeError,
+        TimeoutError,
+    ):
+        raise RuntimeError('Telegram controller transport is not ready') from None
 
 
 def check(root, state=None):

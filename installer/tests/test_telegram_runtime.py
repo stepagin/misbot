@@ -5,11 +5,13 @@ import json
 import os
 from pathlib import Path
 import shutil
+import socket
 import sqlite3
 import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 from contextlib import nullcontext
@@ -29,6 +31,85 @@ BUNDLE = Path(__file__).resolve().parents[1]
 
 
 class TelegramRuntimeTests(unittest.TestCase):
+    def test_startup_retries_missing_and_refused_socket_until_real_controller_reply(self):
+        folder = self.root.parent
+        path = folder / 'control.sock'
+        start, listening = threading.Event(), threading.Event()
+        errors, requests, attempts = [], [], []
+
+        def controller():
+            try:
+                self.assertTrue(start.wait(2))
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+                    server.settimeout(2)
+                    server.bind(str(path))
+                    server.listen()
+                    listening.set()
+                    connection, _ = server.accept()
+                    with connection, connection.makefile('rb') as stream:
+                        requests.append(json.loads(stream.readline()))
+                        connection.sendall(b'{"ok":true,"result":{"example.org":{}}}\n')
+            except BaseException as error:
+                errors.append(error)
+
+        thread = threading.Thread(target=controller, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 3)
+        self.addCleanup(start.set)
+
+        def probe():
+            attempts.append(True)
+            try:
+                return runtime.ready(self.root)
+            except RuntimeError:
+                if len(attempts) == 1:
+                    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as stale:
+                        stale.bind(str(path))
+                elif len(attempts) == 2:
+                    path.unlink()
+                    start.set()
+                    self.assertTrue(listening.wait(2))
+                raise
+
+        with (
+            patch.object(runtime, 'socket_directory', return_value=folder),
+            patch.object(lifecycle, 'emit'),
+            patch.object(lifecycle.time, 'sleep'),
+        ):
+            lifecycle.wait(probe, attempts=3, service='telegram-controller')
+        thread.join(3)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(len(attempts), 3)
+        self.assertEqual(requests, [{'action': 'servers'}])
+
+    def test_readiness_only_normalizes_expected_transport_errors(self):
+        for kind in (
+            FileNotFoundError,
+            ConnectionRefusedError,
+            ConnectionResetError,
+            BrokenPipeError,
+            TimeoutError,
+        ):
+            with self.subTest(kind=kind), patch.object(runtime, 'rpc', side_effect=kind()):
+                with self.assertRaisesRegex(RuntimeError, 'transport is not ready'):
+                    runtime.ready(self.root)
+        for error in (
+            PermissionError(),
+            OSError('unexpected'),
+            KeyError('result'),
+            json.JSONDecodeError('malformed response', '', 0),
+        ):
+            with (
+                self.subTest(kind=type(error)),
+                patch.object(runtime, 'rpc', side_effect=error),
+                patch.object(lifecycle, 'emit'),
+                patch.object(lifecycle.time, 'sleep') as sleep,
+            ):
+                with self.assertRaises(type(error)):
+                    lifecycle.wait(lambda: runtime.ready(self.root), attempts=3)
+                sleep.assert_not_called()
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

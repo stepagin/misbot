@@ -1140,7 +1140,7 @@ def up():
     if telegram_runtime.enabled(state()):
         telegram_runtime.controller(ROOT, run)
         wait(
-            lambda: telegram_runtime.rpc(ROOT, {'action': 'servers'}) is not None,
+            lambda: telegram_runtime.ready(ROOT),
             service='telegram-controller',
         )
         dc('up', '-d', 'telegram-worker')

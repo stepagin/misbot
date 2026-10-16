@@ -2211,6 +2211,10 @@
       "tests": [
         {
           "file": "installer/tests/test_telegram_runtime.py",
+          "test": "TelegramRuntimeTests.test_startup_retries_missing_and_refused_socket_until_real_controller_reply"
+        },
+        {
+          "file": "installer/tests/test_telegram_runtime.py",
           "test": "TelegramRuntimeTests.test_actual_generator_adds_only_the_optional_worker_and_keeps_private_state"
         },
         {
