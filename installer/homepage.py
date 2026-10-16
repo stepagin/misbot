@@ -22,6 +22,7 @@ import state_store
 KEYS = ('HOMEPAGE_MODE', 'HOMEPAGE_URL', 'SITE_NAME', 'SITE_DESCRIPTION', 'SITE_SUPPORT_URL')
 BEGIN = '    # misbot homepage begin\n'
 END = '    # misbot homepage end\n'
+ASSET_LIMITS = {'index.html': 2 * 1024**2, 'site.css': 256 * 1024}
 
 
 def links(model):
@@ -138,16 +139,55 @@ def replace_route(text, model):
     return text.replace(legacy, route(model), 1)
 
 
+def site_assets(root, model):
+    """Render an optional private local template without modifying its source."""
+    template = Path(root) / 'config/site-template'
+    if not template.exists() and not template.is_symlink():
+        return render(model), (Path(__file__).parent / 'site/site.css').read_text()
+    info = template.lstat()
+    if (
+        template.resolve() != template.absolute()
+        or not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.geteuid()
+        or info.st_mode & 0o077
+    ):
+        raise RuntimeError('Локальный шаблон сайта должен быть приватным каталогом без symlink.')
+    contents = []
+    for name, limit in ASSET_LIMITS.items():
+        path = template / name
+        info = path.lstat()
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+            or info.st_uid != os.geteuid()
+            or info.st_mode & 0o077
+            or info.st_size > limit
+        ):
+            raise RuntimeError(
+                'Файлы шаблона сайта должны быть приватными обычными файлами допустимого размера.'
+            )
+        contents.append(config.read_private(path, max_bytes=limit))
+    try:
+        rendered = render(model, template=contents[0])
+    except KeyError:
+        raise RuntimeError('Неизвестный маркер в локальном шаблоне сайта.') from None
+    if 'name="misbot-homepage"' not in rendered:
+        raise RuntimeError('Локальный шаблон сайта должен сохранять meta name="misbot-homepage".')
+    if len(rendered.encode('utf-8')) > ASSET_LIMITS['index.html']:
+        raise RuntimeError('Готовая страница превышает допустимый размер 2 MiB.')
+    return rendered, contents[1]
+
+
 def write_assets(root, model):
+    # Validate/render both inputs before publishing either public output.
+    document, stylesheet = site_assets(root, model)
     folder = Path(root) / 'public/site'
     if folder.resolve() != folder.absolute():
         raise RuntimeError('Небезопасный каталог сайта')
     folder.mkdir(mode=0o755, parents=True, exist_ok=True)
     folder.chmod(0o755)
-    state_store.write_text(folder / 'index.html', render(model), 0o644)
-    state_store.write_text(
-        folder / 'site.css', (Path(__file__).parent / 'site/site.css').read_text(), 0o644
-    )
+    state_store.write_text(folder / 'index.html', document, 0o644)
+    state_store.write_text(folder / 'site.css', stylesheet, 0o644)
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -348,7 +388,13 @@ class Backend:
         self.paths()
         model = self.proposed(changes)
         before = config.load(self.root, True)
-        if all(model[key] == before[key] for key in KEYS):
+        expected_assets = dict(zip(('index.html', 'site.css'), site_assets(self.root, model)))
+        assets_match = all(
+            (self.root / 'public/site' / name).is_file()
+            and (self.root / 'public/site' / name).read_text() == content
+            for name, content in expected_assets.items()
+        )
+        if all(model[key] == before[key] for key in KEYS) and assets_match:
             return {'status': 'unchanged'}
         stage = config.directory(self.root / 'stages/homepage' / secrets.token_hex(16))
         config.snapshot(self.root, stage / 'previous')
@@ -359,7 +405,10 @@ class Backend:
         if saved.exists():
             for name in ('index.html', 'site.css'):
                 if (saved / name).exists():
-                    state_store.write_text(stage / ('previous-' + name), (saved / name).read_text())
+                    previous = (saved / name).read_text()
+                    if len(previous.encode('utf-8')) > ASSET_LIMITS[name]:
+                        raise RuntimeError('Прежний сайт превышает допустимый размер checkpoint.')
+                    state_store.write_text(stage / ('previous-' + name), previous)
         candidate = replace_route((self.root / 'config/Caddyfile').read_text(), model)
         state_store.write_text(stage / 'next-caddy', candidate)
         self.validator(stage / 'next-caddy')
@@ -415,7 +464,9 @@ class Backend:
                 if (stage / ('previous-' + name)).exists():
                     state_store.write_text(
                         self.root / 'public/site' / name,
-                        config.read_private(stage / ('previous-' + name)),
+                        config.read_private(
+                            stage / ('previous-' + name), max_bytes=ASSET_LIMITS[name]
+                        ),
                         0o644,
                     )
         else:

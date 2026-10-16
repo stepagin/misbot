@@ -11,18 +11,18 @@ import configuration_schema as schema
 import state_store
 
 
-def read_private(path):
+def read_private(path, *, max_bytes=131072):
     path = Path(path)
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        with os.fdopen(fd, 'r', encoding='utf-8-sig') as stream:
+        with os.fdopen(fd, 'rb') as stream:
             info = os.fstat(stream.fileno())
             if (
                 not stat.S_ISREG(info.st_mode)
                 or info.st_nlink != 1
                 or info.st_uid != os.geteuid()
                 or info.st_mode & 0o077
-                or info.st_size > 131072
+                or info.st_size > max_bytes
             ):
                 raise schema.InvalidConfiguration(
                     path,
@@ -30,7 +30,12 @@ def read_private(path):
                     'private_permissions',
                     'обычный файл владельца root, mode 0600, без ссылок',
                 )
-            return stream.read(131073)
+            content = stream.read(max_bytes + 1)
+            if len(content) > max_bytes:
+                raise schema.InvalidConfiguration(
+                    path, 'file', 'file_too_large', 'файл превышает допустимый размер'
+                )
+            return content.decode('utf-8-sig')
     except schema.InvalidConfiguration:
         raise
     except (OSError, UnicodeError):
