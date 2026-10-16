@@ -75,7 +75,8 @@
       "role": "root (help/version are separate public entrypoints)",
       "runtime": "saved installation; Caddy/public route for publish",
       "invariants": [
-        "preserve Matrix/MAS API routes; restart only required service; keep rollback checkpoint"
+        "preserve Matrix/MAS API routes; restart only required service; keep rollback checkpoint",
+        "landing CSP permits same-origin and data images; scripts and inline styles remain blocked"
       ],
       "risk": "availability"
     },

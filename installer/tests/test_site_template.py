@@ -1,10 +1,12 @@
 """Private templates survive native generation and remain behind the same routes."""
 
+import json
 import os
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import configuration
@@ -40,6 +42,42 @@ class SiteTemplateTests(unittest.TestCase):
                 (self.root / 'public/site/site.css').read_text(), 'body { color: #123456; }'
             )
             self.assertEqual(before, {p.name: p.read_bytes() for p in self.template.iterdir()})
+
+    def test_embedded_svg_image_is_preserved_and_allowed_without_enabling_scripts_or_inline_styles(
+        self,
+    ):
+        image = 'data:image/svg+xml,' + quote(
+            '<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8">'
+            '<rect width="8" height="8" fill="#abcdef"/></svg>'
+        )
+        source = (
+            '<meta name="misbot-homepage"><img alt="Fictional illustration" src="' + image + '">'
+        )
+        state_store.write_text(self.template / 'index.html', source)
+        homepage.write_assets(self.root, self.model)
+        self.assertEqual((self.template / 'index.html').read_text(), source)
+        self.assertEqual((self.root / 'public/site/index.html').read_text(), source)
+        header = next(
+            line.strip().split(' ', 2)[2]
+            for line in homepage.route(self.model).splitlines()
+            if 'header Content-Security-Policy ' in line
+        )
+        directives = {
+            tokens[0]: tokens[1:]
+            for part in json.loads(header).split(';')
+            if (tokens := part.split())
+        }
+        self.assertEqual(
+            directives,
+            {
+                'default-src': ["'none'"],
+                'style-src': ["'self'"],
+                'img-src': ["'self'", 'data:'],
+                'base-uri': ["'none'"],
+                'form-action': ["'none'"],
+                'frame-ancestors': ["'none'"],
+            },
+        )
 
     def test_unsafe_or_invalid_template_does_not_replace_public_files(self):
         homepage.write_assets(self.root, self.model)
