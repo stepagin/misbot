@@ -6,6 +6,17 @@ umask 077
 task_source="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 task_action="${1:-help}"
 die() { printf '%s\n' "$*" >&2; exit 1; }
+backend_options() {
+  task_named_args=()
+  while [[ $# -gt 0 ]]; do
+    if [[ "$2" == -* ]]; then
+      task_named_args+=("$1=$2")
+    else
+      task_named_args+=("$1" "$2")
+    fi
+    shift 2
+  done
+}
 if [[ "$task_action" == version || "$task_action" == --version ]]; then
   python3 -c 'import json,sys; print("Misbot " + json.load(open(sys.argv[1]))["version"])' "$task_source/release.json"
   exit 0
@@ -30,10 +41,10 @@ backup-key KEY_FILE      Create a private recovery key; keep an independent copy
 backup-external PRIVATE_S3_ENV KEY_FILE [DIRECTORY]  Encrypt a full backup, upload and verify download.
 backup-cleanup PRIVATE_S3_ENV PRIVATE_CATALOG [DIRECTORY]  Retry deletion of this installation's unique unverified upload.
 backup-fetch PRIVATE_S3_ENV KEY_FILE OBJECT_KEY SHA256 OUTPUT_ARCHIVE  Download and authenticate a backup into a new private file.
-restore-check [DIRECTORY] Verify latest backup by restoring two temporary databases.
+restore-check [DIRECTORY] Verify latest backup by restoring owned application databases.
 restore ARCHIVE DIRECTORY SHA256 PUBLIC_IP  Restore local databases into an empty staged target.
 restore-local ARCHIVE DIRECTORY SHA256 PUBLIC_IP  Restore either database source into new local PostgreSQL; writers stay staged.
-restore-activate source-stopped [DIRECTORY]  Start restored writers after stopping the source and switching DNS.
+restore-activate source-stopped [DIRECTORY] [preserved-state]  Activate a restore; external MAS also requires preserved-state.
 move-export [DIRECTORY]  Freeze source writers and create the final consistent archive.
 move-abort target-stopped [DIRECTORY]  Resume the source after stopping the target and returning DNS.
 media-local [DIRECTORY]  Use local media before the first successful installation.
@@ -94,6 +105,10 @@ elif [[ "$task_action" == restore-activate || "$task_action" == move-abort ]]; t
   [[ "$task_action" != move-abort ]] || task_confirmation=target-stopped
   [[ "${2:-}" == "$task_confirmation" ]] || die "First stop the other writer and point DNS to this machine; use $task_action $task_confirmation [DIRECTORY]."
   task_root="${3:-$task_default_root}"
+  task_external_mas_confirm="${4:-}"
+  if [[ -n "$task_external_mas_confirm" ]]; then
+    [[ "$task_action" == restore-activate && "$task_external_mas_confirm" == preserved-state ]] || die 'External MAS activation requires preserved-state; no data changed.'
+  fi
 elif [[ "$task_action" == media-s3 || "$task_action" == s3-credentials ]]; then
   [[ $# == 2 || $# == 3 ]] || die "Use: install.sh $task_action PRIVATE_S3_ENV [DIRECTORY]"
   task_s3_file="${2:-}"
@@ -150,24 +165,37 @@ if [[ -f "$task_root/installation.json" ]]; then
   if [[ "$task_backend" == existing-compose ]]; then
     task_existing_args=()
     case "$task_action" in
-      media-s3) task_existing_args=(--config "$task_s3_file") ;;
-      backup-external) task_existing_args=(--config "$task_backup_env" --key "$task_backup_key") ;;
+      media-s3) backend_options --config "$task_s3_file"; task_existing_args=("${task_named_args[@]}") ;;
+      backup-external) backend_options --config "$task_backup_env" --key "$task_backup_key"; task_existing_args=("${task_named_args[@]}") ;;
     esac
     exec python3 -B "$task_root/existing_compose.py" --directory "$task_root" "$task_action" "${task_existing_args[@]}"
   fi
   [[ "$task_backend" == portable ]] || die 'Unsupported installation backend; no changes performed.'
 fi
 
+bounded() {
+  local task_seconds="$1"
+  shift
+  python3 "$task_source/startup_process.py" --timeout "$task_seconds" -- "$@"
+}
+
 host_dependencies() {
+  local task_python_imports='import yaml, rich'
+  local task_optional_packages=()
+  if [[ -f "$task_root/installation.json" ]] &&
+     python3 -c 'import json,sys; sys.exit("telegram_runtime" not in json.load(open(sys.argv[1])))' "$task_root/installation.json"; then
+    task_python_imports='import yaml, rich, requests'
+    task_optional_packages=(python3-requests)
+  fi
   command -v apt-get >/dev/null || die 'Supported hosts: Ubuntu 24.04/26.04 or Debian 12/13.'
   if command -v curl >/dev/null && command -v openssl >/dev/null &&
      command -v python3 >/dev/null && command -v ip >/dev/null &&
      command -v swapon >/dev/null && command -v dig >/dev/null && [[ -s /etc/ssl/certs/ca-certificates.crt ]] &&
-     python3 -c 'import yaml' >/dev/null 2>&1; then
+     python3 -c "$task_python_imports" >/dev/null 2>&1; then
     return
   fi
-  apt-get update -qq
-  apt-get install -y --no-install-recommends ca-certificates curl openssl python3 python3-yaml util-linux iproute2 dnsutils
+  bounded 600 apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=60 update -qq
+  bounded 900 apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=60 install -y --no-install-recommends ca-certificates curl openssl python3 python3-yaml python3-rich util-linux iproute2 dnsutils "${task_optional_packages[@]}"
 }
 
 docker_dependencies() {
@@ -183,7 +211,7 @@ docker_dependencies() {
       fi
     done
     install -d -m 0755 /etc/apt/keyrings
-    curl --fail --silent --show-error --location "https://download.docker.com/linux/$ID/gpg" -o /etc/apt/keyrings/matrix-docker.asc
+    bounded 120 curl --connect-timeout 15 --max-time 90 --fail --silent --show-error --location "https://download.docker.com/linux/$ID/gpg" -o /etc/apt/keyrings/matrix-docker.asc
     chmod 0644 /etc/apt/keyrings/matrix-docker.asc
     cat > /etc/apt/sources.list.d/matrix-docker.sources <<EOF
 Types: deb
@@ -193,26 +221,26 @@ Components: stable
 Architectures: amd64
 Signed-By: /etc/apt/keyrings/matrix-docker.asc
 EOF
-    apt-get update -qq
-    apt-get install -y --no-install-recommends docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    bounded 600 apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=60 update -qq
+    bounded 900 apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=60 install -y --no-install-recommends docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
   fi
-  systemctl enable --now docker.service
-  docker compose version >/dev/null || die 'Install the official docker-compose-plugin package.'
-  docker info >/dev/null
-  [[ "$(docker info --format '{{.Architecture}}')" == x86_64 ]] || die 'Linux amd64 Docker is required by this lock.'
+  bounded 120 systemctl enable --now docker.service
+  bounded 30 docker compose version >/dev/null || die 'Install the official docker-compose-plugin package.'
+  bounded 30 docker info >/dev/null
+  [[ "$(python3 "$task_source/startup_process.py" --timeout 30 --print-output -- docker info --format '{{.Architecture}}')" == x86_64 ]] || die 'Linux amd64 Docker is required by this lock.'
 }
 
 storage_dependencies() {
   if ! python3 -c 'import boto3' >/dev/null 2>&1; then
-    apt-get update -qq
-    apt-get install -y --no-install-recommends python3-boto3
+    bounded 600 apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=60 update -qq
+    bounded 900 apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=60 install -y --no-install-recommends python3-boto3
   fi
 }
 
 backup_dependencies() {
   if ! python3 -c 'import cryptography' >/dev/null 2>&1; then
-    apt-get update -qq
-    apt-get install -y --no-install-recommends python3-cryptography
+    bounded 600 apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=60 update -qq
+    bounded 900 apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=60 install -y --no-install-recommends python3-cryptography
   fi
 }
 
@@ -230,37 +258,47 @@ case "$task_action" in
       backup_dependencies
       storage_dependencies
       task_schedule_mode=external
-      task_schedule_args=(--settings "$task_backup_env" --key-file "$task_backup_key")
+      backend_options --settings "$task_backup_env" --key-file "$task_backup_key"
+      task_schedule_args=("${task_named_args[@]}")
     fi
-    exec python3 "$task_root/backup_schedule.py" configure --directory "$task_root" --mode "$task_schedule_mode" --calendar "$task_backup_calendar" "${task_schedule_args[@]}"
+    backend_options --calendar "$task_backup_calendar"
+    exec python3 "$task_root/backup_schedule.py" configure --directory "$task_root" --mode "$task_schedule_mode" "${task_named_args[@]}" "${task_schedule_args[@]}"
     ;;
   vault-connect|vault-auth|vault-sync|vault-recover|vault-disconnect)
     [[ -f "$task_root/installation.json" ]] || die 'Run init DOMAIN first.'
     task_vault_operation="${task_action#vault-}"
     task_vault_args=()
-    [[ "$task_action" != vault-connect && "$task_action" != vault-auth ]] || task_vault_args=(--settings "$task_vault_env")
+    if [[ "$task_action" == vault-connect || "$task_action" == vault-auth ]]; then
+      backend_options --settings "$task_vault_env"
+      task_vault_args=("${task_named_args[@]}")
+    fi
     exec python3 "$task_root/vault_cache.py" "$task_vault_operation" --directory "$task_root" "${task_vault_args[@]}"
     ;;
   backup-key|backup-external|backup-fetch|backup-cleanup)
     backup_dependencies
     if [[ "$task_action" == backup-key ]]; then
-      exec python3 "$task_source/external_backup.py" key --key-file "$task_backup_key"
+      backend_options --key-file "$task_backup_key"
+      exec python3 "$task_source/external_backup.py" key "${task_named_args[@]}"
     fi
     storage_dependencies
     if [[ "$task_action" == backup-fetch ]]; then
-      exec python3 "$task_source/external_backup.py" fetch --settings "$task_backup_env" --key-file "$task_backup_key" --object-key "$task_backup_object" --sha256 "$task_backup_digest" --destination "$task_backup_destination"
+      backend_options --settings "$task_backup_env" --key-file "$task_backup_key" --object-key "$task_backup_object" --sha256 "$task_backup_digest" --destination "$task_backup_destination"
+      exec python3 "$task_source/external_backup.py" fetch "${task_named_args[@]}"
     fi
     [[ -f "$task_root/installation.json" ]] || die 'Run init DOMAIN first.'
     if [[ "$task_action" == backup-cleanup ]]; then
-      exec python3 "$task_root/external_backup.py" cleanup --directory "$task_root" --settings "$task_backup_env" --catalog "$task_backup_catalog"
+      backend_options --settings "$task_backup_env" --catalog "$task_backup_catalog"
+      exec python3 "$task_root/external_backup.py" cleanup --directory "$task_root" "${task_named_args[@]}"
     fi
-    exec python3 "$task_root/external_backup.py" export --directory "$task_root" --settings "$task_backup_env" --key-file "$task_backup_key"
+    backend_options --settings "$task_backup_env" --key-file "$task_backup_key"
+    exec python3 "$task_root/external_backup.py" export --directory "$task_root" "${task_named_args[@]}"
     ;;
   media-local|media-recover|media-s3)
     [[ -f "$task_root/installation.json" ]] || die 'Run init DOMAIN first.'
     if [[ "$task_action" == media-s3 ]]; then
       storage_dependencies
-      exec python3 "$task_root/media.py" --directory "$task_root" --settings "$task_s3_file" s3
+      backend_options --settings "$task_s3_file"
+      exec python3 "$task_root/media.py" --directory "$task_root" "${task_named_args[@]}" s3
     fi
     task_media_operation=local
     [[ "$task_action" != media-recover ]] || task_media_operation=recover
@@ -271,7 +309,8 @@ case "$task_action" in
     task_s3_credentials_operation=rotate
     task_s3_credentials_args=()
     if [[ "$task_action" == s3-credentials ]]; then
-      task_s3_credentials_args=(--settings "$task_s3_file")
+      backend_options --settings "$task_s3_file"
+      task_s3_credentials_args=("${task_named_args[@]}")
     elif [[ "$task_action" == s3-credentials-recover ]]; then
       task_s3_credentials_operation=recover
     else
@@ -288,7 +327,10 @@ case "$task_action" in
   database-external|database-recover|database-abort)
     [[ -f "$task_root/installation.json" ]] || die 'An existing portable installation is required.'
     task_database_args=()
-    [[ "$task_action" != database-external ]] || task_database_args=(--settings "$task_postgres_file")
+    if [[ "$task_action" == database-external ]]; then
+      backend_options --settings "$task_postgres_file"
+      task_database_args=("${task_named_args[@]}")
+    fi
     exec python3 "$task_root/database.py" "${task_action#database-}" --directory "$task_root" "${task_database_args[@]}"
     ;;
   restore|restore-local)
@@ -296,15 +338,31 @@ case "$task_action" in
     docker_dependencies
     task_restore_args=()
     [[ "$task_action" != restore-local ]] || task_restore_args=(--local-postgres)
-    exec python3 "$task_source/restore.py" --archive "$task_archive" --directory "$task_root" --sha256 "$task_digest" --public-ip "$task_public_ip" "${task_restore_args[@]}"
+    backend_options --archive "$task_archive" --directory "$task_root" --sha256 "$task_digest" --public-ip "$task_public_ip"
+    exec python3 "$task_source/restore.py" "${task_named_args[@]}" "${task_restore_args[@]}"
     ;;
   restore-activate|move-abort)
     [[ -f "$task_root/installation.json" ]] || die 'Restore into an empty target first.'
+    host_dependencies
     task_command_args=()
     [[ "$task_action" != restore-activate ]] || task_command_args=(--register-command)
+    if [[ "$task_action" == restore-activate && -n "$task_external_mas_confirm" ]]; then
+      task_command_args+=(--external-mas-confirm "$task_external_mas_confirm")
+    fi
     exec python3 "$task_root/lifecycle.py" --directory "$task_root" "$task_action" "${task_command_args[@]}"
     ;;
   init)
+    # Reject a domain typo before installing packages or creating host state.
+    command -v python3 >/dev/null || die 'Python 3.11 or newer is required before init. Install python3, then repeat init.'
+    task_domain="$(python3 -B -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+import configuration_schema
+try:
+    print(configuration_schema.domain(sys.argv[2]))
+except (ValueError, UnicodeError):
+    raise SystemExit(2)
+' "$task_source" "$task_domain")" || die 'Invalid domain. Use a hostname such as example.org, without a URL, IP address, port or invisible characters; then repeat init.'
     host_dependencies
     python3 "$task_source/command_wrapper.py" check --directory "$task_root"
     python3 "$task_source/generate.py" --directory "$task_root" --domain "$task_domain" --initialize-env "${task_storage_args[@]}"
@@ -344,14 +402,16 @@ case "$task_action" in
   admin-password|admin-password-recover)
     [[ -f "$task_root/installation.json" ]] || die 'Run init DOMAIN first.'
     if [[ "$task_action" == admin-password ]]; then
-      exec python3 "$task_root/credentials.py" --directory "$task_root" --password-file "$task_password_file" rotate
+      backend_options --password-file "$task_password_file"
+      exec python3 "$task_root/credentials.py" --directory "$task_root" "${task_named_args[@]}" rotate
     fi
     exec python3 "$task_root/credentials.py" --directory "$task_root" recover
     ;;
   user-password|user-password-recover)
     [[ -f "$task_root/installation.json" ]] || die 'Run init DOMAIN first.'
     if [[ "$task_action" == user-password ]]; then
-      exec python3 "$task_root/user_credentials.py" --directory "$task_root" --password-file "$task_password_file" reset
+      backend_options --password-file "$task_password_file"
+      exec python3 "$task_root/user_credentials.py" --directory "$task_root" "${task_named_args[@]}" reset
     fi
     exec python3 "$task_root/user_credentials.py" --directory "$task_root" recover
     ;;

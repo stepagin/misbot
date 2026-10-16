@@ -2,6 +2,7 @@
 
 No caller supplied URLs, redirects, private IPs, or unverified response bodies.
 """
+
 import base64
 import hashlib
 import http.client
@@ -9,6 +10,8 @@ import ipaddress
 import json
 from pathlib import Path
 import secrets
+import queue
+import threading
 import socket
 import ssl
 import subprocess
@@ -22,6 +25,10 @@ VERSION = 1
 DISCOVERY = '/.well-known/misbot'
 API = '/_misbot/v1/exchange'
 LIMIT = 32768
+REQUEST_TTL = 30 * 86400
+INVITATION_CAPABILITY = 'federation-invites'
+NETWORK_TIMEOUT = 10
+_RESOLVERS = threading.BoundedSemaphore(4)
 
 
 class ProtocolError(RuntimeError):
@@ -35,9 +42,15 @@ def canonical(value):
 
 
 def openssl(args, data=None):
-    result = subprocess.run(['openssl', *args], input=data, capture_output=True,
-                            timeout=20, **state_store.child_process_options())
-    if result.returncode: raise ProtocolError('signature_dependency_or_key')
+    result = subprocess.run(
+        ['openssl', *args],
+        input=data,
+        capture_output=True,
+        timeout=20,
+        **state_store.child_process_options(),
+    )
+    if result.returncode:
+        raise ProtocolError('signature_dependency_or_key')
     return result.stdout
 
 
@@ -50,99 +63,313 @@ def fingerprint(pem):
 
 
 def sign(key, payload):
-    return base64.b64encode(openssl(['dgst', '-sha256', '-sign', str(key)], canonical(payload))).decode()
+    return base64.b64encode(
+        openssl(['dgst', '-sha256', '-sign', str(key)], canonical(payload))
+    ).decode()
 
 
 def verify(pem, payload, signature):
     try:
-        if not isinstance(pem, str) or len(pem) > 2048 or not pem.startswith('-----BEGIN PUBLIC KEY-----'): return False
+        if (
+            not isinstance(pem, str)
+            or len(pem) > 2048
+            or not pem.startswith('-----BEGIN PUBLIC KEY-----')
+        ):
+            return False
         raw = base64.b64decode(signature, validate=True)
-        if len(raw) != 384: return False  # protocol v1 is exactly RSA-3072
+        if len(raw) != 384:
+            return False  # protocol v1 is exactly RSA-3072
         with tempfile.TemporaryDirectory(prefix='misbot-signature-') as folder:
-            key = Path(folder)/'public.pem'; sig = Path(folder)/'signature'
-            key.write_text(pem); sig.write_bytes(raw)
-            result = subprocess.run(['openssl','dgst','-sha256','-verify',str(key),'-signature',str(sig)],
-                                    input=canonical(payload),capture_output=True,timeout=10)
+            key = Path(folder) / 'public.pem'
+            sig = Path(folder) / 'signature'
+            key.write_text(pem)
+            sig.write_bytes(raw)
+            result = subprocess.run(
+                ['openssl', 'dgst', '-sha256', '-verify', str(key), '-signature', str(sig)],
+                input=canonical(payload),
+                capture_output=True,
+                timeout=10,
+            )
             return result.returncode == 0
-    except (ValueError, OSError, TypeError, subprocess.SubprocessError): return False
+    except (ValueError, OSError, TypeError, subprocess.SubprocessError):
+        return False
 
 
 def document(server, identity, key, bot_mxid=None):
     pem = public_key(key)
-    return {'protocol': VERSION, 'instance_id': identity, 'server_name': server,
-            'bot_mxid': bot_mxid or '@admin-panel:'+server, 'api_path': API,
-            'algorithm': 'RSA-3072-SHA256', 'public_key': pem, 'key_id': fingerprint(pem)}
+    return {
+        'protocol': VERSION,
+        'instance_id': identity,
+        'server_name': server,
+        'bot_mxid': bot_mxid or '@admin-panel:' + server,
+        'api_path': API,
+        'algorithm': 'RSA-3072-SHA256',
+        'public_key': pem,
+        'key_id': fingerprint(pem),
+        'request_ttl': REQUEST_TTL,
+        'capabilities': [INVITATION_CAPABILITY],
+    }
 
 
 def validate_document(value, server):
     import re
-    if not isinstance(value,dict) or type(value.get('protocol')) is not int or value.get('protocol') != VERSION: raise ProtocolError('unsupported_version')
-    if (value.get('server_name') != server or not re.fullmatch(r'@[a-z0-9][a-z0-9._=-]{0,63}:'+re.escape(server),str(value.get('bot_mxid','')))
-            or value.get('api_path') != API or value.get('algorithm') != 'RSA-3072-SHA256'
-            or not re.fullmatch('[0-9a-f]{32}',str(value.get('instance_id','')))
-            or value.get('key_id') != fingerprint(value.get('public_key',''))): raise ProtocolError('discovery_identity')
+
+    if not isinstance(value, dict) or 'protocol' not in value:
+        raise ProtocolError('invalid_misbot_discovery')
+    if type(value['protocol']) is not int or value['protocol'] != VERSION:
+        raise ProtocolError('unsupported_version')
+    if (
+        value.get('server_name') != server
+        or not re.fullmatch(
+            r'@[a-z0-9][a-z0-9._=-]{0,63}:' + re.escape(server), str(value.get('bot_mxid', ''))
+        )
+        or value.get('api_path') != API
+        or value.get('algorithm') != 'RSA-3072-SHA256'
+        or not re.fullmatch('[0-9a-f]{32}', str(value.get('instance_id', '')))
+        or not isinstance(value.get('public_key'), str)
+        or len(value['public_key']) > 2048
+        or not value['public_key'].startswith('-----BEGIN PUBLIC KEY-----')
+        or value.get('key_id') != fingerprint(value.get('public_key', ''))
+        or (
+            'request_ttl' in value
+            and (
+                type(value['request_ttl']) is not int
+                or not 604800 <= value['request_ttl'] <= REQUEST_TTL
+            )
+        )
+    ):
+        raise ProtocolError('discovery_identity')
+    capabilities = value.get('capabilities', [])
+    if (
+        not isinstance(capabilities, list)
+        or len(capabilities) > 16
+        or any(not isinstance(cap, str) or not 1 <= len(cap) <= 100 for cap in capabilities)
+        or len(capabilities) != len(set(capabilities))
+    ):
+        raise ProtocolError('discovery_identity')
     return value
+
+
+def resolve(server, deadline):
+    """Bound DNS latency and outstanding resolver threads, including timed out DNS."""
+    slots = _RESOLVERS
+    if not slots.acquire(blocking=False):
+        raise ProtocolError('dns_busy')
+    result = queue.Queue(maxsize=1)
+
+    def lookup():
+        try:
+            result.put((socket.getaddrinfo(server, 443, type=socket.SOCK_STREAM), None))
+        except Exception as error:
+            result.put((None, error))
+        finally:
+            slots.release()
+
+    try:
+        threading.Thread(target=lookup, daemon=True).start()
+    except RuntimeError:
+        slots.release()
+        raise ProtocolError('dns_busy') from None
+    try:
+        addresses, error = result.get(timeout=max(0, deadline - time.monotonic()))
+    except queue.Empty:
+        raise ProtocolError('timeout') from None
+    if error:
+        raise error
+    return addresses
 
 
 def https(server, path, body=None):
     server = schema.domain(server)
-    if path not in (DISCOVERY, API, '/.well-known/matrix/server','/_matrix/federation/v1/version'):
+    if path not in (DISCOVERY, API, '/.well-known/matrix/server', '/_matrix/federation/v1/version'):
         raise ProtocolError('unsafe_path')
+    deadline = time.monotonic() + NETWORK_TIMEOUT
+    expired = threading.Event()
+    sockets = []
+
+    def remaining():
+        duration = deadline - time.monotonic()
+        if duration <= 0 or expired.is_set():
+            raise ProtocolError('timeout')
+        return duration
+
+    def abort():
+        expired.set()
+        for active in sockets:
+            try:
+                active.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    timer = threading.Timer(NETWORK_TIMEOUT, abort)
+    timer.daemon = True
+    timer.start()
     try:
-        addresses = socket.getaddrinfo(server,443,type=socket.SOCK_STREAM)
+        addresses = resolve(server, deadline)
+        remaining()
         if not addresses or any(not ipaddress.ip_address(row[4][0]).is_global for row in addresses):
             raise ProtocolError('non_public_destination')
         # Pin this resolution; TLS still authenticates the original hostname/SNI.
         family, kind, proto, _, address = addresses[0]
-        sock = socket.socket(family,kind,proto); sock.settimeout(10)
+        sock = socket.socket(family, kind, proto)
+        sockets.append(sock)
+        sock.settimeout(remaining())
         try:
             sock.connect(address)
-            tls = ssl.create_default_context().wrap_socket(sock,server_hostname=server)
+            sock.settimeout(remaining())
+            tls = ssl.create_default_context().wrap_socket(sock, server_hostname=server)
+            sockets.append(tls)
+            tls.settimeout(remaining())
         except BaseException:
-            sock.close(); raise
-        connection = http.client.HTTPSConnection(server,timeout=10); connection.sock = tls
+            sock.close()
+            raise
+        connection = http.client.HTTPSConnection(server, timeout=remaining())
+        connection.sock = tls
         try:
-            connection.request('POST' if body is not None else 'GET',path,
-                               body=canonical(body) if body is not None else None,
-                               headers={'Content-Type':'application/json','Accept':'application/json'})
-            response = connection.getresponse(); raw = response.read(LIMIT+1)
-            if len(raw)>LIMIT: raise ProtocolError('response_too_large')
-            if response.status != 200: raise ProtocolError('remote_http_'+str(response.status))
-            return json.loads(raw)
-        finally: connection.close()
-    except ProtocolError: raise
-    except socket.gaierror: raise ProtocolError('dns_failed') from None
-    except ssl.SSLError: raise ProtocolError('tls_failed') from None
-    except (TimeoutError,socket.timeout): raise ProtocolError('timeout') from None
-    except (ValueError,OSError,http.client.HTTPException): raise ProtocolError('connection_or_response_failed') from None
+            connection.request(
+                'POST' if body is not None else 'GET',
+                path,
+                body=canonical(body) if body is not None else None,
+                headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
+            )
+            tls.settimeout(remaining())
+            response = connection.getresponse()
+            raw = response.read(LIMIT + 1)
+            remaining()
+            if len(raw) > LIMIT:
+                raise ProtocolError('response_too_large')
+            if response.status != 200:
+                if response.status == 503:
+                    try:
+                        reason = json.loads(raw)
+                    except (ValueError, UnicodeError):
+                        reason = None
+                    if isinstance(reason, dict) and reason.get('code') == 'api_disabled':
+                        raise ProtocolError('remote_api_disabled')
+                raise ProtocolError('remote_http_' + str(response.status))
+            try:
+                return json.loads(raw)
+            except (ValueError, UnicodeError):
+                raise ProtocolError('invalid_json_response') from None
+        finally:
+            connection.close()
+    except ProtocolError:
+        raise
+    except socket.gaierror:
+        raise ProtocolError('dns_failed') from None
+    except ssl.SSLError:
+        raise ProtocolError('timeout' if expired.is_set() else 'tls_failed') from None
+    except (TimeoutError, socket.timeout):
+        raise ProtocolError('timeout') from None
+    except (ValueError, OSError, http.client.HTTPException):
+        raise ProtocolError(
+            'timeout' if expired.is_set() else 'connection_or_response_failed'
+        ) from None
+    finally:
+        timer.cancel()
+        for active in sockets:
+            active.close()
 
 
 def discover(server, transport=https):
-    return validate_document(transport(server,DISCOVERY),server)
+    try:
+        return validate_document(transport(server, DISCOVERY), server)
+    except ProtocolError as error:
+        code = {
+            'remote_http_404': 'misbot_not_found',
+            'invalid_json_response': 'invalid_misbot_discovery',
+            'discovery_identity': 'invalid_misbot_discovery',
+        }.get(error.code, error.code)
+        raise ProtocolError(code) from None
 
 
 def envelope(doc, key, target, body):
-    value={'protocol':VERSION,'sender':doc['server_name'],'instance_id':doc['instance_id'],
-           'recipient':target['server_name'],'recipient_instance':target['instance_id'],
-           'timestamp':int(time.time()),'nonce':secrets.token_hex(16),'method':'POST','path':API,'body':body}
-    return {'payload':value,'signature':sign(key,value)}
+    value = {
+        'protocol': VERSION,
+        'sender': doc['server_name'],
+        'instance_id': doc['instance_id'],
+        'recipient': target['server_name'],
+        'recipient_instance': target['instance_id'],
+        'timestamp': int(time.time()),
+        'nonce': secrets.token_hex(16),
+        'method': 'POST',
+        'path': API,
+        'body': body,
+    }
+    return {'payload': value, 'signature': sign(key, value)}
+
+
+def validate_envelope(request, own=None, remote=None, seen=(), now=None):
+    now = int(time.time()) if now is None else now
+    import re
+
+    try:
+        if not isinstance(request, dict) or set(request) != {'payload', 'signature'}:
+            raise ProtocolError('invalid_request')
+        value = request['payload']
+        if not isinstance(value, dict) or set(value) != {
+            'protocol',
+            'sender',
+            'instance_id',
+            'recipient',
+            'recipient_instance',
+            'timestamp',
+            'nonce',
+            'method',
+            'path',
+            'body',
+        }:
+            raise ProtocolError('invalid_request')
+        if type(value['protocol']) is not int or value['protocol'] != VERSION:
+            raise ProtocolError('unsupported_version')
+        nonce = value['nonce']
+        if (
+            not isinstance(value['sender'], str)
+            or schema.domain(value['sender']) != value['sender']
+            or not isinstance(value['recipient'], str)
+            or schema.domain(value['recipient']) != value['recipient']
+            or not isinstance(value['instance_id'], str)
+            or not re.fullmatch('[0-9a-f]{32}', value['instance_id'])
+            or not isinstance(value['recipient_instance'], str)
+            or not re.fullmatch('[0-9a-f]{32}', value['recipient_instance'])
+            or value['method'] != 'POST'
+            or value['path'] != API
+            or (
+                own
+                and (
+                    value['recipient'] != own['server_name']
+                    or value['recipient_instance'] != own['instance_id']
+                )
+            )
+            or (
+                remote
+                and (
+                    value['sender'] != remote['server_name']
+                    or value['instance_id'] != remote['instance_id']
+                )
+            )
+        ):
+            raise ProtocolError('signature_identity')
+        if not isinstance(request['signature'], str):
+            raise ProtocolError('invalid_signature')
+        try:
+            if len(base64.b64decode(request['signature'], validate=True)) != 384:
+                raise ProtocolError('invalid_signature')
+        except ValueError:
+            raise ProtocolError('invalid_signature') from None
+        if type(value['timestamp']) is not int or abs(now - value['timestamp']) > 300:
+            raise ProtocolError('expired_request')
+        if not isinstance(nonce, str) or not re.fullmatch('[0-9a-f]{32}', nonce):
+            raise ProtocolError('invalid_nonce')
+        if nonce in seen:
+            raise ProtocolError('replay')
+        return value
+    except (KeyError, TypeError, ValueError):
+        raise ProtocolError('invalid_request') from None
 
 
 def authenticate(request, own, remote, seen, now=None):
-    now=int(time.time()) if now is None else now
-    import re
-    try:
-        if not isinstance(request,dict) or set(request)!={'payload','signature'}:raise ProtocolError('invalid_request')
-        value=request['payload']; nonce=value['nonce']
-        if not isinstance(value,dict) or set(value)!={'protocol','sender','instance_id','recipient','recipient_instance','timestamp','nonce','method','path','body'}:
-            raise ProtocolError('invalid_request')
-        if type(value['protocol']) is not int or value['protocol']!=VERSION: raise ProtocolError('unsupported_version')
-        if (value['sender']!=remote['server_name'] or value['instance_id']!=remote['instance_id']
-                or value['recipient']!=own['server_name'] or value['recipient_instance']!=own['instance_id']
-                or value['method']!='POST' or value['path']!=API): raise ProtocolError('signature_identity')
-        if type(value['timestamp']) is not int or abs(now-value['timestamp'])>300: raise ProtocolError('expired_request')
-        if not re.fullmatch('[0-9a-f]{32}',nonce): raise ProtocolError('invalid_nonce')
-        if nonce in seen: raise ProtocolError('replay')
-        if not verify(remote['public_key'],value,request['signature']): raise ProtocolError('invalid_signature')
-        return value
-    except (KeyError,TypeError): raise ProtocolError('invalid_request') from None
+    value = validate_envelope(request, own, remote, seen, now)
+    if not verify(remote['public_key'], value, request['signature']):
+        raise ProtocolError('invalid_signature')
+    return value

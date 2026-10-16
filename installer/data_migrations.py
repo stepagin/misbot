@@ -4,8 +4,10 @@ Synapse/MAS schemas and Matrix crypto stores are not managed here. Published
 migration IDs and SQL are immutable. Every admitted migration must remain
 compatible with schema 0; incompatible changes need a separate recovery plan.
 """
+
 import argparse
 import hashlib
+import json
 import os
 from pathlib import Path
 import sqlite3
@@ -13,18 +15,29 @@ import stat
 import uuid
 
 import configuration
+from welcome_message import DEFAULT_WELCOME, is_legacy_welcome
+from welcome_settings import welcome_context
 
 SCHEMA_VERSION = 1
-MIGRATIONS = ((1, 'admin-panel-v1', (
-    'CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)',
-    'CREATE TABLE IF NOT EXISTS users (mxid TEXT PRIMARY KEY, created INTEGER, active INTEGER)',
-    "CREATE TABLE IF NOT EXISTS outbox (id TEXT PRIMARY KEY, recipient TEXT NOT NULL, "
-    "via TEXT NOT NULL, body TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', "
-    'attempts INTEGER NOT NULL DEFAULT 0, next_at REAL NOT NULL DEFAULT 0)',
-    'CREATE INDEX IF NOT EXISTS outbox_pending ON outbox(state,next_at)',
-)),)
-TABLES = {'settings': ('key', 'value'), 'users': ('mxid', 'created', 'active'),
-          'outbox': ('id', 'recipient', 'via', 'body', 'state', 'attempts', 'next_at')}
+MIGRATIONS = (
+    (
+        1,
+        'admin-panel-v1',
+        (
+            'CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)',
+            'CREATE TABLE IF NOT EXISTS users (mxid TEXT PRIMARY KEY, created INTEGER, active INTEGER)',
+            'CREATE TABLE IF NOT EXISTS outbox (id TEXT PRIMARY KEY, recipient TEXT NOT NULL, '
+            "via TEXT NOT NULL, body TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', "
+            'attempts INTEGER NOT NULL DEFAULT 0, next_at REAL NOT NULL DEFAULT 0)',
+            'CREATE INDEX IF NOT EXISTS outbox_pending ON outbox(state,next_at)',
+        ),
+    ),
+)
+TABLES = {
+    'settings': ('key', 'value'),
+    'users': ('mxid', 'created', 'active'),
+    'outbox': ('id', 'recipient', 'via', 'body', 'state', 'attempts', 'next_at'),
+}
 
 
 def fingerprint(migration):
@@ -32,16 +45,22 @@ def fingerprint(migration):
 
 
 def validate_registry():
-    if ([item[0] for item in MIGRATIONS] != list(range(1, SCHEMA_VERSION + 1))
-            or len({item[1] for item in MIGRATIONS}) != len(MIGRATIONS)):
+    if [item[0] for item in MIGRATIONS] != list(range(1, SCHEMA_VERSION + 1)) or len(
+        {item[1] for item in MIGRATIONS}
+    ) != len(MIGRATIONS):
         raise RuntimeError('Release migration history must have unique sequential versions and IDs')
 
 
 def database_path(root):
     root = Path(root)
-    for name in ('data', 'data/admin-panel', 'data/admin-panel/panel.sqlite',
-                 'data/admin-panel/panel.sqlite-journal', 'data/admin-panel/panel.sqlite-wal',
-                 'data/admin-panel/panel.sqlite-shm'):
+    for name in (
+        'data',
+        'data/admin-panel',
+        'data/admin-panel/panel.sqlite',
+        'data/admin-panel/panel.sqlite-journal',
+        'data/admin-panel/panel.sqlite-wal',
+        'data/admin-panel/panel.sqlite-shm',
+    ):
         path = root / name
         if path.is_symlink():
             raise RuntimeError('Unsafe Misbot data path; retain the update checkpoint')
@@ -55,9 +74,13 @@ def database_path(root):
 def inspect_database(db):
     version = db.execute('PRAGMA user_version').fetchone()[0]
     if not 0 <= version <= SCHEMA_VERSION:
-        raise RuntimeError('Unknown Misbot data schema; obtain a compatible release before updating')
+        raise RuntimeError(
+            'Unknown Misbot data schema; obtain a compatible release before updating'
+        )
     if db.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
-        raise RuntimeError('Misbot database integrity check failed; retain data and checked backups')
+        raise RuntimeError(
+            'Misbot database integrity check failed; retain data and checked backups'
+        )
     tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     for table, columns in TABLES.items():
         if table in tables:
@@ -69,9 +92,15 @@ def inspect_database(db):
     if version:
         if 'misbot_migrations' not in tables:
             raise RuntimeError('Missing Misbot migration history; retain the update checkpoint')
-        rows = db.execute('SELECT version,id,digest FROM misbot_migrations ORDER BY version').fetchall()
-        expected = [(number, name, fingerprint(item)) for item in MIGRATIONS
-                    for number, name, _ in (item,) if number <= version]
+        rows = db.execute(
+            'SELECT version,id,digest FROM misbot_migrations ORDER BY version'
+        ).fetchall()
+        expected = [
+            (number, name, fingerprint(item))
+            for item in MIGRATIONS
+            for number, name, _ in (item,)
+            if number <= version
+        ]
         if rows != expected:
             raise RuntimeError('Misbot migration history differs from the release; retain data')
     elif 'misbot_migrations' in tables:
@@ -115,6 +144,36 @@ def snapshot(root, checkpoint):
     os.replace(temporary, saved)
 
 
+def upgrade_builtin_welcome(db, root):
+    """Reconcile only obsolete stock text, inside the caller's transaction.
+
+    This changes a compatible setting, not the schema or published DDL history.
+    Outbox rows and registration/delivery markers are deliberately untouched.
+    """
+    row = db.execute("SELECT value FROM settings WHERE key='welcome'").fetchone()
+    if row is None:
+        return
+    try:
+        saved = json.loads(row[0])
+    except ValueError:
+        return  # Retain invalid/custom values; this is not a configuration repair.
+    if not isinstance(saved, str):
+        return
+    metadata = Path(root) / 'installation.json'
+    domain = configuration.read_private_json(metadata).get('domain') if metadata.exists() else None
+    if not is_legacy_welcome(saved, domain):
+        return
+    if not isinstance(domain, str):
+        raise RuntimeError('Welcome upgrade requires the saved installation identity')
+    # An adopted source update leaves its running host controller in place.
+    # Save fully rendered text so its older {domain}-only reader works too.
+    replacement = welcome_context(Path(root), domain).render(DEFAULT_WELCOME)
+    db.execute(
+        "UPDATE settings SET value=? WHERE key='welcome' AND value=?",
+        (json.dumps(replacement), row[0]),
+    )
+
+
 def migrate(root, checkpoint=None):
     validate_registry()
     path = database_path(root)
@@ -128,17 +187,22 @@ def migrate(root, checkpoint=None):
             db.execute('BEGIN IMMEDIATE')
             before = inspect_database(db)
             if before < SCHEMA_VERSION:
-                db.execute('CREATE TABLE IF NOT EXISTS misbot_migrations '
-                           '(version INTEGER PRIMARY KEY, id TEXT NOT NULL, digest TEXT NOT NULL)')
+                db.execute(
+                    'CREATE TABLE IF NOT EXISTS misbot_migrations '
+                    '(version INTEGER PRIMARY KEY, id TEXT NOT NULL, digest TEXT NOT NULL)'
+                )
                 for migration in MIGRATIONS:
                     number, identifier, statements = migration
                     if number <= before:
                         continue
                     for statement in statements:
                         db.execute(statement)
-                    db.execute('INSERT INTO misbot_migrations VALUES (?,?,?)',
-                               (number, identifier, fingerprint(migration)))
+                    db.execute(
+                        'INSERT INTO misbot_migrations VALUES (?,?,?)',
+                        (number, identifier, fingerprint(migration)),
+                    )
                     db.execute('PRAGMA user_version=' + str(number))
+            upgrade_builtin_welcome(db, root)
             inspect_database(db)
             db.commit()
         except BaseException:
@@ -175,4 +239,6 @@ if __name__ == '__main__':
         main()
     except (OSError, sqlite3.Error, RuntimeError):
         # SQLite errors may include SQL/data. The private data are never echoed.
-        raise SystemExit('Misbot data migration failed; retain data and update checkpoints') from None
+        raise SystemExit(
+            'Misbot data migration failed; retain data and update checkpoints'
+        ) from None

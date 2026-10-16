@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Thin Misbot command router. Backend processes retain their locks and signals."""
+
 import argparse
 import json
 import os
@@ -7,302 +8,700 @@ from pathlib import Path
 import shlex
 import shutil
 import sys
+import textwrap
+
 sys.dont_write_bytecode = True
 
 import cli_commands as vocabulary
 import command_wrapper
 
 
-class InputError(ValueError):pass
+class InputError(ValueError):
+    pass
+
+
+MISSING_RUNTIME = (
+    'Исходники установки отсутствуют; системная команда сохранилась. '
+    'Распакуйте проверенный установочный комплект и из его каталога выполните '
+    'sudo python3 misbot.py ui. Для новой установки выберите пустой каталог; '
+    'оставшиеся данные и контейнеры автоматически не удаляются.'
+)
+DEFAULT_UPDATE_DIRECTORY = Path('/opt/matrix-stack')
 
 
 class Parser(argparse.ArgumentParser):
-    def error(self,message):
+    def error(self, message):
         # argparse messages may contain secret values. Only registered option
         # names and static explanations may reach the user.
         if message.startswith('the following arguments are required:'):
-            names=[action.option_strings[0] for action in self._actions
-                   if action.required and action.option_strings and action.option_strings[0] in message.split(':',1)[1].strip().split(', ')]
-            explanation='Не указаны обязательные аргументы: '+', '.join(names)+'.'
+            names = [
+                action.option_strings[0]
+                for action in self._actions
+                if action.required
+                and action.option_strings
+                and action.option_strings[0] in message.split(':', 1)[1].strip().split(', ')
+            ]
+            explanation = 'Не указаны обязательные аргументы: ' + ', '.join(names) + '.'
         else:
-            action=next((action for action in self._actions if any(
-                message.startswith('argument '+option+': expected one argument')
-                for option in action.option_strings)),None)
-            if action:explanation='Для аргумента '+action.option_strings[0]+' требуется значение.'
-            elif message.startswith('unrecognized arguments:'):explanation='Указан неизвестный аргумент или лишнее значение.'
-            else:explanation='Неверная команда или аргументы.'
-        raise InputError(explanation+' Справка: '+self.prog+' --help')
+            action = next(
+                (
+                    action
+                    for action in self._actions
+                    if any(
+                        message.startswith('argument ' + option + ': expected one argument')
+                        for option in action.option_strings
+                    )
+                ),
+                None,
+            )
+            if action:
+                explanation = 'Для аргумента ' + action.option_strings[0] + ' требуется значение.'
+            elif message.startswith('unrecognized arguments:'):
+                explanation = 'Указан неизвестный аргумент или лишнее значение.'
+            else:
+                explanation = 'Неверная команда или аргументы.'
+        raise InputError(explanation + ' Справка: ' + self.prog + ' --help')
 
-    def _check_value(self,action,value):
+    def _check_value(self, action, value):
         if action.choices is not None and value not in action.choices:
-            raise InputError('Недопустимое значение '+action.option_strings[0]+'. Допустимо: '+
-                             ', '.join(action.choices)+'. Справка: '+self.prog+' --help')
+            raise InputError(
+                'Недопустимое значение '
+                + action.option_strings[0]
+                + '. Допустимо: '
+                + ', '.join(action.choices)
+                + '. Справка: '
+                + self.prog
+                + ' --help'
+            )
 
 
-def operation_help(command):
-    syntax='misbot '+command.path+' '+ ' '.join('--'+name+' VALUE' for name in command.arguments)
-    print(command.purpose+'\n\nКоманда: '+syntax.rstrip())
-    print('Обязательные аргументы: '+(', '.join('--'+n for n in command.arguments) or 'нет'))
-    print('Необязательные: --directory PATH; для update --source PATH; для S3 check --read-only, --json, --catalog-directory PATH; для S3 cleanup --json.' if command.backend.startswith('s3-') else
-          'Необязательные: --directory PATH'+('; --source PATH (доверенный распакованный комплект)' if command.backend in ('update','update-recover') else '')+'.')
-    print('Defaults: сохранённый системный каталог; из распакованного комплекта укажите --directory. init/restore: /opt/matrix-stack.')
-    if command.backend=='s3-check':
-        print('S3 defaults: --purpose обязателен; режим с записью; catalog /root/.local/state/misbot/s3-probes. --read-only не проверяет GET/PUT/DELETE. --json: schema=1 и безопасные stages; exit 0/1/130.')
-    elif command.backend=='s3-cleanup':
-        print('S3 cleanup: --catalog обязателен; удаляется только доказанный собственный объект/VersionId. --json: schema=1; exit 0/1/130.')
-    elif command.backend in ('homepage-check','homepage-apply'):
-        print('Аргументы необязательны: --mode landing|element|external (default landing), --url HTTPS_URL (обязателен для external), --name TEXT, --description TEXT, --support-url HTTPS_URL. Неуказанные поля сохраняются. Пустой --support-url удаляет блок поддержки.')
-        print('Пример: sudo misbot homepage check --mode external --url https://community.example.net/')
-        print('Затем: sudo misbot homepage apply --mode external --url https://community.example.net/ . URL чужого сайта проверяется синтаксически; доступность и содержимое не подтверждаются.')
-    print('Root: да; используйте sudo. В non-TTY: sudo -n (без запроса пароля).')
-    print('Остановка служб: '+command.stops+'\nВлияние на данные: '+command.data)
-    sample={'domain':'example.org','config':'/root/misbot-s3.env','purpose':'media',
-            'input':'/root/misbot-user.json','key':'/root/misbot-backup.key',
-            'catalog':'/root/.local/state/misbot/s3-probes/PROBE.json','calendar':'*-*-* 03:00:00 UTC',
-            'archive':'/root/misbot-backup.tar.gz','sha256':'ARCHIVE_SHA256','public-ip':'203.0.113.20',
-            'confirm':'source-stopped' if command.backend=='restore-activate' else 'target-stopped',
-            'object':'backup/example/object.enc','output':'/root/verified-backup.tar.gz',
-            'tag':'admin-panel','server':'example.org','room':'!fictional:example.org','request':'MB-0123456789abcdef0123456789abcdef','enabled':'false'}
-    if command.backend.startswith('vault-'):sample['config']='/root/misbot-vault.env'
-    if command.backend=='database-external':sample['config']='/root/misbot-postgres.env'
-    if command.backend.startswith('backup-'):sample['config']='/root/misbot-backup-s3.env'
-    if command.backend=='backup-cleanup':sample['catalog']='/opt/matrix-stack/stages/external-backups/OWNED/catalog.json'
-    example='sudo '+syntax.split(' --',1)[0]
-    for name in command.arguments:example+=' --'+name+' '+shlex.quote(sample[name])
-    if command.backend in ('update','update-recover'):example+=' --source /root/matrix-installer'
-    print('Пример: '+example)
-    print('Результат: код 0 и подтверждение операции backend; S3 --json: schema=1, stages и conclusion.')
-    print('После ошибки: сохраните данные/ключи; исправьте указанную причину, выполните misbot status и точную recovery-команду из сообщения. Для S3 исправьте приватный файл и повторите эту проверку; cleanup повторяйте только по своему catalog.')
+def help_width():
+    return max(40, min(100, shutil.get_terminal_size((80, 24)).columns))
+
+
+def help_paragraph(value, indent=''):
+    print(
+        textwrap.fill(
+            value,
+            width=help_width(),
+            initial_indent=indent,
+            subsequent_indent=indent,
+            break_long_words=False,
+            break_on_hyphens=False,
+        )
+    )
+
+
+def help_command(value):
+    """Wrap examples with shell continuations so copying still preserves argv."""
+    line = '  '
+    for token in shlex.split(value):
+        token = shlex.quote(token)
+        if len(line) + len(token) + 3 > help_width() and line.strip():
+            print(line.rstrip() + ' \\')
+            line = '    '
+        line += token + ' '
+    print(line.rstrip())
+
+
+def help_commands(commands):
+    labels = ['misbot ' + command.path for command in commands]
+    column = max(map(len, labels), default=0) + 4
+    for command, label in zip(commands, labels):
+        if column > help_width() // 2:
+            print('  ' + label)
+            help_paragraph(command.purpose, '    ')
+        else:
+            prefix = '  ' + label.ljust(column - 4) + '  '
+            print(
+                textwrap.fill(
+                    command.purpose,
+                    width=help_width(),
+                    initial_indent=prefix,
+                    subsequent_indent=' ' * column,
+                    break_long_words=False,
+                    break_on_hyphens=False,
+                )
+            )
+
+
+def operation_help(command, existing=False):
+    automatic = vocabulary.AUTOMATIC_ARGUMENTS.get(command.path, ())
+    syntax = (
+        'misbot '
+        + command.path
+        + ' '
+        + ' '.join(
+            ('[--' + name + ' VALUE]') if name in automatic else '--' + name + ' VALUE'
+            for name in command.arguments
+        )
+    )
+    purpose = command.purpose
+    if existing and command.backend == 'restore-check':
+        purpose = 'Проверить AES-GCM архив и восстановить дампы в новые временные БД с их последующим удалением.'
+    help_paragraph(purpose)
+    print('\nКоманда:')
+    help_paragraph(syntax.rstrip(), '  ')
+    print('\nОбязательные аргументы:')
+    for name in tuple(name for name in command.arguments if name not in automatic) or ('нет',):
+        print('  ' + ('--' + name if name != 'нет' else name))
+    optional = ['--directory PATH']
+    optional.extend(
+        '--' + name + ' VALUE (сохранённое значение или форма в TTY)' for name in automatic
+    )
+    optional.extend('--' + name.replace('_', '-') + ' VALUE' for name in command.optional_arguments)
+    optional.extend('--' + name.replace('_', '-') for name in command.switches)
+    if command.backend in ('update', 'update-recover'):
+        optional.append('--source PATH (доверенный распакованный комплект)')
+    print('\nНеобязательные:')
+    for value in optional:
+        help_paragraph(value, '  ')
+    if command.backend == 'ui':
+        help_paragraph(
+            'Мастер использует весь экран терминала; --plain включает последовательный вывод.'
+        )
+    print('\nКаталог установки:')
+    help_paragraph(
+        (
+            'Автоматически: установка рядом с командой, сохранённый системный каталог '
+            'или /opt/matrix-stack. Для другого сервера укажите --directory PATH.'
+            if command.backend in ('update', 'update-recover')
+            else 'По умолчанию выбран сохранённый системный каталог. Из распакованного комплекта укажите --directory. Для init/restore: /opt/matrix-stack.'
+        ),
+        '  ',
+    )
+    if command.backend == 's3-check':
+        help_paragraph(
+            'S3: --purpose выбирает media или backup; без него в TTY открывается форма. По умолчанию проверяется запись; каталоги проверок — /root/.local/state/misbot/s3-probes. --read-only не проверяет GET/PUT/DELETE. --json: schema=1 и безопасные stages; коды завершения 0/1/130.'
+        )
+    elif command.backend == 's3-cleanup':
+        help_paragraph(
+            'S3: --catalog обязателен; удаляется только подтверждённый собственный объект/VersionId. --json: schema=1; коды завершения 0/1/130.'
+        )
+    elif command.backend in ('homepage-check', 'homepage-apply'):
+        help_paragraph(
+            'Аргументы необязательны: --mode landing|element|external (default landing), --url HTTPS_URL (обязателен для external), --name TEXT, --description TEXT, --support-url HTTPS_URL. Неуказанные поля сохраняются. Пустой --support-url удаляет блок поддержки.'
+        )
+        print('\nПример внешнего сайта:')
+        help_command(
+            'sudo misbot homepage check --mode external --url https://community.example.net/'
+        )
+        help_command(
+            'sudo misbot homepage apply --mode external --url https://community.example.net/'
+        )
+        help_paragraph(
+            'URL чужого сайта проверяется синтаксически; доступность и содержимое не подтверждаются.'
+        )
+    print('\nУсловия:')
+    help_paragraph('Нужны права root: sudo; для скрипта — sudo -n.', '  ')
+    help_paragraph('Остановка служб: ' + command.stops, '  ')
+    help_paragraph('Данные: ' + command.data, '  ')
+    if command.backend.startswith('features-'):
+        help_paragraph('Доступно только для подключённого существующего Compose-стека.', '  ')
+    if command.backend in ('update', 'update-recover'):
+        help_paragraph(
+            'При запуске системной команды укажите --source с доверенным распакованным комплектом. При запуске из самого комплекта он используется как источник.',
+            '  ',
+        )
+    sample = {
+        'domain': 'example.org',
+        'config': '/root/misbot-s3.env',
+        'purpose': 'media',
+        'input': '/root/misbot-user.json',
+        'key': '/root/misbot-backup.key',
+        'catalog': '/root/.local/state/misbot/s3-probes/PROBE.json',
+        'calendar': '*-*-* 03:00:00 UTC',
+        'archive': '/root/misbot-backup.tar.gz',
+        'sha256': 'ARCHIVE_SHA256',
+        'public-ip': '203.0.113.20',
+        'confirm': (
+            'discard-draft'
+            if command.backend == 'draft-reset'
+            else 'source-stopped'
+            if command.backend == 'restore-activate'
+            else 'target-stopped'
+        ),
+        'object': 'backup/example/object.enc',
+        'output': '/root/verified-backup.tar.gz',
+        'tag': 'admin-panel',
+        'mxid': '@personal:example.org',
+        'server': 'example.org',
+        'request': 'MB-0123456789abcdef0123456789abcdef',
+    }
+    if command.backend.startswith('vault-'):
+        sample['config'] = '/root/misbot-vault.env'
+    if command.backend == 'database-external':
+        sample['config'] = '/root/misbot-postgres.env'
+    if command.backend.startswith('backup-'):
+        sample['config'] = '/root/misbot-backup-s3.env'
+    if command.backend == 'backup-cleanup':
+        sample['catalog'] = '/opt/matrix-stack/stages/external-backups/OWNED/catalog.json'
+    example = 'sudo misbot ' + command.path
+    for name in command.arguments:
+        example += ' --' + name + ' ' + shlex.quote(sample[name])
+    if command.backend in ('update', 'update-recover'):
+        example += ' --source /root/matrix-installer'
+    print('\nПример:')
+    help_command(example)
+    print('\nРезультат:')
+    result = 'Код 0 после подтверждения операции backend.'
+    if command.backend in ('s3-check', 's3-cleanup'):
+        result += ' Для --json: schema=1, stages и conclusion.'
+    help_paragraph(result, '  ')
+    print('\nПосле ошибки:')
+    recovery = 'Сохраните данные и ключи. Исправьте указанную причину, проверьте misbot status и выполните точную команду восстановления из сообщения.'
+    if command.backend in ('s3-check', 's3-cleanup'):
+        recovery = 'Исправьте приватный файл и повторите проверку. Cleanup повторяйте только по своему catalog.'
+    help_paragraph(recovery, '  ')
 
 
 def help_text(topic=''):
-    if command_wrapper.default_backend()=='existing-compose':
-        supported=[c for c in vocabulary.COMMANDS if c.backend in vocabulary.EXISTING_BACKENDS]
+    if topic == 'version':
+        print('Показать версию Misbot. Права root не требуются.\n\nКоманда:\n  misbot version')
+        return
+    if command_wrapper.default_backend() == 'existing-compose':
+        supported = [c for c in vocabulary.COMMANDS if c.backend in vocabulary.EXISTING_BACKENDS]
         if topic in vocabulary.BY_PATH:
-            command=vocabulary.BY_PATH[topic]
+            command = vocabulary.BY_PATH[topic]
             if command.backend not in vocabulary.EXISTING_BACKENDS:
-                raise InputError('Команда не поддерживается для подключённого существующего Compose-стека. Выполните misbot help.')
-            if command.backend=='restore-check':
-                print('Проверить AES-GCM архив и восстановить дампы в новые временные БД с их последующим удалением.');return
-            operation_help(command);return
-        print('Misbot — управление существующим Compose-стеком. Конфигурация, identity и версии сохраняются.')
-        found=[c for c in supported if not topic or c.path.startswith(topic+' ')]
-        if topic and not found:raise InputError('Область не поддерживается для существующего стека. Выполните misbot help.')
-        for command in found:print('  misbot '+command.path+' — '+command.purpose)
-        print('  misbot version\nКопии этого режима зашифрованы; recovery key хранится отдельно. Подробно: existing-compose.md.')
+                raise InputError(
+                    'Команда не поддерживается для подключённого существующего Compose-стека. Выполните misbot help.'
+                )
+            operation_help(command, existing=True)
+            return
+        print(
+            'Misbot — управление существующим Compose-стеком. Конфигурация, identity и версии сохраняются.'
+        )
+        found = [c for c in supported if not topic or c.path.startswith(topic + ' ')]
+        if topic and not found:
+            raise InputError(
+                'Область не поддерживается для существующего стека. Выполните misbot help.'
+            )
+        print()
+        help_commands(found)
+        if topic == 'update':
+            help_paragraph(
+                'Из распакованного комплекта: sudo python3 misbot.py update. Источник выбирается автоматически; --directory PATH уточняет установку.'
+            )
+        print(
+            '  misbot version\nКопии этого режима зашифрованы; recovery key хранится отдельно. Подробно: existing-compose.md.'
+        )
         return
     if topic in vocabulary.BY_PATH:
-        operation_help(vocabulary.BY_PATH[topic]);return
-    if not topic:
-        print('Misbot — команды управления Matrix\n\nСостояние и службы: status, check, start, stop, remove\nВерсия: version\n')
-        for name,title in vocabulary.TOPICS.items():print('  '+name+' — '+title)
-        print('\nПодробно: misbot storage help; misbot storage s3 check --help\nВыбор установки: --directory PATH. До установки: sudo python3 misbot.py ui.\nВ TTY без аргументов открывается мастер/меню; без TTY — эта справка. Явно: sudo misbot ui.')
+        operation_help(vocabulary.BY_PATH[topic])
         return
-    found=[c for c in vocabulary.COMMANDS if c.path.startswith(topic+' ')]
-    if not found:raise InputError('Неизвестная область. Выполните misbot help.')
-    print(vocabulary.TOPICS.get(topic,topic))
-    for c in found:print('  misbot '+c.path+' — '+c.purpose)
+    if not topic:
+        print(
+            'Misbot — команды управления Matrix\n\nСостояние и службы: status, check, start, stop, remove\nВерсия: version\n'
+        )
+        for name, title in vocabulary.TOPICS.items():
+            print('  ' + name + ' — ' + title)
+        print(
+            '\nПодробно: misbot storage help; misbot storage s3 check --help\nВыбор установки: --directory PATH. До установки: sudo python3 misbot.py ui.\nВ TTY без аргументов открывается мастер/меню; без TTY — эта справка. Явно: sudo misbot ui.'
+        )
+        return
+    found = [c for c in vocabulary.COMMANDS if c.path.startswith(topic + ' ')]
+    if not found:
+        raise InputError('Неизвестная область. Выполните misbot help.')
+    print(vocabulary.TOPICS.get(topic, topic) + '\n')
+    help_commands(found)
+    if topic == 'update':
+        help_paragraph(
+            'Из распакованного комплекта: sudo python3 misbot.py update. Источник выбирается автоматически; --directory PATH уточняет установку.'
+        )
     print('\nАргументы и условия: misbot COMMAND --help')
 
 
 def parse(argv):
     # Extract global options wherever they appear; argv values are never executed.
-    common=Parser(prog='misbot',add_help=False,allow_abbrev=False)
-    common.add_argument('--directory');common.add_argument('--source')
-    defaults,remaining=common.parse_known_args(argv)
-    if not remaining or remaining==['--help'] or remaining==['help']:return None,defaults,''
-    if remaining[0]=='help':return None,defaults,' '.join(remaining[1:])
-    if remaining[-1:] in (['help'],['--help']):
-        words=[]
-        for value in remaining[:-1]:
-            if value.startswith('-'):break
+    common = Parser(prog='misbot', add_help=False, allow_abbrev=False)
+    common.add_argument('--directory')
+    common.add_argument('--source')
+    defaults, remaining = common.parse_known_args(argv)
+    if not remaining or remaining == ['--help'] or remaining == ['help']:
+        return None, defaults, ''
+    if remaining[0] == 'help':
+        return None, defaults, ' '.join(remaining[1:])
+    if '--help' in remaining or (
+        remaining[-1:] == ['help'] and not any(value.startswith('-') for value in remaining)
+    ):
+        words = []
+        for value in remaining:
+            if value in ('help', '--help'):
+                continue
+            if value.startswith('-'):
+                break
             words.append(value)
-        return None,defaults,' '.join(words)
-    if remaining==['version']:return 'version',defaults,None
-    words=[]
+        return None, defaults, ' '.join(words)
+    if remaining == ['version']:
+        return 'version', defaults, None
+    words = []
     for value in remaining:
-        if value.startswith('-'):break
+        if value.startswith('-'):
+            break
         words.append(value)
-    command=vocabulary.BY_PATH.get(' '.join(words))
-    if command is None:raise InputError('Неизвестная команда. Выполните misbot help.')
-    parser=Parser(prog='misbot '+command.path,add_help=False,allow_abbrev=False)
+    path = ' '.join(words)
+    command = vocabulary.BY_PATH.get(vocabulary.ALIASES.get(path, path))
+    if command is None:
+        topic = ' '.join(words)
+        if topic in vocabulary.GROUPS:
+            if len(words) == len(remaining):
+                return None, defaults, topic
+            raise InputError('Укажите действие. Справка: misbot ' + topic + ' --help')
+        raise InputError('Неизвестная команда. Выполните misbot help.')
+    parser = Parser(prog='misbot ' + command.path, add_help=False, allow_abbrev=False)
     for name in command.arguments:
-        parser.add_argument('--'+name,dest=name,required=True,choices=('media','backup') if name=='purpose' else None)
-    if command.backend in ('s3-check','s3-cleanup'):
-        parser.add_argument('--json',action='store_true')
-    if command.backend=='s3-check':
-        parser.add_argument('--read-only',action='store_true')
-        parser.add_argument('--catalog-directory')
-    if command.backend=='remove':parser.add_argument('--backup-config')
-    if command.backend=='admin-bot-set':parser.add_argument('--administrator')
-    if command.backend in ('homepage-check','homepage-apply'):
-        for name in ('mode','url','name','description','support-url'):parser.add_argument('--'+name)
-    args=parser.parse_args(remaining[len(words):])
-    if defaults.source and command.backend not in ('update','update-recover'):
+        parser.add_argument(
+            '--' + name,
+            dest=name,
+            required=name not in vocabulary.AUTOMATIC_ARGUMENTS.get(command.path, ()),
+            choices=('media', 'backup') if name == 'purpose' else None,
+        )
+    for name in command.optional_arguments:
+        parser.add_argument('--' + name.replace('_', '-'))
+    for name in command.switches:
+        parser.add_argument('--' + name.replace('_', '-'), action='store_true')
+    args = parser.parse_args(remaining[len(words) :])
+    if defaults.source is not None and command.backend not in ('update', 'update-recover'):
         raise InputError('--source применяется только к update apply/recover.')
-    return command,defaults,vars(args)
+    return command, defaults, vars(args)
 
 
-def plan(command,options,values,source=None):
-    source=Path(source or Path(__file__).resolve().parent)
-    if options.directory:
-        root=Path(options.directory)
+def update_directory(source, root, command, options):
+    """Select only known installations; never scan arbitrary server directories."""
+    launcher = source.parent if source.name == '.misbot' else source
+    action = 'update' if command.backend == 'update' else 'update recover'
+    hint = 'Укажите каталог установки: sudo python3 ' + shlex.quote(str(launcher / 'misbot.py'))
+    hint += ' ' + action + ' --directory /абсолютный/путь'
+    if options.source is not None and not any(
+        ord(char) < 32 or 127 <= ord(char) <= 159 for char in options.source
+    ):
+        hint += ' --source ' + shlex.quote(options.source)
+    elif (source / 'command.json').is_file() or options.source is not None:
+        hint += ' --source /путь/к/комплекту'
+    hint += '.'
+    if root is None:
+        try:
+            saved = command_wrapper.record()
+            if saved is not None:
+                root = Path(saved['directory'])
+        except (OSError, ValueError, RuntimeError, KeyError, TypeError, AttributeError):
+            raise InputError('Не удалось проверить сохранённый каталог Misbot. ' + hint) from None
+    if root is None and (DEFAULT_UPDATE_DIRECTORY / 'installation.json').exists():
+        root = DEFAULT_UPDATE_DIRECTORY
+    if root is None:
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            raise InputError('Установка для обновления не найдена. ' + hint)
+        try:
+            value = input(
+                'Каталог установленного сервера (абсолютный путь; Enter — выход): '
+            ).strip()
+        except EOFError:
+            raise InputError('Каталог не указан; обновление не запущено. ' + hint) from None
+        if not value:
+            raise InputError('Каталог не указан; обновление не запущено. ' + hint)
+        root = Path(value)
+    try:
+        command_wrapper.trusted_installation(root)
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError, AttributeError):
+        raise InputError(
+            'Каталог обновления не является доверенной установкой Misbot. ' + hint
+        ) from None
+    return root
+
+
+def update_source(options, source, root, command):
+    """Accept either archive layout without hiding the existing trust checks."""
+    if options.source is None:
+        if (source / 'command.json').is_file() or source == root:
+            action = 'update' if command.backend == 'update' else 'update recover'
+            raise InputError(
+                'Запустите sudo python3 /путь/к/новому/комплекту/misbot.py '
+                + action
+                + ' --directory '
+                + shlex.quote(str(root))
+                + ' или повторите исходную команду с --source /путь/к/комплекту.'
+            )
+        candidate = source
     else:
-        root=command_wrapper.default_directory()
-        if root is None and (source/'installation.json').is_file():root=source
-        if root is None and command.backend in ('init','restore','restore-local'):root=Path('/opt/matrix-stack')
-    if root is not None and (root/'installation.json').is_file():
+        candidate = Path(options.source)
+    if not candidate.is_absolute() or candidate.resolve() != candidate:
+        raise InputError('--source требует абсолютный каталог без symlinks и переходов ..')
+    if not (candidate / 'release.json').exists() and (candidate / '.misbot').exists():
+        candidate = candidate / '.misbot'
+        if candidate.resolve() != candidate:
+            raise InputError('--source требует абсолютный каталог без symlinks и переходов ..')
+    return candidate
+
+
+def plan(command, options, values, source=None):
+    source = Path(source or Path(__file__).resolve().parent)
+    if options.directory:
+        root = Path(options.directory)
+    else:
+        try:
+            root = command_wrapper.default_directory()
+        except (OSError, ValueError, RuntimeError, KeyError, TypeError, AttributeError):
+            if command.backend not in ('update', 'update-recover'):
+                raise
+            raise InputError(
+                'Не удалось проверить сохранённый каталог Misbot. Повторите команду '
+                'с --directory /абсолютный/путь к установленному серверу.'
+            ) from None
+        if root is None and (source / 'installation.json').is_file():
+            root = source
+        if root is None and command.backend in ('init', 'restore', 'restore-local'):
+            root = Path('/opt/matrix-stack')
+    if command.backend in ('update', 'update-recover'):
+        root = update_directory(source, root, command, options)
+    if root is not None and any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in str(root)):
+        raise InputError('Каталог установки не должен содержать управляющие символы.')
+    if any(values.get(name) is None for name in command.arguments):
+        return input_plan(command, values, source, root)
+    if command.backend.startswith('draft-'):
+        root = root or Path('/opt/matrix-stack')
+        if not root.is_absolute() or root == Path('/') or root.resolve() != root:
+            raise InputError('Нужен абсолютный каталог установки без symlinks и переходов ..')
+        backend = source
+        if (source / 'command.json').is_file():
+            if not (root / 'wizard_state.py').is_file():
+                raise InputError(
+                    'Черновик хранится отдельно от установки. Для его просмотра или удаления '
+                    'запустите config draft show/reset из проверенного распакованного комплекта '
+                    'с --directory выбранного каталога. Подтверждение удаления: --confirm discard-draft.'
+                )
+            command_wrapper.trusted_runtime(root)
+            backend = root
+        return vocabulary.execution_argv(command, values, root, backend)
+    if command.backend == 'remove' and root is None:
+        root = Path('/opt/matrix-stack')
+    if command.backend == 'remove' and not (root / 'installation.json').exists():
+        if not root.is_absolute() or root == Path('/') or root.resolve() != root:
+            raise InputError('Нужен абсолютный каталог установки без symlinks и переходов ..')
+        if not root.exists() or not any(root.iterdir()):
+            raise InputError(
+                'В каталоге ' + str(root) + ' нет установки Misbot: remove не получил '
+                'сохранённые данные для удаления. Ручное удаление каталога не останавливает службы. '
+                'Черновик мастера хранится отдельно. Просмотр: config draft show; '
+                'удаление: config draft reset --confirm discard-draft '
+                '--directory ' + shlex.quote(str(root)) + '. Новый сервер: ui.'
+            )
+    if (
+        command.backend == 'wrapper-remove'
+        and root is not None
+        and not (root / 'installation.json').exists()
+    ):
+        if not root.is_absolute() or root == Path('/') or root.resolve() != root:
+            raise InputError('Нужен абсолютный каталог без symlinks и переходов ..')
+        # This public helper attests its own ownership record and exact hashes;
+        # removing the command does not depend on private installation metadata.
+        return [
+            '/usr/bin/python3',
+            str(source / 'command_wrapper.py'),
+            'remove',
+            '--directory',
+            str(root),
+        ]
+    if root is not None and (root / 'installation.json').is_file():
         command_wrapper.trusted_installation(root)
-        if json.loads((root/'installation.json').read_text()).get('backend')=='existing-compose':
+        if (
+            json.loads((root / 'installation.json').read_text()).get('backend')
+            == 'existing-compose'
+        ):
             if command.backend not in vocabulary.EXISTING_BACKENDS:
-                raise InputError('Команда не поддерживается для существующего Compose-стека. Настройки и данные сохранены; выполните misbot help.')
-            if command.backend=='release-check':
-                return ['/usr/bin/python3',str(root/'releases.py'),'--directory',str(root)]
-            if command.backend.startswith('admin-bot-'):
-                args=['/usr/bin/python3',str(root/'admin_identity.py'),command.backend[10:],'--directory',str(root)]
-                for name in ('tag','administrator'):
-                    if values.get(name):args+=['--'+name,values[name]]
-                return args
-            if command.backend.startswith('wrapper-'):
-                return ['/usr/bin/python3',str(root/'command_wrapper.py'),command.backend[8:],'--directory',str(root)]
-            if command.backend.startswith('federation-'):
-                action=command.backend[11:]
-                arguments=[values[name] for name in command.arguments]
-                if action=='room-invite':arguments=[json.dumps({'server':values['server'],'room':values['room']})]
-                return ['/usr/bin/python3',str(root/'federation.py'),'--directory',str(root),action,*arguments]
-            if command.backend.startswith('features-'):
-                return ['/usr/bin/python3',str(root/'existing_features.py'),'--directory',str(root),command.backend,
-                        *(['--config',values['config']] if command.backend=='features-enable' else [])]
-            if command.backend.startswith('homepage-'):
-                args=['/usr/bin/python3',str(root/'existing_features.py'),'--directory',str(root),command.backend]
-                for name in ('mode','url','name','description','support_url'):
-                    if values.get(name) is not None:args+=['--'+name.replace('_','-'),values[name]]
-                return args
-            if command.backend in ('backup-schedule','backup-schedule-local','backup-schedule-status','backup-schedule-disable'):
-                args=['/usr/bin/python3',str(root/'existing_schedule.py'),'--directory',str(root),command.backend]
-                for name in command.arguments:args+=['--'+name,values[name]]
-                return args
-            if command.backend in ('update','update-recover'):
-                if not options.source:
-                    raise InputError('Для update укажите --source PATH к доверенному распакованному комплекту.')
-                candidate = Path(options.source)
-                if not candidate.is_absolute() or candidate.resolve()!=candidate:
-                    raise InputError('--source требует абсолютный каталог без symlink.')
-                info=command_wrapper.regular(candidate/'existing_update.py')
-                if info.st_uid!=0 or info.st_mode & 0o022:
+                raise InputError(
+                    'Команда не поддерживается для существующего Compose-стека. Настройки и данные сохранены; выполните misbot help.'
+                )
+            if command.backend in ('update', 'update-recover'):
+                candidate = update_source(options, source, root, command)
+                info = command_wrapper.regular(candidate / 'existing_update.py')
+                if info.st_uid != 0 or info.st_mode & 0o022:
                     raise InputError('Source updater должен принадлежать root без чужой записи.')
-                return ['/usr/bin/python3',str(candidate/'existing_update.py'),'--directory',str(root),
-                        '--source',str(candidate),command.backend]
-            args=['/usr/bin/python3',str(root/'existing_compose.py'),'--directory',str(root),command.backend]
-            for name in command.arguments:
-                args+=['--'+name,values[name]]
-            for name in ('json','read_only'):
-                if values.get(name):args+=['--'+name.replace('_','-')]
-            if values.get('catalog_directory'):args+=['--catalog-directory',values['catalog_directory']]
-            return args
-    if command.backend in ('s3-check','s3-cleanup'):
+                backend = candidate
+            else:
+                backend = root
+            return vocabulary.execution_argv(command, values, root, backend, existing=True)
+    if command.backend in ('s3-check', 's3-cleanup'):
         if root is not None:
-            if not root.is_absolute() or root==Path('/') or root.resolve()!=root:
+            if not root.is_absolute() or root == Path('/') or root.resolve() != root:
                 raise InputError('Нужен абсолютный каталог без symlinks и переходов ..')
-            if root.exists() and any(root.iterdir()):command_wrapper.trusted_installation(root)
-        args=['/usr/bin/python3',str(source/'s3_diagnostics.py'),command.backend[3:]]
-        for name in command.arguments:args+=['--'+name,values[name]]
-        if values.get('json'):args+=['--json']
-        if values.get('read_only'):args+=['--read-only']
-        if values.get('catalog_directory'):args+=['--catalog-directory',values['catalog_directory']]
-        if root is not None:args+=['--directory',str(root)]
+            if root.exists() and any(root.iterdir()):
+                command_wrapper.trusted_installation(root)
+        args = ['/usr/bin/python3', str(source / 's3_diagnostics.py'), command.backend[3:]]
+        for name in command.arguments:
+            vocabulary.append_option(args, '--' + name, values[name])
+        if values.get('json'):
+            args += ['--json']
+        if values.get('read_only'):
+            args += ['--read-only']
+        if values.get('catalog_directory'):
+            args += ['--catalog-directory', values['catalog_directory']]
+        if root is not None:
+            args += ['--directory', str(root)]
         # Installed help runtime is public; diagnostics runs from selected backend.
-        if (source/'command.json').is_file():
-            if root is None:raise InputError('Укажите --directory PATH или используйте распакованный комплект.')
+        if (source / 'command.json').is_file():
+            if root is None:
+                raise InputError('Укажите --directory PATH или используйте распакованный комплект.')
             command_wrapper.trusted_installation(root)
-            args[1]=str(root/'s3_diagnostics.py')
+            args[1] = str(root / 's3_diagnostics.py')
         return args
-    if command.backend=='ui':
-        if root is not None and (not root.is_absolute() or root==Path('/') or root.resolve()!=root):raise InputError('UI требует отдельный абсолютный каталог без symlink и ..')
-        backend=source
-        if (source/'command.json').is_file():
-            if root is None:raise InputError('До init: sudo python3 misbot.py ui из распакованного комплекта.')
-            command_wrapper.trusted_runtime(root);backend=root
-        return ['/usr/bin/python3',str(backend/'terminal_ui.py'),*(['--directory',str(root)] if root else [])]
+    if command.backend == 'ui':
+        if root is not None and (
+            not root.is_absolute() or root == Path('/') or root.resolve() != root
+        ):
+            raise InputError('UI требует отдельный абсолютный каталог без symlink и ..')
+        backend = source
+        if (source / 'command.json').is_file():
+            if root is None:
+                raise InputError('До init: sudo python3 misbot.py ui из распакованного комплекта.')
+            if not (root / 'terminal_ui.py').is_file():
+                raise InputError(MISSING_RUNTIME)
+            command_wrapper.trusted_runtime(root)
+            backend = root
+        return [
+            '/usr/bin/python3',
+            str(backend / 'terminal_ui.py'),
+            *(['--directory', str(root)] if root else []),
+            *(['--plain'] if values.get('plain') else []),
+        ]
     if command.backend.startswith('features-'):
-        raise InputError('Этот раздел предназначен для подключённого существующего Compose-стека; обычная установка уже содержит компоненты.')
-    if command.backend=='storage-status':
-        if root is None:raise InputError('Укажите --directory PATH.')
+        raise InputError(
+            'Этот раздел предназначен для подключённого существующего Compose-стека; обычная установка уже содержит компоненты.'
+        )
+    if command.backend == 'storage-status':
+        if root is None:
+            raise InputError('Укажите --directory PATH.')
         command_wrapper.trusted_installation(root)
-        return ['/bin/bash',str(root/'install.sh'),'status',str(root)]
-    if root is None and not command.installed:root=Path('/opt/matrix-stack')
-    if root is None:raise InputError('Установка не выбрана. Укажите --directory PATH; сначала выполните config init из распакованного комплекта.')
-    if not root.is_absolute() or root==Path('/') or root.resolve()!=root:
+        return ['/usr/bin/python3', str(root / 'storage_summary.py'), '--directory', str(root)]
+    if root is None and not command.installed:
+        root = Path('/opt/matrix-stack')
+    if root is None:
+        raise InputError(
+            'Установка не выбрана. Укажите --directory PATH; сначала выполните config init из распакованного комплекта.'
+        )
+    if not root.is_absolute() or root == Path('/') or root.resolve() != root:
         raise InputError('Нужен абсолютный каталог установки без symlinks и переходов ..')
     if command.installed:
-        if command.backend=='remove':command_wrapper.trusted_runtime(root)
-        else:command_wrapper.trusted_installation(root)
-    backend=Path(options.source) if options.source else (root if command.installed else source)
-    if (source/'command.json').is_file() and not command.installed:
-        backend=command_wrapper.default_directory()
-        if backend is None:raise InputError('До настройки используйте python3 misbot.py из распакованного комплекта.')
+        if command.backend == 'remove':
+            command_wrapper.trusted_runtime(root)
+        else:
+            if not (root / 'installation.json').is_file():
+                raise InputError(
+                    'В выбранном каталоге нет installation.json. Сохраните оставшиеся файлы. Для новой установки запустите UI из проверенного распакованного комплекта и выберите пустой каталог.'
+                )
+            command_wrapper.trusted_installation(root)
+    backend = Path(options.source) if options.source else (root if command.installed else source)
+    if (source / 'command.json').is_file() and not command.installed:
+        backend = command_wrapper.default_directory()
+        if backend is None:
+            raise InputError(
+                'До настройки используйте python3 misbot.py из распакованного комплекта.'
+            )
+        if not (backend / 'install.sh').is_file():
+            raise InputError(MISSING_RUNTIME)
         command_wrapper.trusted_runtime(backend)
-    if command.backend in ('update','update-recover'):
-        if options.source is None:
-            if not (source/'command.json').is_file() and source!=root:backend=source
-            else:raise InputError('Для update укажите --source PATH к доверенному распакованному комплекту.')
+    if command.backend in ('update', 'update-recover'):
+        backend = update_source(options, source, root, command)
         # The updater verifies the complete manifest and compatibility itself.
         # Do not import it from the intentionally small public help runtime.
-        if not backend.is_absolute() or backend.resolve()!=backend:
+        if not backend.is_absolute() or backend.resolve() != backend:
             raise InputError('--source требует абсолютный каталог без symlinks.')
-        info=command_wrapper.regular(backend/'install.sh')
-        if info.st_uid!=0 or info.st_mode & 0o022:
-            raise InputError('Распакованный комплект должен принадлежать root и быть защищён от записи другими пользователями.')
-        if json.loads((backend/'release.json').read_text()).get('family')!=command_wrapper.FAMILY:
+        info = command_wrapper.regular(backend / 'install.sh')
+        if info.st_uid != 0 or info.st_mode & 0o022:
+            raise InputError(
+                'Распакованный комплект должен принадлежать root и быть защищён от записи другими пользователями.'
+            )
+        if (
+            json.loads((backend / 'release.json').read_text()).get('family')
+            != command_wrapper.FAMILY
+        ):
             raise InputError('Чужой комплект обновления.')
-    if command.backend=='remove':
-        args=['/usr/bin/python3',str(root/'remove_server.py'),'--directory',str(root)]
-        if values.get('backup_config'):args+=['--backup-config',values['backup_config']]
-        return args
-    if command.backend.startswith('admin-bot-'):
-        args=['/usr/bin/python3',str(root/'admin_identity.py'),command.backend[10:],'--directory',str(root)]
-        for name in ('tag','administrator'):
-            if values.get(name):args+=['--'+name,values[name]]
-        return args
-    if command.backend in ('release-check','release-update'):
-        return ['/usr/bin/python3',str(root/('releases.py' if command.backend=='release-check' else 'release_update.py')),'--directory',str(root)]
-    if command.backend.startswith('wrapper-'):
-        return ['/usr/bin/python3',str(root/'command_wrapper.py'),command.backend[8:],'--directory',str(root)]
-    if command.backend.startswith('configuration-'):
-        return ['/usr/bin/python3',str(backend/'configuration.py'),'--directory',str(root),command.backend[14:]]
-    if command.backend.startswith('homepage-'):
-        args=['/usr/bin/python3',str(backend/'homepage.py'),'--directory',str(root),command.backend[9:]]
-        for name in ('mode','url','name','description','support_url'):
-            if values.get(name) is not None:args+=['--'+name.replace('_','-'),values[name]]
-        return args
-    if command.backend.startswith('federation-'):
-        action=command.backend[11:];argument=[values[name] for name in command.arguments]
-        if action=='room-invite':argument=[json.dumps({'server':values['server'],'room':values['room']})]
-        return ['/usr/bin/python3',str(backend/'federation.py'),'--directory',str(root),action,*argument]
-    if command.backend.startswith('invitation-'):
-        return ['/usr/bin/python3',str(backend/'registration.py'),'--directory',str(root),command.backend[11:]]
-    return ['/bin/bash',str(backend/'install.sh'),*vocabulary.backend_argv(command,values,root)]
+    return vocabulary.execution_argv(command, values, root, backend)
+
+
+def input_plan(command, values, source, root):
+    """Run the input helper only from an admitted runtime, never import private code here."""
+    root = root or Path('/opt/matrix-stack')
+    if not root.is_absolute() or root == Path('/') or root.resolve() != root:
+        raise InputError('Нужен абсолютный каталог установки без symlinks и переходов ..')
+    installed = (root / 'installation.json').is_file()
+    if installed:
+        command_wrapper.trusted_installation(root)
+        metadata = json.loads((root / 'installation.json').read_text())
+        if metadata.get('backend') == 'existing-compose':
+            if command.backend not in vocabulary.EXISTING_BACKENDS:
+                raise InputError('Команда не поддерживается для существующего Compose-стека.')
+        elif command.backend.startswith('features-'):
+            raise InputError('Компоненты предназначены для подключённого Compose-стека.')
+    elif command.installed:
+        raise InputError('Сначала выберите установленный сервер через --directory.')
+    backend = root if installed else source
+    if (source / 'command.json').is_file() and not installed:
+        raise InputError('Используйте проверенный распакованный комплект для новой установки.')
+    helper = backend / 'operation_inputs.py'
+    info = command_wrapper.regular(helper)
+    if info.st_uid != 0 or info.st_mode & 0o022:
+        raise InputError('Модуль ввода должен принадлежать root без чужой записи.')
+    args = ['/usr/bin/python3', str(helper), '--directory', str(root), '--command', command.path]
+    for key, value in values.items():
+        if value is True:
+            args.append('--' + key.replace('_', '-'))
+        elif isinstance(value, str):
+            vocabulary.append_option(args, '--' + key.replace('_', '-'), value)
+    return args
 
 
 def main(argv=None):
-    argv=list(sys.argv[1:] if argv is None else argv)
-    if not argv and sys.stdin.isatty() and sys.stdout.isatty():argv=['ui']
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if not argv and sys.stdin.isatty() and sys.stdout.isatty():
+        argv = ['ui']
     try:
-        command,options,values=parse(argv)
-        if command is None:help_text(values);return 0
-        if command=='version':
-            print('Misbot '+json.loads((Path(__file__).resolve().parent/'release.json').read_text())['version']);return 0
-        if os.geteuid()!=0:
-            prefix='sudo -n' if not sys.stdin.isatty() else 'sudo'
-            follow=prefix+' '+shlex.join(['misbot',*argv])
-            message='Нужны права root. '+('sudo отсутствует; обратитесь к администратору или войдите как root.' if not shutil.which('sudo') else 'Выполните: '+follow)
-            print(message+' Пароль автоматически не запрашивается.',file=sys.stderr);return 77
-        args=plan(command,options,values)
-        os.execv(args[0],args)
-    except (InputError,OSError,ValueError,RuntimeError,KeyError):
+        command, options, values = parse(argv)
+        if command is None:
+            help_text(values)
+            return 0
+        if command == 'version':
+            print(
+                'Misbot '
+                + json.loads((Path(__file__).resolve().parent / 'release.json').read_text())[
+                    'version'
+                ]
+            )
+            return 0
+        if os.geteuid() != 0:
+            prefix = 'sudo -n' if not sys.stdin.isatty() else 'sudo'
+            message = 'Нужны права root. ' + (
+                'sudo отсутствует; обратитесь к администратору или войдите как root.'
+                if not shutil.which('sudo')
+                else 'Повторите команду через '
+                + prefix
+                + '. Справка: misbot '
+                + command.path
+                + ' --help.'
+            )
+            print(message + ' Пароль автоматически не запрашивается.', file=sys.stderr)
+            return 77
+        args = plan(command, options, values)
+        if (
+            command.backend.startswith('federation-')
+            and sys.stdout.isatty()
+            and not values.get('json')
+        ):
+            args.append('--human')
+        os.execv(args[0], args)
+    except KeyboardInterrupt:
+        print('Операция не запущена: ввод отменён.', file=sys.stderr)
+        return 130
+    except (InputError, OSError, ValueError, RuntimeError, KeyError):
         # Input/backend selection errors never expose credentials or raw driver text.
-        message=str(sys.exc_info()[1]) if isinstance(sys.exc_info()[1],InputError) else 'Каталог или комплект не принадлежит совместимой установке Misbot. Сохраните данные и проверьте --directory/--source.'
-        print(message,file=sys.stderr);return 2
+        message = (
+            str(sys.exc_info()[1])
+            if isinstance(sys.exc_info()[1], InputError)
+            else 'Каталог или комплект не принадлежит совместимой установке Misbot. Сохраните данные и проверьте --directory/--source.'
+        )
+        print(message, file=sys.stderr)
+        return 2
 
 
-if __name__=='__main__':raise SystemExit(main())
+if __name__ == '__main__':
+    raise SystemExit(main())

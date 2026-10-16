@@ -1,147 +1,940 @@
 """One command vocabulary shared by CLI, help, documentation and future UI."""
+
 from dataclasses import dataclass
+from collections.abc import Mapping
+from pathlib import Path
+from enum import Enum
+from typing import cast
+
+
+class ArgumentStyle(Enum):
+    POSITIONAL = 'positional'
+    NAMED = 'named'
+    OMITTED = 'omitted'
+
+
+class ActionPosition(Enum):
+    BEFORE_DIRECTORY = 'before_directory'
+    AFTER_DIRECTORY = 'after_directory'
+    OMITTED = 'omitted'
+
+
+@dataclass(frozen=True)
+class Route:
+    """Transport metadata only; trust checks and operation rules stay in the backend."""
+
+    script: str
+    action_prefix: str = ''
+    action_position: ActionPosition = ActionPosition.AFTER_DIRECTORY
+    argument_style: ArgumentStyle = ArgumentStyle.POSITIONAL
+    optional_values: tuple[str, ...] = ()
+    preserve_empty_values: bool = False
+    flags: tuple[str, ...] = ()
+    installation_script: bool = False
+    source_argument: bool = False
+
+
+ADMIN_ACCESS = Route(
+    'admin_identity.py',
+    'admin-access-',
+    ActionPosition.BEFORE_DIRECTORY,
+    argument_style=ArgumentStyle.OMITTED,
+    optional_values=('mxid',),
+    installation_script=True,
+)
+ADMIN = Route(
+    'admin_identity.py',
+    'admin-bot-',
+    ActionPosition.BEFORE_DIRECTORY,
+    argument_style=ArgumentStyle.OMITTED,
+    optional_values=('tag', 'administrator'),
+    installation_script=True,
+)
+WRAPPER = Route(
+    'command_wrapper.py', 'wrapper-', ActionPosition.BEFORE_DIRECTORY, installation_script=True
+)
+RELEASE_CHECK = Route(
+    'releases.py', action_position=ActionPosition.OMITTED, installation_script=True
+)
+RELEASE_UPDATE = Route(
+    'release_update.py', action_position=ActionPosition.OMITTED, installation_script=True
+)
+CONFIGURATION = Route('configuration.py', 'configuration-')
+DRAFT = Route('wizard_state.py', 'draft-', argument_style=ArgumentStyle.NAMED)
+HOMEPAGE = Route(
+    'homepage.py',
+    'homepage-',
+    optional_values=('mode', 'url', 'name', 'description', 'support_url'),
+    preserve_empty_values=True,
+)
+FEDERATION = Route('federation.py', 'federation-')
+INVITATION = Route('registration.py', 'invitation-')
+REMOVE = Route(
+    'remove_server.py',
+    action_position=ActionPosition.OMITTED,
+    optional_values=('backup_config',),
+    installation_script=True,
+)
+ADOPTED = Route(
+    'existing_compose.py',
+    argument_style=ArgumentStyle.NAMED,
+    optional_values=('catalog_directory',),
+    flags=('json', 'read_only', 'plain'),
+)
+FEATURES = Route('existing_features.py', argument_style=ArgumentStyle.NAMED)
+ADOPTED_HOMEPAGE = Route(
+    'existing_features.py', optional_values=HOMEPAGE.optional_values, preserve_empty_values=True
+)
+ADOPTED_SCHEDULE = Route('existing_schedule.py', argument_style=ArgumentStyle.NAMED)
+ADOPTED_UPDATE = Route('existing_update.py', source_argument=True)
 
 
 @dataclass(frozen=True)
 class Command:
     path: str
     backend: str
-    arguments: tuple = ()
+    arguments: tuple[str, ...] = ()
     purpose: str = ''
     stops: str = 'Нет.'
     data: str = 'Данные и ключи сохраняются.'
     installed: bool = True
+    execution: Route | None = None
+    existing: Route | None = None
+    optional_arguments: tuple[str, ...] = ()
+    switches: tuple[str, ...] = ()
 
 
 COMMANDS = [
-    Command('admin bot show','admin-bot-show',purpose='Показать сохранённые теги панели и её единственного администратора.'),
-    Command('admin bot set','admin-bot-set',('tag',),'Выбрать тег до создания бота; созданную identity переименовать нельзя.'),
-    Command('update check','release-check',purpose='Сравнить установленную версию сервера с последним стабильным GitHub Release.'),
-    Command('update latest','release-update',purpose='Загрузить готовый проверенный GitHub Release и применить с проверкой диска.',stops='Сервер временно остановится.'),
-    Command('features status','features-status',purpose='Показать дополнительные компоненты подключённой существующей установки.'),
-    Command('features enable','features-enable',('config',),'Подключить применимые компоненты Misbot по проверенному feature plan; только adopted backend.'),
-    Command('features recover','features-recover',purpose='Вернуть публичные маршруты, сохраняя новые bot accounts, sessions и crypto.'),
-    Command('homepage show','homepage-show',purpose='Показать режим, тексты и публичные ссылки сайта.'),
-    Command('homepage check','homepage-check',purpose='Проверить предложенные поля и Caddy без применения; внешний сайт не проверяется.'),
-    Command('homepage apply','homepage-apply',purpose='Применить только настройки сайта после проверки, с checkpoint и rollback.',stops='Пересоздаётся только Caddy; короткий перерыв HTTPS.'),
-    Command('homepage recover','homepage-recover',purpose='Завершить прерванное применение и проверить служебные маршруты.',stops='Только Caddy.'),
-    Command('homepage rollback','homepage-rollback',purpose='Вернуть прежнюю конфигурацию сайта из checkpoint.',stops='Только Caddy.'),
-    Command('federation servers','federation-servers',purpose='Показать действующий локальный allowlist.'),
-    Command('federation check','federation-check',('server',),'Проверить Misbot discovery/TLS; факт федеративных комнат отдельно.'),
-    Command('federation add','federation-add',('server',),'Добавить Matrix server_name только в локальный allowlist.',stops='Копия, Synapse/Web перезапускаются.'),
-    Command('federation remove','federation-remove',('server',),'Удалить одну локальную запись, сохраняя identity и restrictive policy.',stops='Копия, Synapse/Web перезапускаются.'),
-    Command('federation invite','federation-invite',('server',),'Отправить подписанную заявку на взаимный allowlist; default 7 дней.'),
-    Command('federation peers','federation-peers',purpose='Показать согласованные instance/bot identities.'),
-    Command('federation requests','federation-requests',purpose='Показать сохранённые заявки и частичное применение.'),
-    Command('federation operations','federation-operations',purpose='Показать сохранённые асинхронные операции административного бота.'),
-    Command('federation requests status','federation-request-status',('request',),'Показать локальный checkpoint заявки; retry проверяет peer.'),
-    Command('federation requests approve','federation-approve',('request',),'Одобрить входящую заявку и продолжить обмен.',stops='Проверенная копия и перезапуск Synapse/Web при применении.'),
-    Command('federation requests reject','federation-reject',('request',),'Отклонить входящую заявку; существующий allowlist сохраняется.'),
-    Command('federation requests cancel','federation-cancel',('request',),'Отменить согласование; уже применённые записи удаляются отдельно.'),
-    Command('federation requests retry','federation-retry',('request',),'Запросить удалённое состояние и завершить частичное применение.'),
-    Command('federation recover','federation-recover',purpose='Завершить локальное применение из защищённого checkpoint.',stops='Synapse/Web перезапускаются.'),
-    Command('federation rollback','federation-rollback',purpose='Восстановить прежнюю конфигурацию локальной операции.',stops='Synapse/Web перезапускаются.'),
-    Command('federation rooms invitations','federation-room-invitations',purpose='Приглашения, адресованные только административному боту.'),
-    Command('federation rooms accept','federation-room-accept',('room',),'Принять текущее приглашение бота.'),
-    Command('federation rooms reject','federation-room-reject',('room',),'Отклонить текущее приглашение бота.'),
-    Command('federation rooms leave','federation-room-leave',('room',),'Покинуть комнату от имени бота.'),
-    Command('federation rooms invite','federation-room-invite',('server','room'),'Пригласить согласованный bot MXID одобренного peer в комнату.'),
-    Command('federation rooms auto-accept','federation-auto-accept',('enabled',),'true/false; default false; только согласованная identity и connected peer.'),
-    Command('ui','ui',purpose='Открыть русский SSH-мастер или меню; нужен TTY.',installed=False),
-    Command('config init','init',('domain',),'Создать установку, settings/server.env и приватные внутренние credentials.',installed=False),
-    Command('config generate','generate',purpose='Сгенерировать конфигурацию без перезапуска.'),
-    Command('config validate','configuration-validate',purpose='Проверить общую схему приватных настроек без внешних запросов.'),
-    Command('config migrate','configuration-migrate',purpose='Перенести settings.env в разделённую конфигурацию с приватной копией.'),
-    Command('config recover','configuration-recover',purpose='Завершить прерванную публикацию конфигурации.'),
-    Command('config rollback','configuration-rollback',purpose='Вернуть приватную копию прерванной публикации конфигурации.'),
-    Command('config apply','configuration-apply',purpose='Проверить настройки, создать и проверить копию, сгенерировать и запустить службы.',stops='Копия и возможный перезапуск.'),
-    Command('config preflight','preflight',purpose='Проверить систему, DNS и порты.'),
-    Command('config command install','wrapper-install',purpose='Установить или обновить системную команду.'),
-    Command('config command remove','wrapper-remove',purpose='Удалить только принадлежащую установке системную команду.'),
-    Command('status','status',purpose='Показать службы, pending состояния и дальнейшие действия.'),
-    Command('storage status','storage-status',purpose='Показать подключение S3 и результаты копирования существующего стека.'),
-    Command('check','check',purpose='Проверить DNS, HTTPS, discovery, RTC и состояние служб.'),
-    Command('start','up',purpose='Проверить конфигурацию и запустить службы.',stops='Возможен перезапуск изменённых служб.'),
-    Command('stop','stop',purpose='Остановить службы, сохранив контейнеры и данные.',stops='Да.'),
-    Command('remove','remove',purpose='Интерактивно выбрать и удалить данные сервера, контейнеры и внешние ресурсы; сохранить утилиту.',stops='Да.',data='Удаление выбранных данных необратимо; есть несколько подтверждений.'),
-    Command('users password set','user-password',('input',),'Изменить пароль существующего обычного пользователя.',stops='Краткая остановка для копии.'),
-    Command('users password recover','user-password-recover',purpose='Продолжить прерванную смену пароля пользователя.'),
-    Command('users invitation ensure','invitation-ensure',purpose='Создать или продолжить выдачу сохранённого первого токена: одна регистрация, default 7 дней.'),
-    Command('users invitation status','invitation-status',purpose='Проверить действительность первого токена без его вывода.'),
-    Command('users invitation show','invitation-show',purpose='Показать действительный первый токен только оператору в TTY.'),
-    Command('users invitation revoke','invitation-revoke',purpose='Отозвать первый токен; аккаунты и данные сохраняются.'),
-    Command('users invitation new','invitation-new',purpose='Явно отозвать прежний токен и создать замену на одного обычного пользователя.'),
-    Command('credentials admin show','invitation-admin-show',purpose='Показать сохранённый пароль администратора только оператору в TTY.'),
-    Command('storage local','media-local',purpose='Выбрать локальные медиа до первого успешного подключения S3.'),
-    Command('storage s3 connect','media-s3',('config',),'Перенести локальные медиа в S3, сохранив локальные файлы.',stops='Копия и остановка Synapse для переноса.'),
-    Command('storage recover','media-recover',purpose='Восстановить локальные настройки прерванного media transfer.',stops='Запуск прежнего стека.'),
-    Command('storage database connect','database-external',('config',),'Перенести локальные БД в отдельную внешнюю PostgreSQL.',stops='Да, для согласованного переноса.'),
-    Command('storage database recover','database-recover',purpose='Продолжить перенос БД из checkpoint.'),
-    Command('storage database abort','database-abort',purpose='Отменить перенос БД до активации назначения.'),
-    Command('backup create','backup',purpose='Создать согласованную локальную копию.',stops='Краткая остановка писателей.'),
-    Command('backup recover','backup-recover',purpose='Восстановить состояние служб после прерванной копии.'),
-    Command('backup verify','restore-check',purpose='Проверить копию восстановлением двух временных БД.'),
-    Command('backup key create','backup-key',('key',),'Создать отдельный приватный recovery key.',installed=False),
-    Command('backup external create','backup-external',('config','key'),'Создать, зашифровать и проверить внешнюю копию.',stops='Краткая остановка писателей.'),
-    Command('backup external cleanup','backup-cleanup',('config','catalog'),'Повторить очистку только собственной неудачной загрузки.'),
-    Command('backup fetch','backup-fetch',('config','key','object','sha256','output'),'Скачать и проверить зашифрованную копию в новый файл.',installed=False),
-    Command('backup restore','restore',('archive','sha256','public-ip'),'Восстановить копию в пустое staged назначение.',stops='Писатели остаются выключены.',installed=False),
-    Command('backup restore-local','restore-local',('archive','sha256','public-ip'),'Восстановить обе БД в новую локальную PostgreSQL.',stops='Писатели остаются выключены.',installed=False),
-    Command('backup activate','restore-activate',('confirm',),'Активировать восстановленную установку после остановки источника и DNS.'),
-    Command('backup move export','move-export',purpose='Остановить источник и создать окончательную копию.',stops='Да; источник остаётся остановлен.'),
-    Command('backup move abort','move-abort',('confirm',),'Вернуть источник после остановки назначения и возврата DNS.'),
-    Command('backup schedule local','backup-schedule-local',('calendar',),'Проверить локальную копию и включить systemd timer.',stops='Краткая остановка для проверочной копии.'),
-    Command('backup schedule external','backup-schedule',('config','key','calendar'),'Проверить внешнюю копию и включить systemd timer.',stops='Краткая остановка для проверочной копии.'),
-    Command('backup schedule status','backup-schedule-status',purpose='Показать timer и последний подтверждённый backup.'),
-    Command('backup schedule disable','backup-schedule-disable',purpose='Отключить свой timer, сохранив копии.'),
-    Command('update apply','update',purpose='Применить доверенный комплект после backup и проверки.',stops='Копия и применение конфигурации.'),
-    Command('update recover','update-recover',purpose='Вернуть исходники из private checkpoint доверенным комплектом.',stops='Возможен перезапуск прежних служб.'),
-    Command('credentials admin set','admin-password',('input',),'Изменить пароль первоначального администратора.',stops='Краткая остановка для копии.'),
-    Command('credentials admin recover','admin-password-recover',purpose='Восстановить прерванную смену пароля администратора.'),
-    Command('credentials database rotate','database-password',purpose='Сменить application passwords Synapse/MAS.',stops='Да, после проверенной копии.'),
-    Command('credentials database recover','database-password-recover',purpose='Продолжить смену application passwords.'),
-    Command('credentials s3 rotate','s3-credentials',('config',),'Сменить media S3 credentials, сохраняя назначение.',stops='Копия и согласование работающих служб.'),
-    Command('credentials s3 recover','s3-credentials-recover',purpose='Продолжить смену media S3 credentials.'),
-    Command('credentials s3 cleanup','s3-credentials-cleanup',purpose='Очистить только собственные credential probes.'),
-    Command('credentials vault connect','vault-connect',('config',),'Подключить static snapshots к Vault KV v2.'),
-    Command('credentials vault sync','vault-sync',purpose='Сверить и обновить snapshot Vault.'),
-    Command('credentials vault recover','vault-recover',purpose='Восстановить отсутствующие секретные файлы из verified snapshot.',stops='Службы должны быть остановлены.'),
-    Command('credentials vault auth','vault-auth',('config',),'Сменить AppRole для прежнего Vault назначения.'),
-    Command('credentials vault disconnect','vault-disconnect',purpose='Сохранить local files и отключить Vault; remote versions остаются.'),
-    Command('storage s3 check','s3-check',('config','purpose'),'Проверить S3 без изменения настроек установки.',installed=False),
-    Command('storage s3 cleanup','s3-cleanup',('config','catalog'),'Удалить только собственный probe по private catalog.',installed=False),
+    Command(
+        'config draft show',
+        'draft-show',
+        purpose='Показать расположение и этап черновика без паролей и ключей.',
+        installed=False,
+        execution=DRAFT,
+        existing=DRAFT,
+    ),
+    Command(
+        'config draft reset',
+        'draft-reset',
+        ('confirm',),
+        'Удалить только черновик мастера: --confirm discard-draft. Установка и checkpoints сохраняются.',
+        installed=False,
+        execution=DRAFT,
+        existing=DRAFT,
+    ),
+    Command(
+        'admin bot show',
+        'admin-bot-show',
+        purpose='Показать сохранённые теги панели и её администраторов.',
+        execution=ADMIN,
+        existing=ADMIN,
+    ),
+    Command(
+        'admin bot set',
+        'admin-bot-set',
+        ('tag',),
+        'Выбрать тег до создания бота; созданную identity переименовать нельзя.',
+        execution=ADMIN,
+        existing=ADMIN,
+        optional_arguments=('administrator',),
+    ),
+    Command(
+        'admin access list',
+        'admin-access-list',
+        purpose='Показать аккаунты с доступом к панели администратора.',
+        execution=ADMIN_ACCESS,
+    ),
+    Command(
+        'admin access add',
+        'admin-access-add',
+        ('mxid',),
+        'Дать существующему местному аккаунту права администратора сервера и доступ к панели.',
+        execution=ADMIN_ACCESS,
+        stops='Панель администратора кратко перезапустится.',
+        data='Аккаунт получает полные права администратора сервера; данные и ключи сохраняются.',
+    ),
+    Command(
+        'admin access remove',
+        'admin-access-remove',
+        ('mxid',),
+        'Отозвать права выбранного аккаунта; первоначальный администратор сохраняется.',
+        execution=ADMIN_ACCESS,
+        stops='Панель администратора кратко перезапустится.',
+        data='Права выбранного аккаунта отзываются; аккаунт, данные и ключи сохраняются.',
+    ),
+    Command(
+        'admin access recover',
+        'admin-access-recover',
+        purpose='Завершить прерванное изменение доступа того же аккаунта.',
+        execution=ADMIN_ACCESS,
+    ),
+    Command(
+        'update check',
+        'release-check',
+        purpose='Сравнить установленную версию сервера с последним стабильным GitHub Release.',
+        execution=RELEASE_CHECK,
+        existing=RELEASE_CHECK,
+    ),
+    Command(
+        'update latest',
+        'release-update',
+        purpose='Загрузить готовый проверенный GitHub Release и применить с проверкой диска.',
+        stops='Сервер временно остановится.',
+        execution=RELEASE_UPDATE,
+    ),
+    Command(
+        'features status',
+        'features-status',
+        purpose='Показать дополнительные компоненты подключённой существующей установки.',
+        existing=FEATURES,
+    ),
+    Command(
+        'features enable',
+        'features-enable',
+        ('config',),
+        'Подключить применимые компоненты Misbot по проверенному feature plan; только adopted backend.',
+        existing=FEATURES,
+    ),
+    Command(
+        'features recover',
+        'features-recover',
+        purpose='Вернуть публичные маршруты, сохраняя новые bot accounts, sessions и crypto.',
+        existing=FEATURES,
+    ),
+    Command(
+        'homepage show',
+        'homepage-show',
+        purpose='Показать режим, тексты и публичные ссылки сайта.',
+        execution=HOMEPAGE,
+        existing=ADOPTED_HOMEPAGE,
+    ),
+    Command(
+        'homepage check',
+        'homepage-check',
+        purpose='Проверить предложенные поля и Caddy без применения; внешний сайт не проверяется.',
+        execution=HOMEPAGE,
+        existing=ADOPTED_HOMEPAGE,
+        optional_arguments=HOMEPAGE.optional_values,
+    ),
+    Command(
+        'homepage apply',
+        'homepage-apply',
+        purpose='Применить только настройки сайта после проверки, с checkpoint и rollback.',
+        stops='Пересоздаётся только Caddy; короткий перерыв HTTPS.',
+        execution=HOMEPAGE,
+        existing=ADOPTED_HOMEPAGE,
+        optional_arguments=HOMEPAGE.optional_values,
+    ),
+    Command(
+        'homepage recover',
+        'homepage-recover',
+        purpose='Завершить прерванное применение и проверить служебные маршруты.',
+        stops='Только Caddy.',
+        execution=HOMEPAGE,
+        existing=ADOPTED_HOMEPAGE,
+    ),
+    Command(
+        'homepage rollback',
+        'homepage-rollback',
+        purpose='Вернуть прежнюю конфигурацию сайта из checkpoint.',
+        stops='Только Caddy.',
+        execution=HOMEPAGE,
+        existing=ADOPTED_HOMEPAGE,
+    ),
+    Command(
+        'federation servers',
+        'federation-servers',
+        purpose='Показать действующий локальный allowlist.',
+        execution=FEDERATION,
+        switches=('json',),
+        existing=FEDERATION,
+    ),
+    Command(
+        'federation check',
+        'federation-check',
+        ('server',),
+        'Проверить Misbot discovery/TLS; факт федеративных комнат отдельно.',
+        execution=FEDERATION,
+        switches=('json',),
+        existing=FEDERATION,
+    ),
+    Command(
+        'federation add',
+        'federation-add',
+        ('server',),
+        'Добавить Matrix server_name только в локальный allowlist.',
+        stops='Копия, Synapse/Web перезапускаются.',
+        execution=FEDERATION,
+        switches=('json',),
+        existing=FEDERATION,
+    ),
+    Command(
+        'federation remove',
+        'federation-remove',
+        ('server',),
+        'Удалить одну локальную запись, сохраняя identity и restrictive policy.',
+        stops='Копия, Synapse/Web перезапускаются.',
+        execution=FEDERATION,
+        switches=('json',),
+        existing=FEDERATION,
+    ),
+    Command(
+        'federation invite',
+        'federation-invite',
+        ('server',),
+        'Отправить подписанную заявку на взаимный allowlist; срок 30 дней.',
+        execution=FEDERATION,
+        switches=('json',),
+        existing=FEDERATION,
+    ),
+    Command(
+        'federation api status',
+        'federation-api-status',
+        purpose='Показать сохранённое состояние межсерверного Misbot API.',
+        execution=FEDERATION,
+        switches=('json',),
+        existing=FEDERATION,
+    ),
+    Command(
+        'federation api enable',
+        'federation-api-enable',
+        purpose='Включить Misbot API; настройка сохраняется после перезапуска.',
+        execution=FEDERATION,
+        switches=('json',),
+        existing=FEDERATION,
+    ),
+    Command(
+        'federation api disable',
+        'federation-api-disable',
+        purpose='Выключить Misbot API, сохраняя федерацию, заявки и настройки.',
+        execution=FEDERATION,
+        switches=('json',),
+        existing=FEDERATION,
+    ),
+    Command(
+        'federation requests clear',
+        'federation-clear-rejected',
+        purpose='Скрыть отклонённые и истёкшие заявки, сохраняя защиту от повторов.',
+        execution=FEDERATION,
+        switches=('json',),
+        existing=FEDERATION,
+    ),
+    Command(
+        'federation peers',
+        'federation-peers',
+        purpose='Показать согласованные instance/bot identities.',
+        execution=FEDERATION,
+        switches=('json',),
+        existing=FEDERATION,
+    ),
+    Command(
+        'federation requests',
+        'federation-requests',
+        purpose='Показать сохранённые заявки и частичное применение.',
+        execution=FEDERATION,
+        switches=('json',),
+        existing=FEDERATION,
+    ),
+    Command(
+        'federation operations',
+        'federation-operations',
+        purpose='Показать сохранённые асинхронные операции административного бота.',
+        execution=FEDERATION,
+        switches=('json',),
+        existing=FEDERATION,
+    ),
+    Command(
+        'federation requests status',
+        'federation-request-status',
+        ('request',),
+        'Показать локальный checkpoint заявки; retry проверяет peer.',
+        execution=FEDERATION,
+        switches=('json',),
+        existing=FEDERATION,
+    ),
+    Command(
+        'federation requests approve',
+        'federation-approve',
+        ('request',),
+        'Одобрить входящую заявку и продолжить обмен.',
+        stops='Проверенная копия и перезапуск Synapse/Web при применении.',
+        execution=FEDERATION,
+        switches=('json',),
+        existing=FEDERATION,
+    ),
+    Command(
+        'federation requests reject',
+        'federation-reject',
+        ('request',),
+        'Отклонить входящую заявку; существующий allowlist сохраняется.',
+        execution=FEDERATION,
+        switches=('json',),
+        existing=FEDERATION,
+    ),
+    Command(
+        'federation requests cancel',
+        'federation-cancel',
+        ('request',),
+        'Отменить согласование; уже применённые записи удаляются отдельно.',
+        execution=FEDERATION,
+        switches=('json',),
+        existing=FEDERATION,
+    ),
+    Command(
+        'federation requests retry',
+        'federation-retry',
+        ('request',),
+        'Запросить удалённое состояние и завершить частичное применение.',
+        execution=FEDERATION,
+        switches=('json',),
+        existing=FEDERATION,
+    ),
+    Command(
+        'federation recover',
+        'federation-recover',
+        purpose='Завершить локальное применение из защищённого checkpoint.',
+        stops='Synapse/Web перезапускаются.',
+        execution=FEDERATION,
+        switches=('json',),
+        existing=FEDERATION,
+    ),
+    Command(
+        'federation rollback',
+        'federation-rollback',
+        purpose='Восстановить прежнюю конфигурацию локальной операции.',
+        stops='Synapse/Web перезапускаются.',
+        execution=FEDERATION,
+        switches=('json',),
+        existing=FEDERATION,
+    ),
+    Command(
+        'ui',
+        'ui',
+        purpose='Открыть русский SSH-мастер или меню; нужен TTY.',
+        installed=False,
+        existing=ADOPTED,
+        switches=('plain',),
+    ),
+    Command(
+        'config init',
+        'init',
+        ('domain',),
+        'Создать установку, settings/server.env и приватные внутренние credentials.',
+        installed=False,
+    ),
+    Command('config generate', 'generate', purpose='Сгенерировать конфигурацию без перезапуска.'),
+    Command(
+        'config validate',
+        'configuration-validate',
+        purpose='Проверить общую схему приватных настроек без внешних запросов.',
+        execution=CONFIGURATION,
+        existing=ADOPTED,
+    ),
+    Command(
+        'config migrate',
+        'configuration-migrate',
+        purpose='Перенести settings.env в разделённую конфигурацию с приватной копией.',
+        execution=CONFIGURATION,
+    ),
+    Command(
+        'config recover',
+        'configuration-recover',
+        purpose='Завершить прерванную публикацию конфигурации.',
+        execution=CONFIGURATION,
+    ),
+    Command(
+        'config rollback',
+        'configuration-rollback',
+        purpose='Вернуть приватную копию прерванной публикации конфигурации.',
+        execution=CONFIGURATION,
+    ),
+    Command(
+        'config apply',
+        'configuration-apply',
+        purpose='Проверить настройки, создать и проверить копию, сгенерировать и запустить службы.',
+        stops='Копия и возможный перезапуск.',
+        execution=CONFIGURATION,
+    ),
+    Command('config preflight', 'preflight', purpose='Проверить систему, DNS и порты.'),
+    Command(
+        'config command install',
+        'wrapper-install',
+        purpose='Установить или обновить системную команду.',
+        execution=WRAPPER,
+        existing=WRAPPER,
+    ),
+    Command(
+        'config command remove',
+        'wrapper-remove',
+        purpose='Удалить только принадлежащую установке системную команду.',
+        execution=WRAPPER,
+        existing=WRAPPER,
+    ),
+    Command(
+        'status',
+        'status',
+        purpose='Показать службы, pending состояния и дальнейшие действия.',
+        existing=ADOPTED,
+    ),
+    Command(
+        'storage status',
+        'storage-status',
+        purpose='Показать подключение S3 и результаты копирования существующего стека.',
+        existing=ADOPTED,
+    ),
+    Command(
+        'check',
+        'check',
+        purpose='Проверить DNS, HTTPS, discovery, RTC и состояние служб.',
+        existing=ADOPTED,
+    ),
+    Command(
+        'start',
+        'up',
+        purpose='Проверить конфигурацию и запустить службы.',
+        stops='Возможен перезапуск изменённых служб.',
+        existing=ADOPTED,
+    ),
+    Command(
+        'stop',
+        'stop',
+        purpose='Остановить службы, сохранив контейнеры и данные.',
+        stops='Да.',
+        existing=ADOPTED,
+    ),
+    Command(
+        'remove',
+        'remove',
+        purpose='Интерактивно выбрать и удалить данные сервера, контейнеры и внешние ресурсы; сохранить утилиту.',
+        stops='Да.',
+        data='Удаление выбранных данных необратимо; есть несколько подтверждений.',
+        execution=REMOVE,
+        optional_arguments=('backup_config',),
+    ),
+    Command(
+        'users password set',
+        'user-password',
+        ('input',),
+        'Изменить пароль существующего обычного пользователя.',
+        stops='Краткая остановка для копии.',
+    ),
+    Command(
+        'users password recover',
+        'user-password-recover',
+        purpose='Продолжить прерванную смену пароля пользователя.',
+    ),
+    Command(
+        'users invitation ensure',
+        'invitation-ensure',
+        purpose='Создать или продолжить выдачу сохранённого первого токена: одна регистрация, default 7 дней.',
+        execution=INVITATION,
+    ),
+    Command(
+        'users invitation status',
+        'invitation-status',
+        purpose='Проверить действительность первого токена без его вывода.',
+        execution=INVITATION,
+    ),
+    Command(
+        'users invitation list',
+        'invitation-list',
+        purpose='Показать приглашения всех пользователей и их статусы без кодов регистрации.',
+        execution=INVITATION,
+    ),
+    Command(
+        'users invitation show',
+        'invitation-show',
+        purpose='Показать действительный первый токен только оператору в TTY.',
+        execution=INVITATION,
+    ),
+    Command(
+        'users invitation revoke',
+        'invitation-revoke',
+        purpose='Отозвать первый токен; аккаунты и данные сохраняются.',
+        execution=INVITATION,
+    ),
+    Command(
+        'users invitation new',
+        'invitation-new',
+        purpose='Явно отозвать прежний токен и создать замену на одного обычного пользователя.',
+        execution=INVITATION,
+    ),
+    Command(
+        'credentials admin show',
+        'invitation-admin-show',
+        purpose='Показать сохранённый пароль администратора только оператору в TTY.',
+        execution=INVITATION,
+    ),
+    Command(
+        'storage local',
+        'media-local',
+        purpose='Выбрать локальные медиа до первого успешного подключения S3.',
+    ),
+    Command(
+        'storage s3 connect',
+        'media-s3',
+        ('config',),
+        'Перенести локальные медиа в S3, сохранив локальные файлы.',
+        stops='Копия и остановка Synapse для переноса.',
+        existing=ADOPTED,
+    ),
+    Command(
+        'storage recover',
+        'media-recover',
+        purpose='Восстановить локальные настройки прерванного media transfer.',
+        stops='Запуск прежнего стека.',
+        existing=ADOPTED,
+    ),
+    Command(
+        'storage database connect',
+        'database-external',
+        ('config',),
+        'Перенести локальные БД в отдельную внешнюю PostgreSQL.',
+        stops='Да, для согласованного переноса.',
+    ),
+    Command(
+        'storage database recover',
+        'database-recover',
+        purpose='Продолжить перенос БД из checkpoint.',
+    ),
+    Command(
+        'storage database abort',
+        'database-abort',
+        purpose='Отменить перенос БД до активации назначения.',
+    ),
+    Command(
+        'backup create',
+        'backup',
+        purpose='Создать согласованную локальную копию.',
+        stops='Краткая остановка писателей.',
+        existing=ADOPTED,
+    ),
+    Command(
+        'backup recover',
+        'backup-recover',
+        purpose='Восстановить состояние служб после прерванной копии.',
+        existing=ADOPTED,
+    ),
+    Command(
+        'backup verify',
+        'restore-check',
+        purpose='Проверить копию восстановлением временных БД.',
+        existing=ADOPTED,
+    ),
+    Command(
+        'backup key create',
+        'backup-key',
+        ('key',),
+        'Создать отдельный приватный recovery key.',
+        installed=False,
+    ),
+    Command(
+        'backup external create',
+        'backup-external',
+        ('config', 'key'),
+        'Создать, зашифровать и проверить внешнюю копию.',
+        stops='Краткая остановка писателей.',
+        existing=ADOPTED,
+    ),
+    Command(
+        'backup external cleanup',
+        'backup-cleanup',
+        ('config', 'catalog'),
+        'Повторить очистку только собственной неудачной загрузки.',
+    ),
+    Command(
+        'backup fetch',
+        'backup-fetch',
+        ('config', 'key', 'object', 'sha256', 'output'),
+        'Скачать и проверить зашифрованную копию в новый файл.',
+        installed=False,
+    ),
+    Command(
+        'backup restore',
+        'restore',
+        ('archive', 'sha256', 'public-ip'),
+        'Восстановить копию в пустое staged назначение.',
+        stops='Писатели остаются выключены.',
+        installed=False,
+    ),
+    Command(
+        'backup restore-local',
+        'restore-local',
+        ('archive', 'sha256', 'public-ip'),
+        'Восстановить данные сервера в новую локальную PostgreSQL.',
+        stops='Писатели остаются выключены.',
+        installed=False,
+    ),
+    Command(
+        'backup activate',
+        'restore-activate',
+        ('confirm',),
+        'Активировать восстановленную установку после остановки источника и DNS.',
+        optional_arguments=('external_mas_confirm',),
+    ),
+    Command(
+        'backup move export',
+        'move-export',
+        purpose='Остановить источник и создать окончательную копию.',
+        stops='Да; источник остаётся остановлен.',
+    ),
+    Command(
+        'backup move abort',
+        'move-abort',
+        ('confirm',),
+        'Вернуть источник после остановки назначения и возврата DNS.',
+    ),
+    Command(
+        'backup schedule local',
+        'backup-schedule-local',
+        ('calendar',),
+        'Проверить локальную копию и включить systemd timer.',
+        stops='Краткая остановка для проверочной копии.',
+        existing=ADOPTED_SCHEDULE,
+    ),
+    Command(
+        'backup schedule external',
+        'backup-schedule',
+        ('config', 'key', 'calendar'),
+        'Проверить внешнюю копию и включить systemd timer.',
+        stops='Краткая остановка для проверочной копии.',
+        existing=ADOPTED_SCHEDULE,
+    ),
+    Command(
+        'backup schedule status',
+        'backup-schedule-status',
+        purpose='Показать timer и последний подтверждённый backup.',
+        existing=ADOPTED_SCHEDULE,
+    ),
+    Command(
+        'backup schedule disable',
+        'backup-schedule-disable',
+        purpose='Отключить свой timer, сохранив копии.',
+        existing=ADOPTED_SCHEDULE,
+    ),
+    Command(
+        'update apply',
+        'update',
+        purpose='Применить доверенный комплект после backup и проверки.',
+        stops='Копия и применение конфигурации.',
+        existing=ADOPTED_UPDATE,
+    ),
+    Command(
+        'update recover',
+        'update-recover',
+        purpose='Вернуть исходники из private checkpoint доверенным комплектом.',
+        stops='Возможен перезапуск прежних служб.',
+        existing=ADOPTED_UPDATE,
+    ),
+    Command(
+        'credentials admin set',
+        'admin-password',
+        ('input',),
+        'Изменить пароль первоначального администратора.',
+        stops='Краткая остановка для копии.',
+    ),
+    Command(
+        'credentials admin recover',
+        'admin-password-recover',
+        purpose='Восстановить прерванную смену пароля администратора.',
+    ),
+    Command(
+        'credentials database rotate',
+        'database-password',
+        purpose='Сменить application passwords Synapse/MAS.',
+        stops='Да, после проверенной копии.',
+    ),
+    Command(
+        'credentials database recover',
+        'database-password-recover',
+        purpose='Продолжить смену application passwords.',
+    ),
+    Command(
+        'credentials s3 rotate',
+        's3-credentials',
+        ('config',),
+        'Сменить media S3 credentials, сохраняя назначение.',
+        stops='Копия и согласование работающих служб.',
+    ),
+    Command(
+        'credentials s3 recover',
+        's3-credentials-recover',
+        purpose='Продолжить смену media S3 credentials.',
+    ),
+    Command(
+        'credentials s3 cleanup',
+        's3-credentials-cleanup',
+        purpose='Очистить только собственные credential probes.',
+    ),
+    Command(
+        'credentials vault connect',
+        'vault-connect',
+        ('config',),
+        'Подключить static snapshots к Vault KV v2.',
+    ),
+    Command('credentials vault sync', 'vault-sync', purpose='Сверить и обновить snapshot Vault.'),
+    Command(
+        'credentials vault recover',
+        'vault-recover',
+        purpose='Восстановить отсутствующие секретные файлы из verified snapshot.',
+        stops='Службы должны быть остановлены.',
+    ),
+    Command(
+        'credentials vault auth',
+        'vault-auth',
+        ('config',),
+        'Сменить AppRole для прежнего Vault назначения.',
+    ),
+    Command(
+        'credentials vault disconnect',
+        'vault-disconnect',
+        purpose='Сохранить local files и отключить Vault; remote versions остаются.',
+    ),
+    Command(
+        'storage s3 check',
+        's3-check',
+        ('config', 'purpose'),
+        'Проверить S3 без изменения настроек установки.',
+        installed=False,
+        existing=ADOPTED,
+        optional_arguments=('catalog_directory',),
+        switches=('json', 'read_only'),
+    ),
+    Command(
+        'storage s3 cleanup',
+        's3-cleanup',
+        ('config', 'catalog'),
+        'Удалить только собственный probe по private catalog.',
+        installed=False,
+        existing=ADOPTED,
+        switches=('json',),
+    ),
 ]
-BY_PATH={c.path:c for c in COMMANDS}
-BY_BACKEND={c.backend:c.path for c in COMMANDS}
-EXISTING_BACKENDS=frozenset(('ui','status','check','up','stop','configuration-validate',
-    'backup','backup-recover','restore-check','wrapper-install','wrapper-remove',
-    'backup-external','s3-check','s3-cleanup','media-s3','media-recover','storage-status','update','update-recover'))
-EXISTING_BACKENDS=EXISTING_BACKENDS | frozenset(c.backend for c in COMMANDS if c.backend.startswith('federation-'))
-EXISTING_BACKENDS=EXISTING_BACKENDS | frozenset(('features-status','features-enable','features-recover'))
-EXISTING_BACKENDS=EXISTING_BACKENDS | frozenset(c.backend for c in COMMANDS if c.backend.startswith('homepage-'))
-EXISTING_BACKENDS=EXISTING_BACKENDS | frozenset(('backup-schedule','backup-schedule-local','backup-schedule-status','backup-schedule-disable'))
-EXISTING_BACKENDS=EXISTING_BACKENDS | frozenset(('release-check','admin-bot-show','admin-bot-set'))
-TOPICS={
-    'admin':'Административная панель и её сохранённая identity',
-    'features':'Дополнительные компоненты существующей установки',
-    'config':'Установка и конфигурация', 'users':'Пользователи и регистрация',
-    'storage':'Медиа, S3 и БД', 'backup':'Копии, восстановление и перенос',
-    'update':'Обновление', 'credentials':'Credentials и Vault',
-    'federation':'Федерация: локальная политика, подписанные заявки Misbot и комнаты административного бота.',
-    'homepage':'Главная страница: локальный лендинг, Element Web или внешний HTTPS URL.',
+BY_PATH = {c.path: c for c in COMMANDS}
+# These inputs can come from the selected installation or an interactive form.
+# Explicit arguments retain their original meaning for scripts.
+AUTOMATIC_ARGUMENTS = {
+    'backup key create': ('key',),
+    'backup external create': ('config', 'key'),
+    'backup schedule external': ('config', 'key', 'calendar'),
+    'backup schedule local': ('calendar',),
+    'backup fetch': ('config', 'key', 'object', 'sha256', 'output'),
+    'backup restore': ('archive', 'sha256', 'public-ip'),
+    'backup restore-local': ('archive', 'sha256', 'public-ip'),
+    'storage s3 check': ('config', 'purpose'),
+    'storage s3 connect': ('config',),
+    'storage database connect': ('config',),
+    'credentials s3 rotate': ('config',),
+    'credentials vault connect': ('config',),
+    'credentials vault auth': ('config',),
+    'features enable': ('config',),
+    'users password set': ('input',),
+    'credentials admin set': ('input',),
+    'admin access add': ('mxid',),
+    'admin access remove': ('mxid',),
+    'federation remove': ('server',),
+    'federation requests status': ('request',),
+    'federation requests approve': ('request',),
+    'federation requests reject': ('request',),
+    'federation requests cancel': ('request',),
+    'federation requests retry': ('request',),
+}
+ALIASES = {'update': 'update apply'}
+BY_BACKEND = {c.backend: c.path for c in COMMANDS}
+GROUPS = frozenset(
+    ' '.join(command.path.split()[:length])
+    for command in COMMANDS
+    for length in range(1, len(command.path.split()))
+)
+EXISTING_BACKENDS = frozenset(c.backend for c in COMMANDS if c.existing is not None)
+TOPICS = {
+    'admin': 'Административная панель и её сохранённая identity',
+    'features': 'Дополнительные компоненты существующей установки',
+    'config': 'Установка и конфигурация',
+    'users': 'Пользователи и регистрация',
+    'storage': 'Медиа, S3 и БД',
+    'backup': 'Копии, восстановление и перенос',
+    'update': 'Обновление',
+    'credentials': 'Credentials и Vault',
+    'federation': 'Федерация: локальная политика и подписанные заявки Misbot.',
+    'homepage': 'Главная страница: локальный лендинг, Element Web или внешний HTTPS URL.',
 }
 
 
-def backend_argv(command,values,root):
-    action=command.backend
-    args=[values[name] for name in command.arguments]
-    if action=='init':return [action,*args,str(root)]
-    if action in ('backup-key','backup-fetch'):return [action,*args]
-    if action in ('restore','restore-local'):
-        return [action,args[0],str(root),*args[1:]]
-    return [action,*args,str(root)]
+def append_option(args: list[str], option: str, value: str) -> None:
+    """Keep leading dashes in named text values from becoming backend options."""
+    if value.startswith('-'):
+        args.append(option + '=' + value)
+    else:
+        args.extend([option, value])
 
 
-def recovery_command(action,root):
+def execution_argv(
+    command: Command,
+    values: Mapping[str, str | bool | None],
+    root: Path,
+    backend: Path,
+    *,
+    existing: bool = False,
+) -> list[str]:
+    """Build an argv after the router has selected and admitted a trusted backend."""
+    route = command.existing if existing else command.execution
+    # Required/optional text has already been parsed by the CLI; casts keep the
+    # boundary explicit without replacing runtime validation or coercing input.
+    required = {name: cast(str, values[name]) for name in command.arguments}
+    if route is None:
+        if existing:
+            raise ValueError('Unsupported existing Compose command')
+        if command.backend == 'restore-activate' and values.get('external_mas_confirm'):
+            required['external_mas_confirm'] = cast(str, values['external_mas_confirm'])
+        return ['/bin/bash', str(backend / 'install.sh'), *backend_argv(command, required, root)]
+    script_root = root if route.installation_script else backend
+    args = ['/usr/bin/python3', str(script_root / route.script)]
+    action = command.backend.removeprefix(route.action_prefix)
+    if route.action_position is ActionPosition.BEFORE_DIRECTORY:
+        args.append(action)
+    args.extend(['--directory', str(root)])
+    if route.source_argument:
+        args.extend(['--source', str(backend)])
+    if route.action_position is ActionPosition.AFTER_DIRECTORY:
+        args.append(action)
+    dash_positional = route.argument_style is ArgumentStyle.POSITIONAL and any(
+        value.startswith('-') for value in required.values()
+    )
+    if route.argument_style is ArgumentStyle.POSITIONAL and not dash_positional:
+        args.extend(required.values())
+    elif route.argument_style is ArgumentStyle.NAMED:
+        for name, value in required.items():
+            append_option(args, '--' + name, value)
+    for name in route.flags:
+        if values.get(name):
+            args.append('--' + name.replace('_', '-'))
+    for name in route.optional_values:
+        option_value = values.get(name)
+        if option_value is not None and (route.preserve_empty_values or option_value):
+            append_option(args, '--' + name.replace('_', '-'), cast(str, option_value))
+    if dash_positional:
+        args.extend(['--', *required.values()])
+    return args
+
+
+def backend_argv(command: Command, values: Mapping[str, str], root: Path) -> list[str]:
+    action = command.backend
+    args = [values[name] for name in command.arguments]
+    if action == 'init':
+        return [action, *args, str(root)]
+    if action in ('backup-key', 'backup-fetch'):
+        return [action, *args]
+    if action in ('restore', 'restore-local'):
+        return [action, args[0], str(root), *args[1:]]
+    if action == 'restore-activate' and values.get('external_mas_confirm'):
+        return [action, *args, str(root), values['external_mas_confirm']]
+    return [action, *args, str(root)]
+
+
+def recovery_command(action: str, root: Path) -> str:
     import shlex
-    return 'sudo misbot --directory '+shlex.quote(str(root))+' '+BY_BACKEND.get(action,action)
+
+    return (
+        'sudo misbot --directory ' + shlex.quote(str(root)) + ' ' + BY_BACKEND.get(action, action)
+    )

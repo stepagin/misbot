@@ -49,10 +49,11 @@ async function main(){
   for(let i=0;i<60;i++){if((await client.getRoomStateEvent(manual,"m.room.member","@admin-panel:"+cfg.server_name)).membership==="join")break;if(i===59)throw new Error("Owner invitation was not accepted");await sleep(1000);}
   stage="joined-room-encryption";
   await request("помощь",body=>body.includes("Панель администратора"),"@admin-panel:"+cfg.server_name,manual);
-  stage="room-leave";
-  await request("покинуть комнату "+manual,body=>body.includes('"operation_id"'));
-  for(let i=0;i<60;i++){if((await client.getRoomStateEvent(manual,"m.room.member","@admin-panel:"+cfg.server_name)).membership==="leave")break;if(i===59)throw new Error("Room leave failed");await sleep(1000);}
-  console.log("PASS owner invitation acceptance/leave and encrypted private-room commands");
+  stage="removed-room-command";
+  await request("покинуть комнату "+manual,body=>body.includes("Панель администратора"));
+  if((await client.getRoomStateEvent(manual,"m.room.member","@admin-panel:"+cfg.server_name)).membership!=="join")throw new Error("Removed room command changed bot membership");
+  await client.leaveRoom(manual);
+  console.log("PASS owner invitation acceptance, encrypted private-room commands and removed command rejection");
   stage="referral";
   const referral="@referral-bot:"+cfg.server_name;
   let direct=await client.createRoom({preset:"private_chat",visibility:"private",invite:[referral],is_direct:true,

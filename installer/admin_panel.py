@@ -1,4 +1,5 @@
 """Private admin preferences, registration observer and durable message outbox."""
+
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -13,31 +14,43 @@ import lifecycle
 import releases
 import state_store
 from postgres_setup import literal
+from welcome_message import DEFAULT_WELCOME
+from welcome_settings import administrators, owner, welcome_context
 
-ACTIONS = {'panel-status', 'panel-version', 'panel-preferences', 'panel-welcome',
-           'panel-broadcast', 'panel-statistics', 'panel-update', 'panel-outbox', 'panel-ack'}
-DEFAULT_WELCOME = ('Добро пожаловать на сервер {domain}! Здесь можно общаться в личных '
-                   'и групповых чатах, делиться файлами и звонить через Matrix. '
-                   'Личные чаты поддерживают сквозное шифрование. Приглашения: @referral-bot:{domain}. '
-                   'Этот бот присылает новости сервера и не отвечает на сообщения.')
+ACTIONS = {
+    'panel-status',
+    'panel-version',
+    'panel-preferences',
+    'panel-welcome',
+    'panel-broadcast',
+    'panel-statistics',
+    'panel-server-read',
+    'panel-server-operation',
+    'panel-server-result',
+    'panel-referral',
+    'panel-update',
+    'panel-outbox',
+    'panel-ack',
+}
 PREFERENCES = {'updates': True, 'registrations': True, 'statistics': True}
-
-
-def owner(root):
-    root = Path(root)
-    identity = root / 'config/admin-panel-identity.json'
-    if identity.exists():
-        return configuration.read_private_json(identity)['administrator_mxid']
-    config = root / 'config/federation-bot.json'
-    if config.exists():
-        admins = json.loads(config.read_text()).get('administrator_mxids')
-        if admins:
-            return admins[0]
-    return '@matrix-admin:' + configuration.read_private_json(root / 'installation.json')['domain']
+SERVER_READS = frozenset(
+    (
+        'status',
+        'check',
+        'statistics',
+        'storage',
+        'update_check',
+        'components',
+        'backup_schedule',
+        'backup_preview',
+    )
+)
+SERVER_WRITES = frozenset(('start', 'stop', 'restart', 'backup', 'backup_verify'))
+STATISTICS_PERIODS = frozenset(('day', 'week', 'month', 'all'))
 
 
 def authorize(backend, actor):
-    if actor != owner(backend.root):
+    if actor not in administrators(backend.root):
         raise __import__('federation_protocol').ProtocolError('admin_unconfirmed')
     backend.authorize(actor)
 
@@ -53,8 +66,12 @@ class Panel:
             raise RuntimeError('Unsafe panel database')
         data_migrations.migrate(self.root)
         with self.database() as db:
-            for key, value in {**PREFERENCES, 'welcome': DEFAULT_WELCOME, 'enabled_at': int(self.clock()),
-                               'month': datetime.fromtimestamp(self.clock(), timezone.utc).strftime('%Y-%m')}.items():
+            for key, value in {
+                **PREFERENCES,
+                'welcome': DEFAULT_WELCOME,
+                'enabled_at': int(self.clock()),
+                'month': datetime.fromtimestamp(self.clock(), timezone.utc).strftime('%Y-%m'),
+            }.items():
                 db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', (key, json.dumps(value)))
         self.path.chmod(0o600)
 
@@ -70,7 +87,9 @@ class Panel:
 
     def settings(self):
         with self.database() as db:
-            return {row['key']: json.loads(row['value']) for row in db.execute('SELECT * FROM settings')}
+            return {
+                row['key']: json.loads(row['value']) for row in db.execute('SELECT * FROM settings')
+            }
 
     @staticmethod
     def set(db, key, value):
@@ -79,45 +98,87 @@ class Panel:
     @staticmethod
     def enqueue(db, key, recipient, via, body):
         identifier = hashlib.sha256((key + '\0' + recipient).encode()).hexdigest()
-        db.execute('INSERT OR IGNORE INTO outbox(id,recipient,via,body) VALUES (?,?,?,?)',
-                   (identifier, recipient, via, body))
+        db.execute(
+            'INSERT OR IGNORE INTO outbox(id,recipient,via,body) VALUES (?,?,?,?)',
+            (identifier, recipient, via, body),
+        )
+
+    def enqueue_admin(self, db, key, body):
+        for recipient in administrators(self.root):
+            self.enqueue(db, key, recipient, 'admin', body)
 
     def notice(self, key, body):
         with self.database() as db:
-            self.enqueue(db, key, owner(self.root), 'admin', body)
+            self.enqueue_admin(db, key, body)
 
     def bot_ids(self):
         ids = {'@referral-bot:' + self.domain, '@server-guide:' + self.domain}
-        for name in ('federation-bot.json', 'welcome-bot.json'):
+        for name in ('referral-bot.json', 'federation-bot.json', 'welcome-bot.json'):
             path = self.root / 'config' / name
             if path.exists():
                 ids.add(json.loads(path.read_text())['user_id'])
         return ids
 
+    def welcome_text(self, template):
+        return welcome_context(self.root, self.domain, template).render(template)
+
     def query(self, sql):
-        statement="BEGIN READ ONLY; SET LOCAL statement_timeout='30s';\n"+sql+"\nCOMMIT;"
-        metadata=configuration.read_private_json(self.root/'installation.json')
-        if metadata.get('backend')=='existing-compose':
+        statement = "BEGIN READ ONLY; SET LOCAL statement_timeout='30s';\n" + sql + '\nCOMMIT;'
+        metadata = configuration.read_private_json(self.root / 'installation.json')
+        if metadata.get('backend') == 'existing-compose':
             import tempfile
             import yaml
             from existing_compose import Installation
-            installation=Installation(self.root)
-            config=yaml.safe_load((self.root/installation.model['identity']['synapse_config']).read_text())
-            database=config['database']['args']['database']
-            if database not in installation.databases:raise RuntimeError('Statistics database is outside accepted scope')
+
+            installation = Installation(self.root)
+            config = yaml.safe_load(
+                (self.root / installation.model['identity']['synapse_config']).read_text()
+            )
+            database = config['database']['args']['database']
+            if database not in installation.databases:
+                raise RuntimeError('Statistics database is outside accepted scope')
             with tempfile.TemporaryFile() as incoming:
-                incoming.write(statement.encode());incoming.seek(0)
-                _,raw=installation.pg('psql','-d',database,'-X','-qAt','-v','ON_ERROR_STOP=1','-f','-',incoming=incoming)
+                incoming.write(statement.encode())
+                incoming.seek(0)
+                _, raw = installation.pg(
+                    'psql',
+                    '-d',
+                    database,
+                    '-X',
+                    '-qAt',
+                    '-v',
+                    'ON_ERROR_STOP=1',
+                    '-f',
+                    '-',
+                    incoming=incoming,
+                )
             return json.loads(raw)
         lifecycle.configure(self.root, 'admin-panel')
-        return json.loads(lifecycle.postgres('psql', '-d', 'synapse', '-X', '-qAt',
-            '-v', 'ON_ERROR_STOP=1', '-f', '-', stdin=statement).strip())
+        return json.loads(
+            lifecycle.postgres(
+                'psql',
+                '-d',
+                'synapse',
+                '-X',
+                '-qAt',
+                '-v',
+                'ON_ERROR_STOP=1',
+                '-f',
+                '-',
+                stdin=statement,
+            ).strip()
+        )
 
     def user_page(self, cursor):
         bots = ','.join(literal(value) for value in sorted(self.bot_ids()))
-        return self.query("SELECT coalesce(json_agg(u),'[]') FROM (SELECT name AS mxid, creation_ts AS created, "
-            "deactivated=0 AND is_guest=0 AS active FROM users WHERE name>" + literal(cursor) +
-            " AND name NOT IN (" + bots + ") AND appservice_id IS NULL ORDER BY name LIMIT 500) u;")
+        return self.query(
+            "SELECT coalesce(json_agg(u),'[]') FROM (SELECT name AS mxid, creation_ts AS created, "
+            'deactivated=0 AND is_guest=0 AS active FROM users WHERE name>'
+            + literal(cursor)
+            + ' AND name NOT IN ('
+            + bots
+            + ') AND appservice_id IS NULL ORDER BY name LIMIT 500) u;'
+        )
 
     def observe_users(self):
         preferences = self.settings()
@@ -132,15 +193,24 @@ class Panel:
                     if not mxid.endswith(':' + self.domain):
                         continue
                     known = db.execute('SELECT 1 FROM users WHERE mxid=?', (mxid,)).fetchone()
-                    db.execute('INSERT OR REPLACE INTO users VALUES (?,?,?)',
-                               (mxid, user['created'], int(user['active'])))
-                    if known or not user['active'] or (user['created'] or 0) < preferences['enabled_at']:
+                    db.execute(
+                        'INSERT OR REPLACE INTO users VALUES (?,?,?)',
+                        (mxid, user['created'], int(user['active'])),
+                    )
+                    if (
+                        known
+                        or not user['active']
+                        or (user['created'] or 0) < preferences['enabled_at']
+                    ):
                         continue
-                    body = preferences['welcome'].replace('{domain}', self.domain)
+                    body = self.welcome_text(preferences['welcome'])
                     self.enqueue(db, 'welcome:' + mxid, mxid, 'welcome', body)
                     if preferences['registrations']:
-                        self.enqueue(db, 'registration:' + mxid, owner(self.root), 'admin',
-                                     'Новый пользователь зарегистрировался: ' + mxid)
+                        self.enqueue_admin(
+                            db,
+                            'registration:' + mxid,
+                            'Новый пользователь зарегистрировался:\n' + mxid,
+                        )
             cursor = users[-1]['mxid']
             if len(users) < 500:
                 break
@@ -150,9 +220,13 @@ class Panel:
         if period not in durations:
             raise ValueError('Unknown statistics period')
         end = self.clock() if end is None else end
-        start = (0 if durations[period] is None else end - durations[period]) if start is None else start
+        start = (
+            (0 if durations[period] is None else end - durations[period])
+            if start is None
+            else start
+        )
         bots = ','.join(literal(value) for value in sorted(self.bot_ids()))
-        sql = f'''SELECT json_build_object('messages', (SELECT count(*) FROM events e
+        sql = f"""SELECT json_build_object('messages', (SELECT count(*) FROM events e
             WHERE e.type IN ('m.room.message','m.room.encrypted') AND NOT e.outlier
             AND e.received_ts >= {int(start * 1000)} AND e.received_ts < {int(end * 1000)}
             AND EXISTS (SELECT 1 FROM users u WHERE u.name=e.sender AND u.appservice_id IS NULL)
@@ -163,13 +237,18 @@ class Panel:
                 AND m.membership IN ('join','invite'))),
             'registrations', (SELECT count(*) FROM users WHERE creation_ts >= {int(start)}
                 AND creation_ts < {int(end)} AND is_guest=0 AND appservice_id IS NULL
-                AND name NOT IN ({bots})));'''
-        return {'period': period, 'start_utc': datetime.fromtimestamp(start, timezone.utc).isoformat(),
-                'end_utc': datetime.fromtimestamp(end, timezone.utc).isoformat(), **self.query(sql),
-                'calls': None, 'average_call_seconds': None,
-                'note': 'Сообщения: события обычных и зашифрованных сообщений местных пользователей; '
-                        'комнаты с ботами Misbot исключены. В E2EE невозможно отличить все служебные '
-                        'события от сообщений. Число и длительность звонков MatrixRTC недоступны.'}
+                AND name NOT IN ({bots})));"""
+        return {
+            'period': period,
+            'start_utc': datetime.fromtimestamp(start, timezone.utc).isoformat(),
+            'end_utc': datetime.fromtimestamp(end, timezone.utc).isoformat(),
+            **self.query(sql),
+            'calls': None,
+            'average_call_seconds': None,
+            'note': 'Сообщения: события обычных и зашифрованных сообщений местных пользователей; '
+            'комнаты с ботами Misbot исключены. В E2EE невозможно отличить все служебные '
+            'события от сообщений. Число и длительность звонков MatrixRTC недоступны.',
+        }
 
     def check_releases(self, force=False):
         settings = self.settings()
@@ -180,15 +259,36 @@ class Panel:
         with self.database() as db:
             self.set(db, 'release_checked_at', now)
         release = releases.latest()
+        comparison = releases.comparison(self.root, release)
         with self.database() as db:
             self.set(db, 'release', release)
-            if (release and settings['updates'] and releases.minor_update(releases.installed(self.root), release['version'])
-                    and releases.version(release['version']) > releases.version(settings.get('notified_version', '0.0.0'))):
-                self.enqueue(db, 'release:' + release['version'], owner(self.root), 'admin',
-                    'Доступна новая версия Misbot ' + release['version'] + '. Установлена ' + releases.installed(self.root)
-                    + '.\n' + release['notes'] + '\n' + release['url']
-                    + '\nОбновление: '+releases.comparison(self.root,release)['command']
-                    + (' или команда «обновить» в этом чате.' if releases.comparison(self.root,release)['update_supported'] else '.'))
+            if (
+                release
+                and settings['updates']
+                and comparison['update_available']
+                and releases.version(release['version'])
+                > releases.version(settings.get('notified_version', '0.0.0'))
+            ):
+                self.enqueue_admin(
+                    db,
+                    'release:' + release['version'],
+                    'Доступна новая версия Misbot '
+                    + release['version']
+                    + '. Установлена '
+                    + comparison['installed']
+                    + '.\n'
+                    + release['notes']
+                    + '\n'
+                    + release['url']
+                    + '\nОбновление: `'
+                    + comparison['command']
+                    + '`'
+                    + (
+                        ' или команда «`обновить`» в этом чате.'
+                        if comparison['update_supported']
+                        else '.'
+                    ),
+                )
                 self.set(db, 'notified_version', release['version'])
         return release
 
@@ -207,18 +307,107 @@ class Panel:
                 end = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
                 start = (end - timedelta(days=1)).replace(day=1)
                 result = self.statistics('month', start.timestamp(), end.timestamp())
-                self.notice('monthly:' + start.strftime('%Y-%m'), 'Статистика за ' + start.strftime('%Y-%m')
-                            + '\n' + statistics_text(result))
+                self.notice(
+                    'monthly:' + start.strftime('%Y-%m'),
+                    'Статистика за '
+                    + (
+                        'январь',
+                        'февраль',
+                        'март',
+                        'апрель',
+                        'май',
+                        'июнь',
+                        'июль',
+                        'август',
+                        'сентябрь',
+                        'октябрь',
+                        'ноябрь',
+                        'декабрь',
+                    )[start.month - 1]
+                    + ' '
+                    + str(start.year)
+                    + '\n'
+                    + statistics_text(result),
+                )
             with self.database() as db:
                 self.set(db, 'month', month)
         from release_update import recover_job, result_notice
+
         recover_job(self.root)
         result_notice(self)
+        from server_management import operation_notices
 
-    def handle(self, action, argument, event):
+        operation_notices(self)
+
+    def handle(self, action, argument, event, actor=None):
+        actor = owner(self.root) if actor is None else actor
+        if action == 'panel-server-result':
+            if not isinstance(argument, str) or not 1 <= len(argument) <= 100:
+                raise ValueError('Invalid operation identifier')
+            from server_management import operation_status
+
+            return operation_status(self.root, argument, actor=actor)
+        if action == 'panel-referral':
+            return {
+                'url': welcome_context(self.root, self.domain, '{referral_url}').render(
+                    '{referral_url}'
+                ),
+            }
+        if action in ('panel-server-read', 'panel-server-operation'):
+            if not isinstance(argument, dict) or set(argument) - {
+                'operation',
+                'period',
+                'backup_preview',
+            }:
+                raise ValueError('Invalid server operation')
+            operation = argument.get('operation')
+            allowed = SERVER_READS if action == 'panel-server-read' else SERVER_WRITES
+            if not isinstance(operation, str) or operation not in allowed:
+                raise ValueError('Invalid server operation')
+            period = argument.get('period', 'day')
+            if (
+                not isinstance(period, str)
+                or period not in STATISTICS_PERIODS
+                or ('period' in argument and operation != 'statistics')
+            ):
+                raise ValueError('Invalid statistics period')
+            if 'backup_preview' in argument and (
+                action != 'panel-server-operation' or operation != 'backup'
+            ):
+                raise ValueError('Invalid backup confirmation')
+            if action == 'panel-server-read':
+                from server_management import run_control
+
+                return run_control(
+                    {
+                        'stack_root': str(self.root),
+                        'management_actions': sorted(SERVER_READS | SERVER_WRITES),
+                    },
+                    operation,
+                    period=period,
+                )
+            if not isinstance(event, str) or not 1 <= len(event) <= 255:
+                raise ValueError('Invalid operation event')
+            from server_management import queue_operation
+
+            return queue_operation(
+                self.root,
+                operation,
+                actor=actor,
+                event_id=event,
+                **(
+                    {'confirmed_backup': argument['backup_preview']}
+                    if 'backup_preview' in argument
+                    else {}
+                ),
+            )
         if action == 'panel-status':
-            return {'installed': releases.installed(self.root), 'preferences': self.settings_view(),
-                    'welcome': self.settings()['welcome'], 'update_command': releases.comparison(self.root,None)['command']}
+            return {
+                'installed': releases.installed(self.root),
+                'preferences': self.settings_view(),
+                'welcome': self.settings()['welcome'],
+                'update_command': releases.comparison(self.root, None)['command'],
+            }
         if action == 'panel-version':
             return releases.comparison(self.root, self.check_releases(True))
         if action == 'panel-preferences':
@@ -228,9 +417,15 @@ class Panel:
             with self.database() as db:
                 self.set(db, key, enabled)
                 if not enabled:
-                    family = {'updates': 'Доступна новая версия Misbot %', 'registrations': 'Новый пользователь зарегистрировался:%',
-                              'statistics': 'Статистика за %'}[key]
-                    db.execute("UPDATE outbox SET state='cancelled' WHERE via='admin' AND state='pending' AND body LIKE ?", (family,))
+                    family = {
+                        'updates': 'Доступна новая версия Misbot %',
+                        'registrations': 'Новый пользователь зарегистрировался:%',
+                        'statistics': 'Статистика за %',
+                    }[key]
+                    db.execute(
+                        "UPDATE outbox SET state='cancelled' WHERE via='admin' AND state='pending' AND body LIKE ?",
+                        (family,),
+                    )
             return self.settings_view()
         if action == 'panel-welcome':
             if argument is None:
@@ -240,32 +435,55 @@ class Panel:
                 self.set(db, 'welcome', body)
             return {'saved': True}
         if action == 'panel-broadcast':
-            body = 'Сообщение от администратора сервера ' + self.domain + ',\n\n' + text(argument)
+            body = 'Сообщение от администратора сервера ' + self.domain + ':\n\n' + text(argument)
             self.observe_users()
             with self.database() as db:
                 users = list(db.execute('SELECT mxid FROM users WHERE active=1 ORDER BY mxid'))
                 for user in users:
                     self.enqueue(db, 'broadcast:' + event, user['mxid'], 'welcome', body)
-            return {'queued': len(users), 'message': 'Рассылка поставлена в очередь; отправка ограничена по скорости.'}
+            return {
+                'queued': len(users),
+                'message': 'Рассылка принята и поставлена в очередь. Скорость отправки ограничена.',
+            }
         if action == 'panel-statistics':
             return self.statistics(argument)
         if action == 'panel-update':
             from release_update import queue
+
             return queue(self.root, argument, event)
         if action == 'panel-outbox':
             with self.database() as db:
-                return {'items': [dict(row) for row in db.execute("SELECT id,recipient,via,body FROM outbox "
-                    "WHERE state='pending' AND next_at<=? ORDER BY rowid LIMIT 2", (self.clock(),))]}
+                return {
+                    'items': [
+                        dict(row)
+                        for row in db.execute(
+                            'SELECT id,recipient,via,body FROM outbox '
+                            "WHERE state='pending' AND next_at<=? ORDER BY next_at,rowid LIMIT 2",
+                            (self.clock(),),
+                        )
+                    ]
+                }
         if action == 'panel-ack':
             identifier, delivered = argument.get('id'), argument.get('delivered')
-            if not isinstance(identifier, str) or not isinstance(delivered, bool):
+            waiting_for_join = argument.get('waiting_for_join', False)
+            if (
+                not isinstance(identifier, str)
+                or not isinstance(delivered, bool)
+                or not isinstance(waiting_for_join, bool)
+                or (delivered and waiting_for_join)
+            ):
                 raise ValueError('Invalid delivery receipt')
             with self.database() as db:
                 if delivered:
-                    db.execute("UPDATE outbox SET state='sent' WHERE id=? AND state='pending'", (identifier,))
+                    db.execute(
+                        "UPDATE outbox SET state='sent' WHERE id=? AND state='pending'",
+                        (identifier,),
+                    )
                 else:
-                    db.execute("UPDATE outbox SET attempts=attempts+1,next_at=? WHERE id=? AND state='pending'",
-                               (self.clock() + 300, identifier))
+                    db.execute(
+                        "UPDATE outbox SET attempts=attempts+1,next_at=? WHERE id=? AND state='pending'",
+                        (self.clock() + (5 if waiting_for_join else 300), identifier),
+                    )
             return {'recorded': True}
         raise ValueError('Unknown panel action')
 
@@ -281,5 +499,6 @@ def text(value):
 
 
 def statistics_text(result):
-    return ('Сообщений: ' + str(result['messages']) + '\nРегистраций: ' + str(result['registrations'])
-            + '\nЗвонки: недоступно\nСредняя длительность звонка: недоступно\n' + result['note'])
+    return (
+        'Сообщений: ' + str(result['messages']) + '\nРегистраций: ' + str(result['registrations'])
+    )

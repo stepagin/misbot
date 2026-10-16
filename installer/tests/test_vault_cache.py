@@ -1,4 +1,5 @@
 """Vault ownership, lost replies, cache outages and restore integrity; fake secrets only."""
+
 import base64
 import copy
 import json
@@ -38,83 +39,166 @@ class Service:
 
 class VaultTests(unittest.TestCase):
     def test_ready_local_restore_disconnect_allows_only_retired_external_owner(self):
-        retired=self.root/'config/external-postgres-owner.json'
-        self.private(retired,'{"owner":"FICTIONAL_EXTERNAL_OWNER"}');self.connect()
-        remote=copy.deepcopy(self.service.current);retired.unlink()
-        self.private(self.root/'installation.json',json.dumps({'domain':'chat.example.org','database_mode':'local','restore_pending':True}))
-        self.private(self.root/'restore-journal.json','{"stage":"ready","local_postgres":true}')
-        self.private(self.root/'settings.env','DOMAIN=chat.example.org\nPOSTGRES_MODE=local\nPOSTGRES_HOST=\n')
-        with patch.object(lifecycle,'service_rows',return_value=[{'Service':'postgres','State':'running'}]),patch.object(vault,'Client') as client:
-            self.assertTrue(vault.disconnect(self.root));self.assertFalse(vault.disconnect(self.root));client.assert_not_called()
-        self.assertEqual(self.service.current,remote)
-        self.assertTrue((self.root/'secrets/admin-access.json').is_file())
+        retired = self.root / 'config/external-postgres-owner.json'
+        self.private(retired, '{"owner":"FICTIONAL_EXTERNAL_OWNER"}')
+        self.connect()
+        remote = copy.deepcopy(self.service.current)
+        retired.unlink()
+        self.private(
+            self.root / 'installation.json',
+            json.dumps(
+                {'domain': 'chat.example.org', 'database_mode': 'local', 'restore_pending': True}
+            ),
+        )
+        self.private(self.root / 'restore-journal.json', '{"stage":"ready","local_postgres":true}')
+        self.private(
+            self.root / 'settings.env',
+            'DOMAIN=chat.example.org\nPOSTGRES_MODE=local\nPOSTGRES_HOST=\n',
+        )
+        with (
+            patch.object(
+                lifecycle,
+                'service_rows',
+                return_value=[{'Service': 'postgres', 'State': 'running'}],
+            ),
+            patch.object(vault, 'Client') as client,
+        ):
+            self.assertTrue(vault.disconnect(self.root))
+            self.assertFalse(vault.disconnect(self.root))
+            client.assert_not_called()
+        self.assertEqual(self.service.current, remote)
+        self.assertTrue((self.root / 'secrets/admin-access.json').is_file())
         self.assertFalse(retired.exists())
 
     def test_retired_owner_exception_refuses_incomplete_active_or_missing_secret(self):
-        retired=self.root/'config/external-postgres-owner.json'
-        self.private(retired,'{"owner":"FICTIONAL_EXTERNAL_OWNER"}');self.connect();retired.unlink()
-        for metadata,progress,settings,rows in (
-                ({'database_mode':'local','restore_pending':False},{'stage':'ready','local_postgres':True},'local',[]),
-                ({'database_mode':'external','restore_pending':True},{'stage':'ready','local_postgres':True},'local',[]),
-                ({'database_mode':'local','restore_pending':True},{'stage':'importing','local_postgres':True},'local',[]),
-                ({'database_mode':'local','restore_pending':True},{'stage':'ready','local_postgres':False},'local',[]),
-                ({'database_mode':'local','restore_pending':True},{'stage':'ready','local_postgres':True},'external',[]),
-                ({'database_mode':'local','restore_pending':True},{'stage':'ready','local_postgres':True},'local',[{'Service':'mas','State':'running'}])):
-            with self.subTest(metadata=metadata,progress=progress,settings=settings,rows=rows):
-                self.private(self.root/'installation.json',json.dumps({'domain':'chat.example.org',**metadata}))
-                self.private(self.root/'restore-journal.json',json.dumps(progress))
-                self.private(self.root/'settings.env','DOMAIN=chat.example.org\nPOSTGRES_MODE='+settings+'\nPOSTGRES_HOST=\n')
-                with patch.object(lifecycle,'service_rows',return_value=rows),patch.object(vault,'Client') as client:
-                    with self.assertRaises(RuntimeError):vault.disconnect(self.root)
+        retired = self.root / 'config/external-postgres-owner.json'
+        self.private(retired, '{"owner":"FICTIONAL_EXTERNAL_OWNER"}')
+        self.connect()
+        retired.unlink()
+        for metadata, progress, settings, rows in (
+            (
+                {'database_mode': 'local', 'restore_pending': False},
+                {'stage': 'ready', 'local_postgres': True},
+                'local',
+                [],
+            ),
+            (
+                {'database_mode': 'external', 'restore_pending': True},
+                {'stage': 'ready', 'local_postgres': True},
+                'local',
+                [],
+            ),
+            (
+                {'database_mode': 'local', 'restore_pending': True},
+                {'stage': 'importing', 'local_postgres': True},
+                'local',
+                [],
+            ),
+            (
+                {'database_mode': 'local', 'restore_pending': True},
+                {'stage': 'ready', 'local_postgres': False},
+                'local',
+                [],
+            ),
+            (
+                {'database_mode': 'local', 'restore_pending': True},
+                {'stage': 'ready', 'local_postgres': True},
+                'external',
+                [],
+            ),
+            (
+                {'database_mode': 'local', 'restore_pending': True},
+                {'stage': 'ready', 'local_postgres': True},
+                'local',
+                [{'Service': 'mas', 'State': 'running'}],
+            ),
+        ):
+            with self.subTest(metadata=metadata, progress=progress, settings=settings, rows=rows):
+                self.private(
+                    self.root / 'installation.json',
+                    json.dumps({'domain': 'chat.example.org', **metadata}),
+                )
+                self.private(self.root / 'restore-journal.json', json.dumps(progress))
+                self.private(
+                    self.root / 'settings.env',
+                    'DOMAIN=chat.example.org\nPOSTGRES_MODE=' + settings + '\nPOSTGRES_HOST=\n',
+                )
+                with (
+                    patch.object(lifecycle, 'service_rows', return_value=rows),
+                    patch.object(vault, 'Client') as client,
+                ):
+                    with self.assertRaises(RuntimeError):
+                        vault.disconnect(self.root)
                     client.assert_not_called()
                 self.assertTrue(vault.descriptor(self.root).is_file())
-        self.private(self.root/'installation.json',json.dumps({'domain':'chat.example.org','database_mode':'local','restore_pending':True}))
-        self.private(self.root/'restore-journal.json','{"stage":"ready","local_postgres":true}')
-        self.private(self.root/'settings.env','DOMAIN=chat.example.org\nPOSTGRES_MODE=local\nPOSTGRES_HOST=\n')
-        (self.root/'config/mas-signing.pem').unlink()
-        with patch.object(lifecycle,'service_rows',return_value=[]):
-            with self.assertRaisesRegex(RuntimeError,'missing secret files'):vault.disconnect(self.root)
+        self.private(
+            self.root / 'installation.json',
+            json.dumps(
+                {'domain': 'chat.example.org', 'database_mode': 'local', 'restore_pending': True}
+            ),
+        )
+        self.private(self.root / 'restore-journal.json', '{"stage":"ready","local_postgres":true}')
+        self.private(
+            self.root / 'settings.env',
+            'DOMAIN=chat.example.org\nPOSTGRES_MODE=local\nPOSTGRES_HOST=\n',
+        )
+        (self.root / 'config/mas-signing.pem').unlink()
+        with patch.object(lifecycle, 'service_rows', return_value=[]):
+            with self.assertRaisesRegex(RuntimeError, 'missing secret files'):
+                vault.disconnect(self.root)
         self.assertTrue(vault.descriptor(self.root).is_file())
 
     def test_staged_disconnect_requires_ready_and_stopped_non_postgres_services(self):
-        metadata = {'restore_pending':True}
-        self.private(self.root/'restore-journal.json', '{"stage":"importing"}')
+        metadata = {'restore_pending': True}
+        self.private(self.root / 'restore-journal.json', '{"stage":"importing"}')
         with self.assertRaisesRegex(RuntimeError, 'original restore'):
             vault.assert_change_allowed(self.root, metadata, 'disconnect')
-        self.private(self.root/'restore-journal.json', '{"stage":"ready"}')
-        for action in ('sync','connect','auth','recover'):
-            with self.subTest(action=action), self.assertRaisesRegex(RuntimeError, 'only vault-disconnect'):
+        self.private(self.root / 'restore-journal.json', '{"stage":"ready"}')
+        for action in ('sync', 'connect', 'auth', 'recover'):
+            with (
+                self.subTest(action=action),
+                self.assertRaisesRegex(RuntimeError, 'only vault-disconnect'),
+            ):
                 vault.assert_change_allowed(self.root, metadata, action)
-        with patch.object(lifecycle, 'service_rows', return_value=[{'Service':'synapse','State':'running'}]):
+        with patch.object(
+            lifecycle, 'service_rows', return_value=[{'Service': 'synapse', 'State': 'running'}]
+        ):
             with self.assertRaisesRegex(RuntimeError, 'were not changed'):
                 vault.assert_change_allowed(self.root, metadata, 'disconnect')
-        with patch.object(lifecycle, 'service_rows', return_value=[{'Service':'postgres','State':'running'}]):
+        with patch.object(
+            lifecycle, 'service_rows', return_value=[{'Service': 'postgres', 'State': 'running'}]
+        ):
             vault.assert_change_allowed(self.root, metadata, 'disconnect')
 
     def test_disconnect_interrupted_after_descriptor_removal_finishes_without_vault(self):
-        self.connect(); remote = copy.deepcopy(self.service.current)
+        self.connect()
+        remote = copy.deepcopy(self.service.current)
         original = Path.unlink
+
         def interrupted(path, *args, **kwargs):
             if path.name == 'vault-connection.env':
                 raise InterruptedError('FICTIONAL interruption after descriptor unlink')
             return original(path, *args, **kwargs)
+
         with patch.object(vault, 'Client') as client, patch.object(Path, 'unlink', interrupted):
             with self.assertRaises(InterruptedError):
                 vault.disconnect(self.root)
             client.assert_not_called()
         self.assertFalse(vault.descriptor(self.root).exists())
-        self.assertTrue((self.root/'config/vault-connection.env').is_file())
+        self.assertTrue((self.root / 'config/vault-connection.env').is_file())
         with patch.object(vault, 'Client') as client:
-            self.assertTrue(vault.disconnect(self.root)); self.assertFalse(vault.disconnect(self.root))
+            self.assertTrue(vault.disconnect(self.root))
+            self.assertFalse(vault.disconnect(self.root))
             client.assert_not_called()
         self.assertEqual(remote, self.service.current)
-        self.assertTrue((self.root/'secrets/admin-access.json').is_file())
+        self.assertTrue((self.root / 'secrets/admin-access.json').is_file())
 
     def test_optional_snapshot_does_not_swallow_installer_signal(self):
         self.connect()
-        emit=Mock()
-        with patch.object(vault,'sync',side_effect=vault.state_store.OperationInterrupted()):
-            with self.assertRaises(vault.state_store.OperationInterrupted):vault.sync_optional(self.root,emit)
+        emit = Mock()
+        with patch.object(vault, 'sync', side_effect=vault.state_store.OperationInterrupted()):
+            with self.assertRaises(vault.state_store.OperationInterrupted):
+                vault.sync_optional(self.root, emit)
         emit.assert_not_called()
 
     def setUp(self):
@@ -127,9 +211,12 @@ class VaultTests(unittest.TestCase):
         self.private(self.root / 'config/mas-signing.pem', 'EXAMPLE_SIGNING_FILE')
         self.private(self.root / 'secrets/admin-access.json', '{"password":"EXAMPLE_NOT_REAL"}')
         self.env = Path(self.folder.name) / 'vault.env'
-        self.private(self.env, 'VAULT_ADDR=https://vault.example.org\nVAULT_KV_MOUNT=matrix\n'
+        self.private(
+            self.env,
+            'VAULT_ADDR=https://vault.example.org\nVAULT_KV_MOUNT=matrix\n'
             'VAULT_SECRET_PATH=installer/test\nVAULT_ROLE_ID_FILE=/root/example-role\n'
-            'VAULT_SECRET_ID_FILE=/root/example-secret\n')
+            'VAULT_SECRET_ID_FILE=/root/example-secret\n',
+        )
         self.service = Service()
 
     def tearDown(self):
@@ -144,8 +231,10 @@ class VaultTests(unittest.TestCase):
             return vault.connect(self.root, self.env)
 
     def recover(self):
-        with patch.object(lifecycle, 'service_rows', return_value=[]), \
-                patch.object(vault, 'RECOVERY_IDS', vault.RECOVERY_IDS | {os.geteuid(), os.getegid()}):
+        with (
+            patch.object(lifecycle, 'service_rows', return_value=[]),
+            patch.object(vault, 'RECOVERY_IDS', vault.RECOVERY_IDS | {os.geteuid(), os.getegid()}),
+        ):
             return vault.recover(self.root, self.service)
 
     def test_connect_repeat_and_lost_write_reply_do_not_duplicate_versions(self):
@@ -166,7 +255,9 @@ class VaultTests(unittest.TestCase):
         self.service.current = None
         self.connect()
         self.service.current = (2, self.service.current[1])
-        self.private(self.root / 'settings.env', 'DOMAIN=chat.example.org\nACME_EMAIL=owner@example.org\n')
+        self.private(
+            self.root / 'settings.env', 'DOMAIN=chat.example.org\nACME_EMAIL=owner@example.org\n'
+        )
         with self.assertRaisesRegex(RuntimeError, 'changed independently'):
             vault.sync(self.root, self.service)
         self.assertEqual(self.service.writes, 1)
@@ -204,14 +295,18 @@ class VaultTests(unittest.TestCase):
         self.connect()
         for name in ('config/mas-signing.pem', 'secrets/admin-access.json'):
             (self.root / name).unlink()
-        self.service.current[1]['files']['secrets/admin-access.json'] = base64.b64encode(b'BROKEN').decode()
+        self.service.current[1]['files']['secrets/admin-access.json'] = base64.b64encode(
+            b'BROKEN'
+        ).decode()
         with self.assertRaisesRegex(RuntimeError, 'checksum'):
             self.recover()
         self.assertFalse((self.root / 'config/mas-signing.pem').exists())
 
     def test_live_services_and_symlink_parent_prevent_recovery(self):
         self.connect()
-        with patch.object(lifecycle, 'service_rows', return_value=[{'Service': 'mas', 'State': 'running'}]):
+        with patch.object(
+            lifecycle, 'service_rows', return_value=[{'Service': 'mas', 'State': 'running'}]
+        ):
             with self.assertRaisesRegex(RuntimeError, 'Stop server'):
                 vault.recover(self.root, self.service)
         original = self.root / 'secrets'
@@ -223,9 +318,11 @@ class VaultTests(unittest.TestCase):
 
     def test_connection_rejects_insecure_origin_path_and_public_env(self):
         template = self.env.read_text()
-        for old, new in [('https://vault.example.org', 'http://vault.example.org'),
-                         ('https://vault.example.org', 'https://user:EXAMPLE@vault.example.org'),
-                         ('installer/test', '../test')]:
+        for old, new in [
+            ('https://vault.example.org', 'http://vault.example.org'),
+            ('https://vault.example.org', 'https://user:EXAMPLE@vault.example.org'),
+            ('installer/test', '../test'),
+        ]:
             self.private(self.env, template.replace(old, new))
             with self.assertRaises(RuntimeError):
                 vault.connection(self.env)

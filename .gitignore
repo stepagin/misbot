@@ -4,6 +4,7 @@
 /.idea/
 /CLAUDE.md
 /AGENTS.md
+/CONTRIBUTING.md
 
 # Rebuild from public sources with: python3 installer/build.py
 /dist/
@@ -14,6 +15,8 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .mypy_cache/
+.ruff_cache/
+.venv/
 .coverage*
 coverage/
 node_modules/

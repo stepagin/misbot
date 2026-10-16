@@ -1,0 +1,8 @@
+# Development/test dependencies only; never installed by the server installer.
+ruff==0.14.14
+mypy==1.19.1
+PyYAML==6.0.3
+requests==2.32.5
+cryptography==46.0.3
+boto3==1.42.26
+rich==14.2.0
