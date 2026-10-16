@@ -250,7 +250,7 @@ class UI:
         return True
 
     def check_domain_inputs(self):
-        for key in ('DOMAIN', 'MAS_DOMAIN'):
+        for key in ('DOMAIN', 'PUBLIC_DOMAIN', 'WEB_DOMAIN', 'SFU_DOMAIN', 'MAS_DOMAIN'):
             try:
                 value = schema.field_value(key, self.model.get(key, ''))
             except schema.InvalidConfiguration:
@@ -337,7 +337,7 @@ class UI:
             current = self.model.get(key, item.default)
             displayed = current
             if key == 'MAS_DOMAIN' and self.model.get('MAS_MODE', 'local') == 'local':
-                displayed = current or 'mas.' + self.model['DOMAIN']
+                displayed = current or schema.mas_host(self.model)
             choices = {
                 'media': (('local', 'Хранить медиа на этом сервере'), ('s3', 'Хранить медиа в S3')),
                 'mas': (
@@ -388,7 +388,11 @@ class UI:
             try:
                 normalized = schema.field_value(key, value)
                 if key == 'MAS_DOMAIN':
-                    schema.validate({'DOMAIN': self.model['DOMAIN'], 'MAS_DOMAIN': normalized})
+                    hosts = {
+                        name: self.model.get(name, '')
+                        for name in ('DOMAIN', 'PUBLIC_DOMAIN', 'WEB_DOMAIN', 'SFU_DOMAIN')
+                    }
+                    schema.validate({**hosts, 'MAS_DOMAIN': normalized})
                     if self.model.get(
                         'MAS_MODE'
                     ) == 'external' and normalized in schema.public_hosts(self.model):
@@ -513,8 +517,8 @@ class UI:
                     + '. Его адрес и IPv4 относятся к другому серверу.'
                 )
                 self.view.message(
-                    'В настройках MAS нужны адрес Matrix https://matrix.'
-                    + self.model['DOMAIN']
+                    'В настройках MAS нужны адрес Matrix https://'
+                    + schema.public_endpoints(self.model)['matrix']
                     + ', совпадающий общий ключ и управляющее приложение с правами администратора. '
                     'Misbot не устанавливает, не удаляет и не копирует данные внешнего MAS.',
                     'dim',
@@ -551,12 +555,15 @@ class UI:
                     'MAS_CLIENT_SECRET',
                 ):
                     self.model[key] = ''
-                self.view.message('Адрес входа: https://mas.' + self.model['DOMAIN'])
+                self.view.message('Адрес входа: https://' + schema.mas_host(self.model))
             schema.validate(
                 {
                     key: self.model.get(key, '')
                     for key in (
                         'DOMAIN',
+                        'PUBLIC_DOMAIN',
+                        'WEB_DOMAIN',
+                        'SFU_DOMAIN',
                         'MAS_MODE',
                         'MAS_DOMAIN',
                         'MAS_PUBLIC_IP',
@@ -1333,6 +1340,9 @@ class UI:
             key: self.model.get(key, 'local' if key == 'MAS_MODE' else '')
             for key in (
                 'DOMAIN',
+                'PUBLIC_DOMAIN',
+                'WEB_DOMAIN',
+                'SFU_DOMAIN',
                 'MAS_MODE',
                 'MAS_DOMAIN',
                 'PUBLIC_IP',
@@ -1367,11 +1377,13 @@ class UI:
                 self.model.get('MAS_DOMAIN', ''),
                 self.model.get('MAS_MODE', 'local'),
                 self.model.get('MAS_PUBLIC_IP', ''),
+                model=self.model,
             )
             preflight.caa_check(
                 domain,
                 self.model.get('MAS_DOMAIN', ''),
                 self.model.get('MAS_MODE', 'local'),
+                model=self.model,
             )
             preflight.network_check(self.root, self.model.get('DOCKER_SUBNET', '172.30.50.0/24'))
         self.dns_verified = self.dns_values()
@@ -1705,7 +1717,10 @@ class UI:
             'Настройка завершена', 'Откройте клиент и войдите в аккаунт администратора.'
         )
         self.view.details(
-            [('Клиент', 'https://web.' + domain), ('Администратор', '@matrix-admin:' + domain)]
+            [
+                ('Клиент', 'https://' + schema.public_endpoints(self.model)['web']),
+                ('Администратор', '@matrix-admin:' + domain),
+            ]
         )
         self.view.message('Пароль можно открыть кнопкой «Показать пароль администратора».')
         try:

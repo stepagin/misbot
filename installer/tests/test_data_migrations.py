@@ -427,10 +427,11 @@ class ReleaseDataMigrationTests(unittest.TestCase):
                 'domain': 'fictional.example',
                 'config_format_version': 1,
                 'databases_initialized': True,
+                'mas_issuer': 'https://mas.fictional.example/',
                 'applied_release_version': '1.0.0',
             },
         )
-        state_store.write_text(self.root / 'settings.env', 'FICTIONAL_PRIVATE_SETTINGS')
+        state_store.write_text(self.root / 'settings.env', 'DOMAIN=fictional.example\n')
 
     def start(self, root, log):
         self.assertEqual(migrations.check(root), 1)

@@ -690,7 +690,7 @@ from pathlib import Path
 sys.path.insert(0,sys.argv[1])
 import terminal_ui,preflight,state_store,shutil,socket
 shutil.which=lambda name:'/usr/bin/'+name
-for name in ('system_check','dns_check','caa_check','network_check'):setattr(preflight,name,lambda *a:None)
+for name in ('system_check','dns_check','caa_check','network_check'):setattr(preflight,name,lambda *a,**kw:None)
 preflight.resolve=lambda host,family,**kw:{'8.8.8.8'} if family==socket.AF_INET else set()
 def run(args):
     root=Path(sys.argv[2]);root.mkdir(mode=0o700,exist_ok=True)

@@ -108,6 +108,13 @@ root/sudo и свободными портами из таблицы ниже. �
 Для стандартной установки создайте семь записей **A** с одним публичным IPv4 VPS.
 Таблица ниже использует вымышленный домен `example.org`; замените его своим.
 
+Если Matrix `server_name` отличается от домена сайта, до первого запуска задайте
+`PUBLIC_DOMAIN` и при необходимости `WEB_DOMAIN`/`SFU_DOMAIN`.
+Например, `DOMAIN=matrix.example.org`, `PUBLIC_DOMAIN=example.org`,
+`WEB_DOMAIN=chat.example.org`, `MAS_DOMAIN=matrix.example.org` сохраняют Matrix ID
+и общий адрес Matrix/MAS. Точный набор DNS-имён вычисляет preflight;
+[правила адресов](configuration.md#matrix-identity-и-публичные-адреса).
+
 По умолчанию MAS устанавливается на этот VPS и использует `mas.<DOMAIN>`.
 В мастере можно вместо этого подключить уже настроенный внешний MAS. Его DNS
 указывает на его собственный сервер; для этого VPS тогда нужны остальные шесть

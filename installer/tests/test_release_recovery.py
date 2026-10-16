@@ -56,6 +56,7 @@ class ReleaseRecoveryTests(unittest.TestCase):
             'domain': 'fictional.example',
             'config_format_version': 1,
             'databases_initialized': True,
+            'mas_issuer': 'https://mas.fictional.example/',
             'applied_release_version': '1.0.0',
             'applied_release_revision': self.old_revision,
         }
@@ -69,7 +70,12 @@ class ReleaseRecoveryTests(unittest.TestCase):
         ):
             target = self.root / name
             target.parent.mkdir(exist_ok=True, parents=True)
-            target.write_text('FICTIONAL_PERSISTENT_' + name)
+            state_store.write_text(
+                target,
+                'DOMAIN=fictional.example\n'
+                if name == 'settings.env'
+                else 'FICTIONAL_PERSISTENT_' + name,
+            )
         self.persistent = {
             name: (self.root / name).read_bytes()
             for name in (
@@ -134,6 +140,28 @@ class ReleaseRecoveryTests(unittest.TestCase):
         self.assertEqual(update.state(self.root), self.metadata)
         self.assertFalse((self.root / 'update-journal.json').exists())
         self.assert_persistent()
+
+    def test_identity_or_public_address_edit_refuses_before_migration_backup_or_copy(self):
+        for change in (
+            'DOMAIN=changed.example\n',
+            'DOMAIN=fictional.example\nMAS_DOMAIN=changed.example\n',
+            'DOMAIN=fictional.example\nWEB_DOMAIN=chat.fictional.example\n',
+        ):
+            with self.subTest(change=change):
+                state_store.write_text(self.root / 'settings.env', change)
+                with (
+                    patch.object(update, 'run_data_migrations') as migrate,
+                    patch.object(update, 'verified_backup') as backup,
+                    patch.object(update, 'copy_sources') as copy,
+                    self.assertRaises(RuntimeError),
+                ):
+                    update.perform_update(self.source, self.root, 'apply')
+                migrate.assert_not_called()
+                backup.assert_not_called()
+                copy.assert_not_called()
+                self.assertEqual(update.validate_manifest(self.root)[1], self.old_revision)
+                self.assertEqual(update.state(self.root), self.metadata)
+                self.assertFalse((self.root / 'stages').exists())
 
     def test_interrupted_copy_recovers_previous_manifest_after_runtime_only_packaging(self):
         entries = update.validate_manifest(self.source)[0]

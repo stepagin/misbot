@@ -152,7 +152,8 @@
       "role": "root (help/version are separate public entrypoints)",
       "runtime": "saved model; readiness only for apply",
       "invariants": [
-        "immutable identity preserved; pending configuration recover before conflicting mutation"
+        "immutable identity preserved; pending configuration recover before conflicting mutation",
+        "public service origins are fixed after startup; updates and restore preserve the saved host map"
       ],
       "risk": "configuration"
     },
@@ -1941,6 +1942,44 @@
         {
           "file": "bots/matrix-federation/tests/logic.test.js",
           "test": "safe check detail and unknown storage remain readable without leaking raw errors"
+        }
+      ]
+    },
+    {
+      "id": "configuration.public-origins",
+      "commands": [
+        "config generate",
+        "config validate",
+        "config apply",
+        "backup restore",
+        "backup restore-local",
+        "update apply"
+      ],
+      "surfaces": [
+        "cli"
+      ],
+      "axes": [
+        "success",
+        "failure",
+        "retry",
+        "state"
+      ],
+      "level": "backend",
+      "given": "portable Matrix identity differs from the public site and browser client; local MAS shares the Matrix host",
+      "expected_output": "generated discovery and public URLs use the selected map; an edited committed host is refused before runtime publication",
+      "expected_state": "Matrix identity, keys and sessions retained on repeat; restore accepts a new public IP but preserves the host map; update rejects changed origins before backup or copy",
+      "tests": [
+        {
+          "file": "installer/tests/test_public_endpoints.py",
+          "test": "PublicEndpointsTests.test_generation_preserves_identity_sessions_and_routes_shared_mas_once"
+        },
+        {
+          "file": "installer/tests/test_public_endpoints.py",
+          "test": "PublicEndpointsTests.test_restore_rejects_changed_frozen_host_before_publishing_target"
+        },
+        {
+          "file": "installer/tests/test_release_recovery.py",
+          "test": "ReleaseRecoveryTests.test_identity_or_public_address_edit_refuses_before_migration_backup_or_copy"
         }
       ]
     }

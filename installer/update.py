@@ -742,6 +742,8 @@ def perform_update(source, root, action):
         component_runtime(root, transition['from'])
     if source == root:
         fail('Run update from a newly extracted release, not from the installation directory')
+    configuration = __import__('configuration')
+    configuration.assert_identity(root, configuration.load(root), installed)
     run_data_migrations(source, root, candidate, 'check')
     update_resource_check(root, entries)
     lock_dir = root / 'stages'

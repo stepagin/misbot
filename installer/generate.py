@@ -168,12 +168,15 @@ except configuration_schema.InvalidConfiguration as error:
     fail(str(error), error.code)
 if domain_name(settings.get('DOMAIN', '')) != domain:
     fail('Changing DOMAIN is not supported; create a new installation')
-mas_domain = configuration_schema.mas_host(settings)
+endpoints = configuration_schema.public_endpoints(settings)
+mas_domain = endpoints['mas']
 mas_mode = settings.get('MAS_MODE', 'local')
 if mas_mode not in ('local', 'external'):
     fail('MAS_MODE must be local or external')
 try:
     configuration.assert_auth_identity(root, settings, state)
+except configuration.PublicIdentityChanged as error:
+    fail(str(error), 'public_identity_changed')
 except RuntimeError as error:
     fail(str(error), 'mas_identity_changed')
 database_mode = settings.get('POSTGRES_MODE', 'local')
@@ -325,6 +328,7 @@ state.update(
     preview=args.preview,
     mas_issuer='https://' + mas_domain + '/',
     mas_mode=mas_mode,
+    public_endpoints=endpoints,
 )
 if mas_mode == 'external':
     state['mas_identity'] = {
@@ -435,12 +439,15 @@ if not args.preview:
                 'username': 'matrix-admin',
                 'matrix_id': f'@matrix-admin:{domain}',
                 'password': secrets.token_urlsafe(36),
-                'admin_url': f'https://admin.{domain}',
-                'web_url': f'https://web.{domain}',
+                'admin_url': f'https://{endpoints["admin"]}',
+                'web_url': f'https://{endpoints["web"]}',
                 'homeserver': domain,
             },
         )
         admin.chmod(0o600)
+    access = configuration.read_private_json(admin)
+    access.update(admin_url='https://' + endpoints['admin'], web_url='https://' + endpoints['web'])
+    state_store.write_json(admin, access)
 state['seeded'] = True
 save_state()
 if args.initialize_env:
@@ -491,7 +498,7 @@ lk_key, lk_secret = 'matrix-livekit', secret('livekit_secret')
 
 synapse = {
     'server_name': f'{domain}',
-    'public_baseurl': f'https://matrix.{domain}/',
+    'public_baseurl': f'https://{endpoints["matrix"]}/',
     'federation_domain_whitelist': federation_servers,
     'pid_file': '/data/homeserver.pid',
     'report_stats': False,
@@ -556,8 +563,8 @@ synapse = {
         'transports': [
             {
                 'type': 'livekit',
-                'url': f'wss://rtc.{domain}/livekit/sfu',
-                'livekit_service_url': f'https://rtc.{domain}/livekit/jwt',
+                'url': f'wss://{endpoints["rtc"]}/livekit/sfu',
+                'livekit_service_url': f'https://{endpoints["rtc"]}/livekit/jwt',
             }
         ]
     },
@@ -783,7 +790,8 @@ if mas_mode == 'local':
         proxy_url = 'socks5h://' + proxy_url.split('://', 1)[1]
         if '\n' in proxy_url or '\r' in proxy_url:
             raise ValueError('SOCKS5_CONFIG must be a single line')
-        bypass = f'localhost,127.0.0.1,::1,synapse,mas,postgres,jwt,livekit,caddy,{domain},.{domain},{mas_domain},google.com,.google.com,googleapis.com,.googleapis.com,googleusercontent.com,.googleusercontent.com'
+        public_bypass = ','.join(configuration_schema.public_hosts(settings))
+        bypass = f'localhost,127.0.0.1,::1,synapse,mas,postgres,jwt,livekit,caddy,{public_bypass},{mas_domain},google.com,.google.com,googleapis.com,.googleapis.com,googleusercontent.com,.googleusercontent.com'
         proxy_file = root / 'mas-proxy.env'
         state_store.write_text(proxy_file, f'HTTPS_PROXY={proxy_url}\nNO_PROXY={bypass}\n')
         proxy_file.chmod(0o600)
@@ -852,13 +860,13 @@ dump(
         'keys': {lk_key: lk_secret},
         'turn': {
             'enabled': True,
-            'domain': f'turn.{domain}',
+            'domain': endpoints['turn'],
             'udp_port': 3478,
             'tls_port': 443,
             'proxy_protocol': True,
             'proxy_protocol_trusted_cidrs': [subnet],
-            'cert_file': f'/certs/caddy/certificates/acme-v02.api.letsencrypt.org-directory/turn.{domain}/turn.{domain}.crt',
-            'key_file': f'/certs/caddy/certificates/acme-v02.api.letsencrypt.org-directory/turn.{domain}/turn.{domain}.key',
+            'cert_file': f'/certs/caddy/certificates/acme-v02.api.letsencrypt.org-directory/{endpoints["turn"]}/{endpoints["turn"]}.crt',
+            'key_file': f'/certs/caddy/certificates/acme-v02.api.letsencrypt.org-directory/{endpoints["turn"]}/{endpoints["turn"]}.key',
         },
         'webhook': {'api_key': lk_key, 'urls': ['http://jwt:8080/sfu_webhook']},
         'logging': {'level': 'info'},
@@ -879,20 +887,22 @@ if mas_mode == 'local':
 
 
 discovery = {
-    'm.homeserver': {'base_url': f'https://matrix.{domain}'},
+    'm.homeserver': {'base_url': f'https://{endpoints["matrix"]}'},
     'org.matrix.msc2965.authentication': {
         'issuer': f'https://{mas_domain}/',
         'account': f'https://{mas_domain}/account/',
     },
     'org.matrix.msc4143.rtc_foci': [
-        {'type': 'livekit', 'livekit_service_url': f'https://rtc.{domain}/livekit/jwt'}
+        {'type': 'livekit', 'livekit_service_url': f'https://{endpoints["rtc"]}/livekit/jwt'}
     ],
 }
 (public / 'well-known-client.json').write_text(json.dumps(discovery))
-(public / 'well-known-server.json').write_text(json.dumps({'m.server': f'matrix.{domain}:443'}))
+(public / 'well-known-server.json').write_text(
+    json.dumps({'m.server': endpoints['matrix'] + ':443'})
+)
 web = {
     'default_server_config': {
-        'm.homeserver': {'base_url': f'https://matrix.{domain}', 'server_name': f'{domain}'}
+        'm.homeserver': {'base_url': f'https://{endpoints["matrix"]}', 'server_name': f'{domain}'}
     },
     'default_server_name': f'{domain}',
     'disable_custom_urls': True,
@@ -909,16 +919,84 @@ web = {
 }
 (public / 'web-config.json').write_text(json.dumps(web, indent=2))
 
-mas_site = (
-    ''
-    if mas_mode == 'external' or mas_domain in (domain, 'matrix.' + domain)
-    else mas_domain + ' {\n    reverse_proxy mas:8080\n}\n'
-)
-matrix_routes = (
-    '    @matrix_api path /_matrix/* /_synapse/*\n    handle @matrix_api {\n        reverse_proxy synapse:8008\n    }\n'
-    if mas_domain == 'matrix.' + domain
-    else ''
-)
+# A host may serve Matrix identity, discovery and the local MAS together.
+# Build one site block per hostname so shared origins never hide another role.
+discovery = """(discovery) {
+    handle /.well-known/matrix/client {
+        header Access-Control-Allow-Origin *
+        header Content-Type application/json
+        header Cache-Control "public, max-age=300"
+        root * /srv/discovery
+        rewrite * /well-known-client.json
+        file_server
+    }
+    handle /.well-known/matrix/server {
+        header Content-Type application/json
+        root * /srv/discovery
+        rewrite * /well-known-server.json
+        file_server
+    }
+}
+"""
+management_routes = """    handle /.well-known/misbot {
+        reverse_proxy unix//run/misbot/http.sock
+    }
+    handle /_misbot/v1/* {
+        request_body {
+            max_size 32KB
+        }
+        reverse_proxy unix//run/misbot/http.sock
+    }
+"""
+matrix_routes = """    @legacy path_regexp legacy ^/_matrix/client/[^/]+/(login|logout|refresh)$
+    handle @legacy {
+        header Access-Control-Allow-Origin *
+        header Content-Type application/json
+        respond `{ "errcode": "M_UNRECOGNIZED", "error": "Native OAuth authentication required" }` 404
+    }
+    @matrix_api path /_matrix/* /_synapse/*
+    handle @matrix_api {
+        reverse_proxy synapse:8008
+    }
+"""
+site_blocks = []
+for host in configuration_schema.public_hosts(settings):
+    routes = ''
+    if host in (endpoints['identity'], endpoints['site'], endpoints['matrix']):
+        routes += '    import discovery\n'
+    if host in (endpoints['identity'], endpoints['site']):
+        routes += management_routes
+    if host == endpoints['matrix']:
+        routes += matrix_routes
+    if host == endpoints['site']:
+        routes += homepage.route(settings)
+    elif host == endpoints['matrix']:
+        upstream = 'mas:8080' if mas_mode == 'local' and host == mas_domain else 'synapse:8008'
+        routes += '    handle {\n        reverse_proxy ' + upstream + '\n    }\n'
+    elif mas_mode == 'local' and host == mas_domain:
+        routes += '    reverse_proxy mas:8080\n'
+    elif host == endpoints['web']:
+        routes += '    encode zstd gzip\n    reverse_proxy web:8080\n'
+    elif host == endpoints['admin']:
+        routes += '    encode zstd gzip\n    reverse_proxy admin:8080\n'
+    elif host == endpoints['rtc']:
+        routes += """    handle_path /livekit/jwt/* {
+        reverse_proxy jwt:8080
+    }
+    handle_path /livekit/sfu* {
+        reverse_proxy livekit:7880
+    }
+    handle {
+        respond "MatrixRTC" 200
+    }
+"""
+    elif host == endpoints['turn']:
+        routes += '    respond "TURN endpoint" 200\n'
+    elif host == endpoints['sfu']:
+        routes += '    reverse_proxy livekit:7880\n'
+    else:
+        routes += '    handle {\n        respond "Not found" 404\n    }\n'
+    site_blocks.append(host + ' {\n' + routes + '}\n')
 (config / 'Caddyfile').write_text(
     """{
     acme_ca https://acme-v02.api.letsencrypt.org/directory
@@ -935,84 +1013,11 @@ matrix_routes = (
         }
     }
 }
-(discovery) {
-    handle /.well-known/matrix/client {
-        header Access-Control-Allow-Origin *
-        header Content-Type application/json
-        header Cache-Control "public, max-age=300"
-        root * /srv/discovery
-        rewrite * /well-known-client.json
-        file_server
-    }
-    handle /.well-known/matrix/server {
-        header Content-Type application/json
-        root * /srv/discovery
-        rewrite * /well-known-server.json
-        file_server
-    }
-}
-@DOMAIN@ {
-    import discovery
-    handle /.well-known/misbot {
-        reverse_proxy unix//run/misbot/http.sock
-    }
-    handle /_misbot/v1/* {
-        request_body {
-            max_size 32KB
-        }
-        reverse_proxy unix//run/misbot/http.sock
-    }
-    handle {
-        redir https://web.@DOMAIN@{uri} 302
-    }
-}
-matrix.@DOMAIN@ {
-    import discovery
-    @legacy path_regexp legacy ^/_matrix/client/[^/]+/(login|logout|refresh)$
-    handle @legacy {
-        header Access-Control-Allow-Origin *
-        header Content-Type application/json
-        respond `{ "errcode": "M_UNRECOGNIZED", "error": "Native OAuth authentication required" }` 404
-    }
-@MATRIX_ROUTES@    handle {
-        reverse_proxy @MATRIX_UPSTREAM@
-    }
-}
-@MAS_SITE@
-web.@DOMAIN@ {
-    encode zstd gzip
-    reverse_proxy web:8080
-}
-admin.@DOMAIN@ {
-    encode zstd gzip
-    reverse_proxy admin:8080
-}
-rtc.@DOMAIN@ {
-    handle_path /livekit/jwt/* {
-        reverse_proxy jwt:8080
-    }
-    handle_path /livekit/sfu* {
-        reverse_proxy livekit:7880
-    }
-    handle {
-        respond "MatrixRTC" 200
-    }
-}
-turn.@DOMAIN@ {
-    respond "TURN endpoint" 200
-}
-""".replace('@MATRIX_ROUTES@', matrix_routes)
-    .replace(
-        '@MATRIX_UPSTREAM@', 'mas:8080' if mas_domain == 'matrix.' + domain else 'synapse:8008'
-    )
-    .replace('@MAS_SITE@', mas_site)
-    .replace('@DOMAIN@', domain)
-    .replace('@SUBNET@', subnet)
+""".replace('@SUBNET@', subnet)
+    + discovery
+    + '\n'.join(site_blocks)
 )
 homepage.write_assets(root, settings)
-state_store.write_text(
-    config / 'Caddyfile', homepage.replace_route((config / 'Caddyfile').read_text(), settings)
-)
 (config / 'haproxy.cfg').write_text(
     """global
     log stdout format raw local0
@@ -1027,7 +1032,7 @@ frontend tls
     bind *:443
     tcp-request inspect-delay 5s
     tcp-request content accept if { req_ssl_hello_type 1 }
-    use_backend turn if { req_ssl_sni -i turn.@DOMAIN@ }
+    use_backend turn if { req_ssl_sni -i @TURN_HOST@ }
     default_backend https
 backend https
     server caddy caddy:443 send-proxy-v2 resolvers docker init-addr libc,none
@@ -1040,7 +1045,7 @@ resolvers docker
     timeout retry 1s
     hold valid 10s
     hold nx 3s
-""".replace('@DOMAIN@', domain).replace('@SUBNET@', subnet)
+""".replace('@TURN_HOST@', endpoints['turn'])
 )
 
 
@@ -1116,7 +1121,7 @@ services = {
         'jwt',
         '64m',
         environment={
-            'LIVEKIT_URL': f'wss://rtc.{domain}/livekit/sfu',
+            'LIVEKIT_URL': f'wss://{endpoints["rtc"]}/livekit/sfu',
             'LIVEKIT_KEY': lk_key,
             'LIVEKIT_SECRET_FROM_FILE': '/run/secrets/livekit_secret',
             'LIVEKIT_FULL_ACCESS_HOMESERVERS': f'{domain}',

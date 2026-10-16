@@ -117,10 +117,14 @@ def resolve(host, family, timeout=10, strict=False):
     return result[0]
 
 
-def dns_check(domain, public_ip, mas_domain='', mas_mode='local', mas_public_ip=''):
+def dns_check(domain, public_ip, mas_domain='', mas_mode='local', mas_public_ip='', *, model=None):
     from configuration_schema import public_hosts
 
-    for host in public_hosts({'DOMAIN': domain, 'MAS_DOMAIN': mas_domain, 'MAS_MODE': mas_mode}):
+    values = model or {'DOMAIN': domain, 'MAS_DOMAIN': mas_domain, 'MAS_MODE': mas_mode}
+    mas_mode = values.get('MAS_MODE', 'local')
+    mas_domain = values.get('MAS_DOMAIN', '')
+    mas_public_ip = values.get('MAS_PUBLIC_IP', mas_public_ip)
+    for host in public_hosts(values):
         actual = resolve(host, socket.AF_INET)
         if actual != {public_ip}:
             raise RuntimeError(
@@ -202,13 +206,14 @@ def caa_query(host):
     return records
 
 
-def caa_check(domain, mas_domain='', mas_mode='local'):
+def caa_check(domain, mas_domain='', mas_mode='local', *, model=None):
     # RFC 8659: chase aliases in each query, then climb the original name tree
     # until the first nonempty CAA RRset, excluding the DNS root.
     cache = {}
     from configuration_schema import public_hosts
 
-    for host in public_hosts({'DOMAIN': domain, 'MAS_DOMAIN': mas_domain, 'MAS_MODE': mas_mode}):
+    values = model or {'DOMAIN': domain, 'MAS_DOMAIN': mas_domain, 'MAS_MODE': mas_mode}
+    for host in public_hosts(values):
         current = host
         records = []
         while current:
@@ -533,8 +538,9 @@ def check(root):
         values.get('MAS_DOMAIN', ''),
         values.get('MAS_MODE', 'local'),
         values.get('MAS_PUBLIC_IP', ''),
+        model=values,
     )
-    caa_check(domain, values.get('MAS_DOMAIN', ''), values.get('MAS_MODE', 'local'))
+    caa_check(domain, values.get('MAS_DOMAIN', ''), values.get('MAS_MODE', 'local'), model=values)
     network_check(root, values.get('DOCKER_SUBNET', '172.30.50.0/24'))
     proxy_check(values)
     return {

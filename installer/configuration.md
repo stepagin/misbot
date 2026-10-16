@@ -183,6 +183,37 @@ MAX_UPLOAD_SIZE_MIB=512
 У подключённого `existing-compose` стека лимит меняют его собственными средствами.
 Файл `config/homeserver.yaml` генерируется автоматически; редактировать его не нужно.
 
+### Matrix identity и публичные адреса
+
+`DOMAIN` остаётся неизменяемым Matrix `server_name` и частью Matrix ID.
+По умолчанию сайт использует этот же домен, а службы — его поддомены.
+До первого запуска можно отдельно задать основу публичных адресов и имя клиента:
+
+```dotenv
+DOMAIN=matrix.example.org
+PUBLIC_DOMAIN=example.org
+WEB_DOMAIN=chat.example.org
+MAS_DOMAIN=matrix.example.org
+SFU_DOMAIN=live.example.org
+```
+
+В этом примере Matrix ID имеет вид `@имя:matrix.example.org`, сайт находится на
+`example.org`, клиент — на `chat.example.org`, Matrix API и MAS — на
+`matrix.example.org`. Адреса остальных служб: `admin.example.org`,
+`rtc.example.org`, `turn.example.org`. Необязательный `SFU_DOMAIN` сохраняет
+дополнительный адрес LiveKit; без него используется только `/livekit/sfu` на RTC.
+Пустые `PUBLIC_DOMAIN` и `WEB_DOMAIN` сохраняют стандартные адреса; пустой
+`SFU_DOMAIN` отключает дополнительное имя. Пустой `MAS_DOMAIN` означает
+`mas.<PUBLIC_DOMAIN>` или `mas.<DOMAIN>`, если публичная основа не задана.
+
+Все управляемые имена, включая `DOMAIN` для discovery, должны указывать на этот
+VPS. DNS, CAA, сертификаты, сайт и проверки используют один набор адресов.
+Matrix и локальный MAS могут делить hostname; клиент, админка, RTC, TURN и
+дополнительный SFU требуют отдельных имён. Внешний MAS использует отдельный адрес.
+После первого запуска публичные адреса фиксируются вместе с Matrix identity.
+Обновление и восстановление сохраняют их; при восстановлении меняется только
+публичный IP. Эти параметры сами по себе не импортируют другой Compose-стек.
+
 ### Отдельный домен MAS
 
 `MAS_DOMAIN` в `settings/server.env` задаёт hostname MAS независимо от `DOMAIN`:
@@ -192,8 +223,9 @@ DOMAIN=example.org
 MAS_DOMAIN=auth.example.net
 ```
 
-Пустое поле сохраняет значение по умолчанию `mas.<DOMAIN>`. Возможны общий адрес с основным
-доменом или `matrix.<DOMAIN>`: прокси сохраняет Matrix API и маршруты авторизации.
+Пустое поле сохраняет значение по умолчанию `mas.<PUBLIC_DOMAIN>` (без
+`PUBLIC_DOMAIN` — `mas.<DOMAIN>`). Возможны общий адрес с доменом сайта,
+Matrix identity или `matrix.<PUBLIC_DOMAIN>`: прокси сохраняет Matrix API и маршруты авторизации.
 Задайте домен до первого запуска баз. После этого issuer неизменяем: попытка
 смены поля отклоняется до генерации runtime и остановки служб. Для старой установки
 с нестандартным issuer впишите его существующий hostname; URL, ключи и OAuth-привязки
@@ -373,6 +405,9 @@ POST. Прерванную явную замену продолжайте чер
 | Файл / поле | Назначение | Обязательность | Формат / по умолчанию | Вымышленный пример | Влияние |
 |---|---|---|---|---|---|
 | settings/server.env / `DOMAIN` | Основной домен, без https:// и пути | всегда | hostname без схемы/порта; пусто | example.org | После создания сервера домен менять нельзя. |
+| settings/server.env / `PUBLIC_DOMAIN` | Домен сайта и основа адресов служб | необязательно | hostname; пусто означает DOMAIN | example.org | Задаётся до первого запуска; Matrix identity сохраняется. |
+| settings/server.env / `WEB_DOMAIN` | Домен браузерного клиента | необязательно | hostname; пусто означает web.<PUBLIC_DOMAIN> | chat.example.org | После первого запуска менять нельзя. |
+| settings/server.env / `SFU_DOMAIN` | Дополнительный домен LiveKit SFU | необязательно | hostname; пусто отключает alias | live.example.org | Задаётся до первого запуска для сохранения существующего адреса. |
 | settings/server.env / `MAS_MODE` | Сервер авторизации | необязательно | local/external; local | local | После первого запуска сервер авторизации менять нельзя. |
 | settings/server.env / `MAS_PUBLIC_IP` | IPv4 внешнего MAS | необязательно | публичный IPv4; пусто | 203.0.113.21 | Необязательно: проверяет A-запись внешнего MAS; его адрес не обязан совпадать с IPv4 этого VPS. |
 | settings/server.env / `MAS_SHARED_SECRET` | Общий ключ Synapse и внешнего MAS | external MAS | приватная буквальная строка; пусто | FICTIONAL_MAS_SHARED_SECRET | Должен совпадать с matrix.secret уже настроенного MAS. |
