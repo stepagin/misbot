@@ -588,7 +588,7 @@ if media_mode == 's3':
     synapse['enable_local_media_storage'] = True
     synapse['media_storage_providers'] = [
         {
-            'module': 's3_storage_provider.S3StorageProviderBackend',
+            'module': 'misbot_s3_provider.S3StorageProviderBackend',
             'store_local': True,
             'store_remote': True,
             'store_synchronous': True,
@@ -602,6 +602,7 @@ if media_mode == 's3':
                 if args.preview
                 else settings['S3_SECRET_ACCESS_KEY'],
                 'prefix': settings.get('S3_PREFIX', 'preview/'),
+                'threadpool_size': 2,
                 **(
                     {'endpoint_url': settings['S3_ENDPOINT_URL']}
                     if settings.get('S3_ENDPOINT_URL')
@@ -1210,6 +1211,17 @@ elif (config / 'postgres-admin.pgpass').exists():
     (config / 'postgres-admin.pgpass').unlink()
 if media_mode == 's3':
     services['synapse']['image'] = 'matrix-stack/synapse-s3:1.7.0'
+    state_store.write_text(
+        config / 'misbot_s3_provider.py',
+        (Path(__file__).parent / 'misbot_s3_provider.py').read_text(),
+        0o644,
+    )
+    services['synapse']['volumes'].append(
+        './config/misbot_s3_provider.py:/opt/misbot-s3-adapter/misbot_s3_provider.py:ro'
+    )
+    services['synapse']['environment'].update(
+        PYTHONPATH='/opt/misbot-s3-adapter', PYTHONDONTWRITEBYTECODE='1'
+    )
 compose = {
     'name': 'matrix-stack',
     'services': services,

@@ -679,6 +679,35 @@ class GeneratorTests(unittest.TestCase):
         self.assertEqual(mas['database']['host'], 'db.example.net')
         self.assertTrue(synapse['enable_local_media_storage'])
         provider = synapse['media_storage_providers'][0]
+        self.assertEqual(provider['module'], 'misbot_s3_provider.S3StorageProviderBackend')
+        self.assertEqual(provider['config']['threadpool_size'], 2)
+        self.assertIn(
+            './config/misbot_s3_provider.py:/opt/misbot-s3-adapter/misbot_s3_provider.py:ro',
+            compose['services']['synapse']['volumes'],
+        )
+        self.assertEqual(
+            compose['services']['synapse']['environment']['PYTHONPATH'], '/opt/misbot-s3-adapter'
+        )
+        self.assertEqual((self.root / 'config/misbot_s3_provider.py').stat().st_mode & 0o777, 0o644)
+        # Real source publication makes Python files root-private. Generation
+        # must publish a readable, identical adapter for the unprivileged service.
+        import shutil
+
+        source = Path(self.temp.name) / 'installed-source'
+        shutil.copytree(BUNDLE, source, ignore=shutil.ignore_patterns('__pycache__', 'tests'))
+        (source / 'misbot_s3_provider.py').chmod(0o600)
+        result = subprocess.run(
+            [sys.executable, str(source / 'generate.py'), '--directory', str(self.root), '--preview'],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            (self.root / 'config/misbot_s3_provider.py').read_bytes(),
+            (source / 'misbot_s3_provider.py').read_bytes(),
+        )
+        self.assertEqual((self.root / 'config/misbot_s3_provider.py').stat().st_mode & 0o777, 0o644)
+        self.assertEqual((source / 'misbot_s3_provider.py').stat().st_mode & 0o777, 0o600)
         self.assertTrue(provider['store_synchronous'])
         self.assertEqual(provider['config']['prefix'], 'chat-example-org/')
         self.assertEqual(provider['config']['endpoint_url'], 'https://objects.example.net')
