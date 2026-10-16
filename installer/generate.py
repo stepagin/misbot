@@ -131,6 +131,37 @@ if not (root / 'settings.env').exists() and not (root / 'settings').exists():
         preview=args.preview,
     )
 state['config_format_version'] = 2 if (root / 'settings').exists() else 1
+# Optional application preferences survive native regeneration and backup restore.
+# Runtime wiring, authentication and storage remain exclusively managed below.
+tuning_path = config / 'synapse-tuning.yaml'
+synapse_tuning = {}
+if tuning_path.exists() or tuning_path.is_symlink():
+    allowed_tuning = {
+        'allow_guest_access',
+        'auto_join_rooms',
+        'caches',
+        'default_room_version',
+        'max_image_pixels',
+        'rc_login',
+        'rc_message',
+        'rc_registration',
+        'room_prejoin_state',
+        'server_admins',
+        'suppress_key_server_warning',
+        'trusted_key_servers',
+    }
+    try:
+        if (
+            tuning_path.is_symlink()
+            or not tuning_path.is_file()
+            or tuning_path.stat().st_size > 65536
+        ):
+            raise ValueError()
+        synapse_tuning = yaml.safe_load(tuning_path.read_text())
+        if not isinstance(synapse_tuning, dict) or set(synapse_tuning) - allowed_tuning:
+            raise ValueError()
+    except (OSError, ValueError, yaml.YAMLError):
+        fail('Invalid config/synapse-tuning.yaml; use only documented application preferences')
 try:
     settings = configuration.load(root, complete=not args.initialize_env, preview=args.preview)
 except configuration_schema.InvalidConfiguration as error:
@@ -572,6 +603,7 @@ if media_mode == 's3':
             },
         }
     ]
+merge(synapse, synapse_tuning)
 dump('homeserver.yaml', synapse)
 dump(
     'synapse-log.yaml',
@@ -798,6 +830,10 @@ if mas_mode == 'local':
                 'MAS defaults must contain a YAML mapping; restore its saved file, then retry generate/up'
             )
         base.pop('database', None)
+        # Retain the installed service label alongside password schemes and policy.
+        branding = base.get('branding', {})
+        if isinstance(branding, dict) and 'service_name' in branding:
+            mas['branding']['service_name'] = branding['service_name']
         mas = merge(base, mas)
     mas['account']['password_registration_enabled'] = registration == 'true'
     mas['account']['password_registration_token_required'] = referral_policy[
